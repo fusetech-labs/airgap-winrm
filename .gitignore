@@ -39,6 +39,8 @@ settings/*.part
 # Development only (the IDE): the build and test scripts are not part of the published tool
 Build-*.ps1
 tests/
+# the capability brief (brochure.html and the PDF built from it)
+brochure/
 
 # Editor / OS noise
 Thumbs.db

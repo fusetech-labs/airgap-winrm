@@ -1,5 +1,7 @@
 ﻿# =====================================================================
 #  08-CodeTour.ps1  -  THE TRAINING CONTENT SHOWN IN THE "CODE TOUR" TAB
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  Each entry = a Title, an Explain text, the name of the function (or
 #  script block variable) whose LIVE source is printed underneath, and
@@ -35,7 +37,7 @@ $script:CodeTour = @(
     # =================================================================  PART A - START HERE
     [pscustomobject]@{ Title = 'A1. Start here - the toolkit in one page'; Source = ''; Explain = @'
 WHAT THIS TOOL IS
-  Five consoles (tabs) over ONE engine, all over WinRM on TCP 5985, all offline:
+  Five consoles (tabs) over ONE engine, all over WinRM on TCP 5985 (or 5986 over HTTPS), all offline:
     PATCHING  checks and installs Windows / .NET updates, reboots, shows roles and software
               currency, detects SQL / Exchange patch levels.
     SOFTWARE  stages, installs and updates third-party software from a catalogue (VMware
@@ -120,9 +122,12 @@ spreadsheet) is downloaded - any PC, the tool is not involved - the OPERATOR PC 
 tool runs, and the TARGET SERVERS from the group files.  Only one connection is made by the
 tool: operator PC -> server on TCP 5985, WinRM over HTTP, authenticated with Kerberos (use
 FQDNs in the group files; an IP address forces NTLM and would need TrustedHosts - never set
-that to *).  The domain controller is already in the picture for DNS and Kerberos; nothing
-new is opened.  The red box lists what the tool deliberately never uses, which is also the
-answer to "what do I need to allow through the firewall?": 5985 and nothing else.
+that to *).  Servers with an HTTPS listener: set WinRMPort = 5986 in 01-Config.ps1 and every
+call goes with -UseSSL (Test-WinRMUseSsl); the listener's certificate must chain to a CA the
+operator PC trusts and carry the server's FQDN - no check is skipped.  The domain controller
+is already in the picture for DNS and Kerberos; nothing new is opened.  The red box lists what
+the tool deliberately never uses, which is also the answer to "what do I need to allow through
+the firewall?": the one WinRM port and nothing else.
 '@ }
 
     [pscustomobject]@{ Title = 'A3. PICTURE: ports and protocols'; Source = ''; Image = 'images\2-ports-and-protocols.png'; Explain = @'
@@ -157,8 +162,12 @@ a value it does not offer, edit lib\01-Config.ps1 and start the tool again.  To 
 the console behind the GUI, e.g.  $Config.MinFreeGB = 8  - it takes effect at the next
 status check.  "Reload lists + patches" re-reads the group files and patches\ only.
   ToolName / ToolVersion / OperatorName  -> window title, banner, log header
-  WinRMPort 5985      -> the HTTP WinRM listener (5986 would be HTTPS)
-  OpenTimeoutSec      -> how long a silent server is given before we call it unreachable
+  WinRMPort 5985      -> the HTTP WinRM listener; 5986 = HTTPS, every call then goes with -UseSSL
+  OpenTimeoutSec      -> how long a silent server is given to open a session before we call it unreachable
+  SilentServerSec     -> a read-only check gives up on a server that has not answered this long after
+                         its turn began (unreachable with that reason; the others carry on) - Settings tab;
+                         a check with a limit of its own (Impact 900 s, Analysis 300 s, a command at
+                         CommandTimeoutSec) gives each server that long instead
   MaxParallel         -> servers checked at the same time (ThrottleLimit)
   RemoteStaging       -> folder created on the target where the .msu is copied (ACL locked down)
   MinFreeGB           -> below this the install is refused (DISM needs room)
@@ -172,15 +181,18 @@ status check.  "Reload lists + patches" re-reads the group files and patches\ on
   ReportFolder / DataFolder / SoeFolder / SecurityFolder -> where reports, catalogues, SOE
                          standards and the security profile / tailoring live
   ConsoleColours / ConsoleText / ConsoleNames -> each console's colours and the name it is shown by
+  BrandColour         -> the Fusetech blue: the frame round the window, the window icon (drawn at start-up,
+                         no picture file) and the favicon of every HTML page
   SafetyChecks        -> the pre-action confirmations, in the order asked (topic B8)
   ChangeSystem / ChangeSystems / ChangeRequiredFields / ChangePolicy -> the change records (S9)
   LogShowCmd / LogShowWhy / LogKeepDays / MaxLogBoxChars -> the running log and the log files
   SettingsFile        -> settings\settings.json (what the Settings tab saved)
-  Health thresholds   -> DiskWarnPercent, DiskFailGB, UptimeWarnDays, EventErrorWarn,
+  Health thresholds   -> DiskWarnPercent, DiskFailGB, DiskSmallVolumeGB, UptimeWarnDays, EventErrorWarn,
                          EventWindowHours, LogonFailWindowHours, LogonFailWarn / LogonFailFail,
                          MaxEvents, TaskFailDays, DormantMonths, CertExpiryDays,
                          TimeOffsetFailSec, MemoryWarnPercent / MemoryFailPercent,
-                         CpuWarnPercent / CpuFailPercent, CpuSampleSeconds, MaxProducts
+                         CpuWarnPercent / CpuFailPercent, CpuSampleSeconds, MaxProducts,
+                         MinLogicalProcessors / MinMemoryGB / MinCpuScore (H-HW-01, hardware fit)
 Shared state: $script:Credential (memory only, cleared when the GUI closes),
 $script:Results[<collector>][<server>] (every collector result; $script:ServerStatus IS
 $Results['Status']), $script:Groups, $script:Patches, $script:Checks (every check
@@ -249,7 +261,9 @@ For every installable file Get-PatchFileInfo reads, once, and caches in patches\
   TARGET BUILD   The name alone cannot say: Server 2016, 2019 and 2022 all use
                  "windows10.0-kb..." names.  expand.exe pulls the small .xml out of the
                  MSU (package versions like 20348.5614.1.3), or pkgProperties.txt
-                 (Installer Version="10.0.20348.x"), or the SSU cab name.  14393 = 2016,
+                 (Installer Version="10.0.20348.x"), or the SSU cab name.  A .NET rollup
+                 names no build in those: its update.mum INSIDE the cab does (the parent
+                 editions, 10.0.20348.1), read with a second expand.  14393 = 2016,
                  17763 = 2019, 20348 = 2022, 26100 = 2025.  Unknown = blocked, because
                  the file-name fallback cannot tell 2019 from 2022.
   SIGNATURE      Get-AuthenticodeSignature must say Valid AND the signer must be
@@ -259,7 +273,11 @@ Report-only types get the signature check and a column in the grid; the cell say
 "By hand" because SQL and Exchange setups need their own installers and service windows.
 Mixed groups are fine: put the 2019 and the 2022 cumulative updates in Windows\ together
 and each server gets a READY only in its own column.  DISM is the last line of defence
-anyway - it refuses a wrong package with 0x800F081E.
+for a cumulative update - it refuses a wrong one with 0x800F081E.  NOT for a .NET rollup:
+one for another build it takes as an empty wrapper, exit 0, nothing installed (field,
+2026-11: the Server 2022 rollup on a Server 2019 toolkit PC), which is why the build is
+read from inside its cab, and why an exit 0 without a reboot is checked against Get-HotFix
+on the server afterwards.
 This tool is OFFLINE: nothing is ever downloaded; you put the files there.
 '@ }
 
@@ -348,7 +366,10 @@ ALONGSIDE AN INSTALL a collector started from a read-only button skips the serve
 installed on (a WHY line names them) and never offers the credential prompt: the install's
 remaining sessions must keep the account the plan was made with.
 FAULT FINDING: the CMD line in the log shows exactly what was sent.  Typical errors:
-  "WinRM cannot complete the operation"  -> port 5985 blocked or service stopped
+  "WinRM cannot complete the operation"  -> port 5985 (or 5986) blocked or service stopped
+  "certificate ... unknown authority",
+  "... does not match the CN"            -> WinRMPort is 5986: the listener's certificate must chain to
+                                            a CA this PC trusts and carry the FQDN in the group file
   "Access is denied"                     -> account is not an admin on that server
   "Kerberos ... "                        -> use the FQDN in the group file.  Do NOT "fix"
                                             it with TrustedHosts=*; that turns off the
@@ -379,7 +400,8 @@ call so all WinRM traffic is uniform - the Health and Security collectors includ
     [pscustomobject]@{ Title = 'B7. Test-ServerWinRM - the no-auth check'; Source = 'Test-ServerWinRM'; Explain = @'
 Test-WSMan sends a WS-Management "Identify" request.  WinRM answers it anonymously,
 which is why "winrm get/enumerate" style calls worked without credentials in testing.
-It proves: DNS resolves, TCP 5985 is open, the WinRM service is running.
+It proves: DNS resolves, the WinRM port is open, the WinRM service is running - and on 5986
+that the listener's certificate is trusted here, because the probe goes with -UseSSL too.
 It does NOT prove you are allowed in - that needs Invoke-Command.
 '@ }
 
@@ -417,6 +439,9 @@ never disagree.  For every (server, file) pair, in this order:
                                      a later cumulative update already contains it)
   KB in Windows Update history   -> Installed (history)  (unless the build is BELOW the KB's: removed again)
   report-only patch type         -> By hand  (SQL, Exchange, Other: the tool never installs these)
+  a Dynamic Update (Safe OS)     -> Blocked: dynamic update  (a package for setup media and WinRE,
+                                     read from the manifest inside: Kind; a running server's reboot
+                                     undoes it - field test 2026-11)
   .NET file for another line     -> Not applicable  (the inventory's .NET line differs from the file's)
   pending reboot                 -> Blocked: reboot      (0x800F0922 territory otherwise)
   dism / TiWorker / wusa running -> Blocked: servicing   (re-check in a minute)
@@ -539,7 +564,9 @@ WSUSSCAN.cab is skipped (metadata only).  If a separate SSU cab exists it goes f
 A plain .cab in patches\Windows\ is passed straight to DISM.  .NET cumulative updates from
 patches\DotNet\ take exactly the same road.
 EXIT CODES (also in the log, one line per package):
-  0           installed, no reboot needed
+  0           installed, no reboot needed - then the KB must be in Get-HotFix or the
+              servicing store, else FAILED: a .NET rollup for another build goes in as
+              an empty wrapper with exit 0 (field, 2026-11)
   3010        installed, REBOOT REQUIRED  (success!)
   0x800F081E  NOT APPLICABLE - wrong Windows build or missing prerequisite (failure)
   0x800F0922  failed - usually pending reboot, missing SSU, or full System Reserved partition
@@ -593,6 +620,17 @@ Never automatic, and no longer "reboot whatever is ticked":
      schedules the restart with shutdown.exe /r /t 10 so the call returns before the
      connection drops - which is why the old Restart-Computer call sometimes logged
      "failed" for a server that was in fact rebooting.
+  6. The toolkit PC itself (Test-ThisComputer, lib\03-Groups.ps1: localhost, 127.0.0.1, its
+     name, its FQDN) is a managed server like any other, but nothing goes over WinRM to it:
+     Invoke-Collector runs the collector here as a local background job (Start-Job),
+     New-ToolkitSession hands the install and the software runs a LOCAL session marker that
+     Invoke-RemoteBlock and Copy-FileToSession serve on this PC (a plain Copy-Item instead of
+     slices), and Invoke-ToolkitCommand runs the reboot and the Trellix Agent script blocks in
+     this process.  No listener on the toolkit PC, no loopback rights.  Its restart closes the
+     toolkit, so the usual Reboot? question names it as this computer, it is sent last with a
+     60 s countdown (shutdown /a cancels it), and the log and the change log are written first.
+     The open run is on record (settings\patch-runs.json); the next status check after the
+     toolkit is started again finishes it.  Every status check logs a WHY line for it.
 The shutdown comment, Application event 920 and C:\PatchStaging\change-log.txt carry the reference.  Every REBOOT line in the log names the operator.  The stored status for that server is
 thrown away because it is now stale.
 '@ }
@@ -641,7 +679,12 @@ which control had denied what.  Three things came out of it:
      and a Solidifier that is enforcing then denies poqexec.exe.  Read-only: the Update
      Mode task in ePO changes the mode, never the tool.
   2. One patch per server per run (Limit-PlanToOnePatch, Settings tab, on by default): the
-     first ready file goes, the next waits for the reboot.
+     first ready file goes, the next waits for the reboot.  "First" is by what the package is
+     (Kind, read from the manifest inside each file): a separate servicing stack update, then
+     the cumulative update, then other Windows files, then .NET - never the smallest file
+     first.  In the field (2026-11) a Dynamic Update went first for being the smallest and
+     the reboot undid it, the servicing stack it needed being inside the cumulative update
+     still waiting; a Dynamic Update is now Blocked: dynamic update and never installed.
   3. This page.  "Analyse a failure (ticked)" runs RemoteFailureAnalysisScript on the
      server (read-only, lib\21-Patching-Analysis.ps1) and brings back, for the last
      AnalysisHoursBack (72) hours:
@@ -1058,7 +1101,7 @@ account names and findings: the folder is git-ignored and the footer says so.
 
     # =================================================================  PART D - HEALTH CONSOLE
     [pscustomobject]@{ Title = 'D1. RemoteHealthScript - what the Health collector reads'; Source = 'RemoteHealthScript'; Explain = @'
-"Check health (ticked, or all)" runs Status + Inventory + Health on the servers; the Health
+"Check health (ticked or all)" runs Status + Inventory + Health on the servers; the Health
 collector is this block (arguments: LogonFailWindowHours, MaxEvents, TaskFailDays,
 CertExpiryDays, the task result codes that mean "fine", the event window, CpuSampleSeconds).
 Read-only, 2-4 seconds plus the processor sample:
@@ -1091,6 +1134,14 @@ Read-only, 2-4 seconds plus the processor sample:
                      that used the most processor time over the same seconds ("name|percent of the
                      machine", from the change in TotalProcessorTime - a process the account may not
                      inspect is skipped)
+  Hw* / CpuScore     the hardware (sockets, cores, processor model and clock, machine model) and a
+                     one-thread speed score: four million random integers sorted (Array.Sort, native
+                     code, no cryptography) again and again for about a second - millions sorted a
+                     second, with CpuScoreMs the time it took.  H-HW-01 holds the logical processors,
+                     the memory and the score to MinLogicalProcessors / MinMemoryGB / MinCpuScore
+                     (Settings tab): Microsoft's minimum installs Windows, it does not patch it in a
+                     sensible time (field test 2026-11: 2 vCPU / 4 GB on a 2 GHz host at 100% for the
+                     whole window).  The grid's Hardware and Speed columns show the figures
   Errors             every query that failed, with the reason - H-COL-01 shows them, so a
                      non-admin run or a locked-down log never looks like a clean bill of health
 The same button runs the Agents collector (RemoteAgentsScript), the Settings collector
@@ -1153,21 +1204,33 @@ is compared with; a server line's own "; soe: <name>" overrides it - "Assign to 
 COMPOSING ("SOE standards" page - composing only): New -> then "Add from server..." (pick
 from a checked server's software, services, agents, features, settings and configuration
 points: Get-SoeCandidates), "Add fleet agents" (the agents and versions most servers share:
-Get-FleetAgentItems), "Add by hand..." (the item editor), or tick rows in the lower pane,
-the CONFIGURATION POINTS: data\soe-config-points.psd1 lists the registry values and config-file
-lines an SOE deployment customises per server (which WSUS, KMS, NTP, monitoring or security
-server, the DNS suffixes, SNMP contact, the page file ...); the pane shows the value a
-reference server has and "Add ticked points" turns each into the rule "every server must have
-this value".  Every addition, edit or removal is written to soe\<name>.json at once - there
-is no separate Save step.  Standards are ordinary JSON - edit in Notepad too.  The label says
-which groups use the selected standard.
+Get-FleetAgentItems), "Add by hand..." (the item editor: a Type list, under it only the boxes
+that type uses; a list wherever the value must match exactly - the agents of soe-agents.psd1,
+the keys the Settings collector writes, start types, states; for a registry or file rule the
+known configuration points fill the path and the key; a Help button; Set-SoeItemEditorType,
+Get-SoeItemProblem; a table that lays itself out at any display scaling), or tick rows in the
+lower pane, PIN FROM THE REFERENCE SERVER: what one
+checked server has.  "Show:" picks the CONFIGURATION POINTS it answers (data\soe-config-points.psd1
+lists the registry values and config-file lines an SOE deployment customises per server - which
+WSUS, KMS, NTP, monitoring or security server, the DNS suffixes, SNMP contact, the page file ...;
+a point the server does not have, Zabbix's file on a server without Zabbix, is left out so the
+pane never reads as if the agent were there - the "(all ...)" mode lists every point so a value
+can be typed), or its installed SOFTWARE with versions, AGENTS, FEATURES, SERVICES or SETTINGS;
+"Add to the standard (ticked)" turns each row into a rule (a point: "every server must have this
+value"; a product: ">= this version", through ConvertTo-SoeItem).  The reference list is refilled
+only from a console repaint, never from the box's own events (Update-SoeRefCombo: a type-ahead box
+whose items change inside its own event took the tool down in the field).  Every addition, edit
+or removal is written to soe\<name>.json at once - there is no separate Save step.  Standards are
+ordinary JSON - edit in Notepad too.  The label says which groups use the selected standard.
 COMPARING happens on the Health checks page, with "Check health": check H-SOE-01 holds each
 server to the standard on its own group-file line ("; soe: <name>", set from the list with
 "Assign SOE standard...", which writes the line), or to soe\default.json when the group
 names none (DefaultSoeStandard in 01-Config.ps1), and Compare-SoeStandard
 gives one row per item: Expected, Actual, Verdict, Light, Note.  Compare-VersionRule does the
 version arithmetic ("Compliant / Below / Above / Different / Unknown"); a registry or file
-rule is compared as plain text, with a * wildcard, or as re:<regex>.  The SOE column, the
+rule is compared as plain text, with a * wildcard, or as re:<regex> (Test-SoeRegex: a
+search, case ignored - ^ and $ make it the whole value; as the setting name of a file rule
+the pattern finds the value in the file, the first (group) of the first match).  The SOE column, the
 server's details page and the Health report show the result.  A new server joins the fleet
 when it goes green against the standard; a drifted server shows exactly which item drifted.
 '@ }
@@ -1240,13 +1303,15 @@ as on the Security Servers page), New-HealthDashboard sums up the servers shown 
 THE DIALS - Get-HealthCapacity reads one server's three figures from the Health collector:
   Processor  CpuPercent  (Win32_Processor.LoadPercentage once a second for CpuSampleSeconds, averaged)
   Memory     100 - MemoryFreePct
-  Disk       100 - the lowest free % of its volumes (the fullest one)
+  Disk       % used of the volume the disk check is about (Get-HealthWorstVolume: the one under
+             the limits, else the fullest judged - a volume smaller than DiskSmallVolumeGB, a
+             recovery partition given a letter, is listed and never moves the dot)
 and takes each one's BAND from its own check - H-CPU-01, H-MEM-01, H-DSK-01: Pass = within,
 Warn = warning, Fail = critical - so a dial can never disagree with the grid.  New-HealthGauge
 draws a 270-degree dial with System.Drawing: zones from Get-HealthThresholds (the Settings tab
-values turned into "% used"; the disk has no red zone because its critical limit is DiskFailGB,
-a size), a dot per server in its band's colour, the range from lowest to highest as a dark band
-inside, the highest reading in the middle.
+values turned into "% used"; the disk has no red zone because its critical limit needs DiskFailGB,
+a size, as well as the percentage), a dot per server in its band's colour, the range from lowest
+to highest as a dark band inside, the highest reading in the middle.
 NEEDS ATTENTION - Get-HealthAttentionRows (below) walks every shown server's check rows (from the
 cache the grid just filled) and keeps the red and amber ones, one row per check: Critical when
 any server has it red ("2 of 3, 1 critical"), else Warning; plus Unreachable and Not checked.  A
@@ -1521,12 +1586,15 @@ reason), pink = pending reboot, yellow = something READY, green = everything ins
 cyan = an OS patch run is open (INSTALLING), purple = a run ended without a result (RUN
 UNKNOWN).  One cell has its own colour: Trellix Agent, orange when the services are off.
 The Health and Security grids are built the same way through Set-GridRows: a row object
-per server, a Light column, the row colour from Get-LightColour.
+per server, the row colour from Get-LightColour (the worst check).  The Health grid has no
+Light column: each cell that stands for a check carries that check's own colour
+(Get-HealthCellColours), so a green or amber cell shows inside a row that is red for
+another finding; the Server, Group, Checked and Worst cells keep the row's colour.
 '@ }
 
     [pscustomobject]@{ Title = 'F3. Troubleshooting checklist'; Source = ''; Explain = @'
 GRID SHOWS "FAILED" / A GREY ROW FOR A SERVER (any console)
-  1. Tick it, press "Test WinRM port (no auth)" (O/S Patching tab).  No answer -> network/firewall/
+  1. Tick it, press "Test WinRM port (ticked)" (O/S Patching tab).  No answer -> network/firewall/
      service: on the server:  winrm quickconfig ; Get-Service WinRM
   2. Answers but status fails with Access is denied -> "Set credentials" (admin account).
   3. Kerberos errors -> use the FQDN in the group file.  Never set TrustedHosts=*.
@@ -1604,6 +1672,25 @@ NOTHING HAPPENS WHEN I CLICK / THE WINDOW WILL NOT CLOSE
   The status bar says what it is busy with.  Buttons are disabled on purpose while a
   job runs, and the window refuses to close until the action finishes.  The console
   window behind the GUI shows the same log in colour.
+
+A CHECK SAT ON ONE SERVER FOR MINUTES / "NO ANSWER WITHIN 180 S OF ITS TURN"
+  A server that is down, wedged, or that the account gets no answer from used to hold a
+  whole check until the collector's time limit (600 s).  Now each server has its own budget,
+  SilentServerSec (Settings tab, 180 s): one that has not answered that long after its turn
+  began is given up on its own - a grey row with that reason - and the others carry on.  A
+  check with a limit of its own (Impact 900 s, Analysis 300 s, a command at CommandTimeoutSec)
+  gives each server that long instead: a slow but working server is not a wedged one.
+  "Stop waiting" on the status bar gives up on every silent server at once.  Neither touches
+  an install or a command that may change a server: those run to their own limit.
+
+DISM SAID INSTALLED (EXIT 0) BUT THE STATUS CHECK STILL SAYS READY
+  A .NET Framework rollup for ANOTHER Windows build (the Server 2022 file on a Server 2019
+  box) is not refused by DISM: its wrapper package goes in with every part skipped as not
+  applicable, DISM returns 0, and Get-HotFix never lists the KB (field, 2026-11).  Now the
+  build is read from the update.mum inside the rollup's cab, so such a file shows
+  "Blocked: wrong OS" before anything is copied; and an install that ends with exit 0 and
+  no reboot is checked against Get-HotFix and the servicing store - a KB that is not there
+  is reported FAILED with that reason, never "Installed".  Get the rollup for the build.
 
 THE INSTALL SEEMS STUCK
   It almost never is.  Watch for the progress lines every 45 s: "CBS stage 1 out of 1 at
@@ -1761,7 +1848,7 @@ show to be read-only is read-only; everything else MAY CHANGE a server.
                <known contexts> show; route print and arp -a/-g word by word; certutil -store /
                -hashfile with plain arguments; Win32_Product (reading it repairs every MSI);
                using / #requires that load code.
-  refused      Restart-Computer and shutdown (Reboot ticked servers checks for servicing and
+  refused      Restart-Computer and shutdown (Reboot (ticked) checks for servicing and
                records event 920), and commands that wait for someone at the server's screen.
 A <placeholder> is replaced by x for the analysis, so a cheat-sheet entry is coloured by what it
 WOULD do (dark red = may change) while Run waits for the real value ("Fill in").

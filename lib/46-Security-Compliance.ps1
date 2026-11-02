@@ -1,5 +1,7 @@
 # =====================================================================
 #  46-Security-Compliance.ps1  -  THE COMPLIANCE DASHBOARD AND THE EXECUTIVE SUMMARY
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  Under the Security console's server grid (behind a divider): how
 #  compliant the servers shown are, as two donut charts -

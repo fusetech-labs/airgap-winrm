@@ -1,5 +1,7 @@
 ﻿# =====================================================================
 #  12-Settings.ps1  -  THE SETTINGS THE OPERATOR CHANGES IN THE WINDOW
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  lib\01-Config.ps1 holds the defaults.  The Settings tab
 #  (60-Console-Settings.ps1) saves what the operator changes in
@@ -49,11 +51,13 @@ $script:SettingSpecs = @(
     @{ Key = 'CleanupStaging';       Section = 'Safety'; Type = 'bool'; Label = 'Delete the copied file on the server after a successful install' }
     @{ Key = 'RequireSolidcoreUpdateMode'; Section = 'Safety'; Type = 'bool'; Label = 'Block OS patch installs and reboots while Trellix Solidcore is enforcing'; Tip = 'Trellix Solidcore must say Update (or Disabled) now and on reboot, else every KB shows Blocked: Solidcore and the Reboot button asks separately. Software installs do not read the Solidcore mode.' }
     @{ Key = 'OnePatchPerRun';       Section = 'Safety'; Type = 'bool'; Label = 'One patch per server per run - the next one waits for the reboot' }
+    @{ Key = 'SilentServerSec';      Section = 'Safety'; Type = 'int'; Min = 30; Max = 1800; Label = 'Give up on a server that has not answered a check after (seconds)'; Tip = 'Every read-only check (status, health, security, inventory ...): a server that has not answered this long after its turn began is shown as unreachable with that reason, and the other servers carry on. A down or wedged server, or one the account gets no answer from, no longer holds the whole check. A check with a time limit of its own (Impact, Analysis, a command at its own setting) gives each server that long instead. Never applied to an install or to a command that may change a server.' }
     @{ Key = 'TrellixInUse';         Section = 'Safety'; Type = 'bool'; Label = 'Trellix is used here (its columns, buttons and checks)'; Tip = 'Ticked (the default): the Solidcore and Trellix Agent columns, the "Stop the Trellix Agent services first" boxes, the Start / Stop Trellix Agent buttons, the agent warnings and the Trellix pre-action confirmation. Unticked, for a site without Trellix: all of those go, at once. The Solidcore guard stays - it acts only where Solidcore is found on a server.' }
     @{ Key = 'StopTrellixAgentForInstall'; Section = 'Safety'; Type = 'bool'; Label = 'Stop the Trellix Agent services before an install'; Tip = 'The box "Stop the Trellix Agent services first" on the O/S Patching and Software tabs starts ticked: masvc and macmnsvc are set to Disabled and stopped before PATCH IT! and INSTALL / UPDATE.' }
     @{ Key = 'OperatorName';         Section = 'Safety'; Type = 'text'; MaxLen = 30; Required = $true; Label = 'Operator name (window title and banner, from the next start)' }
     @{ Key = 'DiskWarnPercent';      Section = 'Health'; Type = 'int'; Min = 1; Max = 90; Label = 'Disk: Warn below this % free' }
-    @{ Key = 'DiskFailGB';           Section = 'Health'; Type = 'int'; Min = 1; Max = 500; Label = 'Disk: Fail below this many GB free' }
+    @{ Key = 'DiskFailGB';           Section = 'Health'; Type = 'int'; Min = 1; Max = 500; Label = 'Disk: Fail below this many GB free (and below the Warn %)'; Tip = 'Critical needs both limits crossed: under this many GB free and under the Warn percentage. A small volume is judged by its percentage (a 4 GB volume can never hold 5 GB free); a large one is not critical while it still holds the GB.' }
+    @{ Key = 'DiskSmallVolumeGB';    Section = 'Health'; Type = 'int'; Min = 0; Max = 100; Label = 'Disk: a volume smaller than this is listed, not judged (GB)'; Tip = 'A recovery or system partition that was given a drive letter is a fixed volume too; under this size it is listed in the evidence and never sets the verdict or moves the disk dial. 0 = judge every volume.' }
     @{ Key = 'MemoryWarnPercent';    Section = 'Health'; Type = 'int'; Min = 1; Max = 90; Label = 'Memory: Warn below this % free' }
     @{ Key = 'MemoryFailPercent';    Section = 'Health'; Type = 'int'; Min = 1; Max = 90; Label = 'Memory: Fail below this % free' }
     @{ Key = 'CpuWarnPercent';       Section = 'Health'; Type = 'int'; Min = 1; Max = 100; Label = 'Processor: Warn at or above this % busy' }
@@ -71,6 +75,9 @@ $script:SettingSpecs = @(
     @{ Key = 'UnknownStaleMonths';   Section = 'Health'; Type = 'int'; Min = 1; Max = 120; Label = 'Unknown software: Stale after (months)' }
     @{ Key = 'UnknownAgeingMonths';  Section = 'Health'; Type = 'int'; Min = 1; Max = 240; Label = 'Unknown software: Ageing after (months)' }
     @{ Key = 'GpoStaleHours';        Section = 'Health'; Type = 'int'; Min = 2; Max = 720; Label = 'Group Policy: Warn when not refreshed for (hours)' }
+    @{ Key = 'MinLogicalProcessors'; Section = 'Health'; Type = 'int'; Min = 1; Max = 256; Label = 'Hardware: Warn below this many logical processors' }
+    @{ Key = 'MinMemoryGB';          Section = 'Health'; Type = 'int'; Min = 1; Max = 4096; Label = 'Hardware: Warn below this much memory (GB)' }
+    @{ Key = 'MinCpuScore';          Section = 'Health'; Type = 'int'; Min = 0; Max = 1000; Label = 'Hardware: Warn below this speed score (0 = show only)'; Tip = 'The Health collector sorts four million integers for about a second on one processor of the server; the score is millions sorted a second. A 3.2 GHz Xeon E5 v4 core scores about 12, a 2 GHz core on a busy host well under 6. Run a few checks, read the Speed column, then set the line where patching became too slow.' }
     @{ Key = 'ImpactDays';           Section = 'Security'; Type = 'int'; Min = 1; Max = 365; Label = 'Impact checks look back this many days' }
 )
 
@@ -296,6 +303,7 @@ function Get-SettingsWeakening {
     if ($New.ContainsKey('TreatPendingFileRenameAsReboot') -and $script:Config.TreatPendingFileRenameAsReboot -and -not $New['TreatPendingFileRenameAsReboot']) { $weaker += 'PendingFileRenameOperations no longer counts as a pending reboot: an install is no longer blocked by it (applies at the next status check)' }
     # a lower free-disk refusal lets an install start on a fuller system drive (R6-C15)
     if ($New.ContainsKey('MinFreeGB') -and [int]$New['MinFreeGB'] -lt [int]$script:Config.MinFreeGB) { $weaker += ('an install is refused only below {0} GB free on C: (was {1} GB)' -f $New['MinFreeGB'], $script:Config.MinFreeGB) }
+    if ($New.ContainsKey('DiskSmallVolumeGB') -and [int]$New['DiskSmallVolumeGB'] -gt [int]$script:Config.DiskSmallVolumeGB) { $weaker += ('a volume smaller than {0} GB is no longer judged by the disk space check (was {1} GB)' -f $New['DiskSmallVolumeGB'], $script:Config.DiskSmallVolumeGB) }
     if ($New.ContainsKey('OnePatchPerRun') -and $script:Config.OnePatchPerRun -and -not $New['OnePatchPerRun']) { $weaker += 'several patches may go into one server in one run again (the second one lands on the first one''s pending reboot)' }
     if ($New.ContainsKey('TrellixInUse') -and $script:Config.TrellixInUse -and -not $New['TrellixInUse']) {
         $w = 'Trellix is no longer treated as in use: the Trellix Agent services are not stopped before an install, the Trellix confirmation is not asked, and the Trellix columns, boxes, buttons and warnings go (the Solidcore guard stays)'

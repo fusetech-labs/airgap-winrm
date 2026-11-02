@@ -1,5 +1,7 @@
 ﻿# =====================================================================
 #  30-Console-Health.ps1  -  THE HEALTH CONSOLE (tab 2)
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  Three pages inside the tab:
 #    HEALTH CHECKS  - read-only checks per server from the Health, Status,
@@ -354,12 +356,41 @@ $script:RemoteHealthScript = {
         }
     } catch { $errors += 'processor: ' + $_.Exception.Message }
 
+    # The hardware the server runs on (sockets, cores, processor model and clock, the machine model) and a one-thread speed
+    # score: four million random integers sorted (Array.Sort - native code, no cryptography, so FIPS mode changes nothing)
+    # again and again for about a second on one processor; the score is millions sorted a second.  Microsoft's minimum
+    # installs Windows; H-HW-01 says whether this box can also patch it in a sensible time (field test 2026-11: 2 vCPU /
+    # 4 GB on a 2 GHz host spent the window at 100% processor, and every reference had called that enough).
+    $hwSockets = ''; $hwCores = ''; $hwCpuName = ''; $hwClockMHz = ''; $hwModel = ''; $cpuScore = ''; $cpuScoreMs = ''
+    try {
+        $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+        $hwSockets = [int]$cs.NumberOfProcessors
+        $hwModel = ((('{0} {1}' -f [string]$cs.Manufacturer, [string]$cs.Model) -replace '[\r\n|]', ' ') -replace '\s+', ' ').Trim()
+        $procs = @(Get-CimInstance -ClassName Win32_Processor)
+        if ($procs.Count -gt 0) {
+            $hwCores = 0; foreach ($pr in $procs) { $hwCores += [int]$pr.NumberOfCores }
+            $hwCpuName = (([string]$procs[0].Name -replace '[\r\n|]', ' ') -replace '\s+', ' ').Trim()
+            $hwClockMHz = [int]$procs[0].MaxClockSpeed
+        }
+    } catch { $errors += 'hardware: ' + $_.Exception.Message }
+    try {
+        $rnd = New-Object System.Random 12345
+        $bytes = New-Object byte[] (16MB); $rnd.NextBytes($bytes)
+        $src = New-Object int[] (4MB); [System.Buffer]::BlockCopy($bytes, 0, $src, 0, $bytes.Length)
+        $work = New-Object int[] (4MB)
+        $bench = [System.Diagnostics.Stopwatch]::StartNew(); $sorts = 0
+        while ($sorts -lt 1 -or $bench.Elapsed.TotalMilliseconds -lt 1000) { [System.Array]::Copy($src, $work, $src.Length); [System.Array]::Sort($work); $sorts++ }
+        $cpuScoreMs = [int]$bench.Elapsed.TotalMilliseconds
+        $cpuScore = [math]::Round($sorts * $src.Length / 1e6 / $bench.Elapsed.TotalSeconds, 1)
+    } catch { $errors += 'speed score: ' + $_.Exception.Message }
+
     [pscustomobject]@{
         Computer = $env:COMPUTERNAME; WindowHours = $WindowHours; EventWindowHours = $EventHours; TaskDays = $TaskDays; CertDays = $CertDays   # the windows this read used: the verdict texts quote these, not the setting of the moment
         StoppedAuto = $stopped; FailingTasks = $tasks; LogonFailures = $logons; LogonFailureTotal = $logonTotal; Lockouts = $lockouts
         Disks = $disks; ErrorCount = $errorCount; ErrorTop = $errorTop; TimeSource = $timeSource; TimeOffsetSec = $timeOffset; LastSyncHours = $lastSyncHours
         Certs = $certs; MemoryFreePct = $memFreePct; MemoryFreeMB = $memFreeMB; MemoryTotalGB = $memTotalGB; MemoryTop = $memTop
         CpuPercent = $cpuPct; CpuCount = $cpuCount; CpuSeconds = [math]::Max(1, $CpuSeconds); CpuTop = $cpuTop; Errors = $errors
+        HwSockets = $hwSockets; HwCores = $hwCores; HwCpuName = $hwCpuName; HwClockMHz = $hwClockMHz; HwModel = $hwModel; CpuScore = $cpuScore; CpuScoreMs = $cpuScoreMs
     }
 }
 
@@ -785,6 +816,39 @@ New-Check -Id 'H-SW-01' -Console 'Health' -Group 'Software' -Title 'No dormant s
         return (Warn ("{0} product(s) installed over {1} months ago with no service, process or task using them - verify" -f $dormant.Count, $months) -Items $dormant)
     } -Fix 'Confirm with the application owner, then uninstall; or add the product to DormantIgnore in data\benign-services.psd1 if it is used in another way.'
 
+function Read-HealthVolume {
+    # One line of the Health collector's Disks ("C:|199.5|55.6|27.9": drive, size GB, free GB, free %) as an object with
+    # its verdict against the Settings tab.  $null when the line has no readable figures (the collector writes 12.5,
+    # never 12,5 - ConvertTo-HealthNumber reads it invariantly).
+    param([string]$Line)
+    $f = $Line -split '\|'
+    if ($f.Count -lt 4) { return $null }
+    $size = ConvertTo-HealthNumber $f[1]; $free = ConvertTo-HealthNumber $f[2]; $pct = ConvertTo-HealthNumber $f[3]
+    if ($null -eq $size -or $null -eq $free -or $null -eq $pct) { return $null }
+    return [pscustomobject]@{ Drive = $f[0]; SizeGB = [double]$size; FreeGB = [double]$free; FreePct = [double]$pct; UsedPct = 100.0 - [double]$pct
+                              Verdict = (Get-DiskVolumeVerdict -SizeGB $size -FreeGB $free -FreePct $pct); Text = "$($f[0]) $($f[2])/$($f[1]) GB free ($($f[3])%)" }
+}
+
+function Get-DiskVolumeVerdict {
+    # One volume against the Settings tab.  'Skip' for a volume smaller than DiskSmallVolumeGB - a recovery or system
+    # partition that was given a letter: listed, never judged (field 2026-11: a 0.5 GB recovery volume made every check red).
+    # Fail needs BOTH limits crossed - under DiskFailGB free AND under DiskWarnPercent - so a volume that cannot hold the
+    # GB is judged by its percentage and a large one is not red while it still holds the GB; Warn is the percentage alone.
+    param([double]$SizeGB, [double]$FreeGB, [double]$FreePct)
+    $cfg = $script:Config
+    if ($SizeGB -lt [double]$cfg.DiskSmallVolumeGB) { return 'Skip' }
+    if ($FreePct -lt [double]$cfg.DiskWarnPercent) { if ($FreeGB -lt [double]$cfg.DiskFailGB) { return 'Fail' } else { return 'Warn' } }
+    return 'Pass'
+}
+
+function Get-HealthVolumes {
+    # Every volume of one server's Health result, worst first: Fail, then Warn, then Pass by fullest, the skipped ones last
+    # - so [0] is the volume the check is about.  Empty when nothing was read.
+    param($Health)
+    $vols = @(foreach ($line in @($Health.Disks)) { $v = Read-HealthVolume -Line ([string]$line); if ($v) { $v } })
+    return @($vols | Sort-Object @{ Expression = { switch ($_.Verdict) { 'Fail' { 0 } 'Warn' { 1 } 'Pass' { 2 } default { 3 } } } }, @{ Expression = { $_.UsedPct }; Descending = $true })
+}
+
 New-Check -Id 'H-DSK-01' -Console 'Health' -Group 'Capacity' -Title 'Disk space' -Severity 'High' -Needs 'Health' `
     -Test {
         param($c)
@@ -792,16 +856,18 @@ New-Check -Id 'H-DSK-01' -Console 'Health' -Group 'Capacity' -Title 'Disk space'
         if ($err) { return (Warn "the volumes could not be read: $err") }
         $n = @($c.Health.Disks).Count
         if ($n -eq 0) { return (Warn 'no fixed volume was read - a server always has one') }
-        $worst = 'Pass'; $parts = @()
-        foreach ($d in @($c.Health.Disks)) {
-            $f = $d -split '\|'; $parts += "$($f[0]) $($f[2])/$($f[1]) GB free ($($f[3])%)"
-            $freeGb = ConvertTo-HealthNumber $f[2]; $freePct = ConvertTo-HealthNumber $f[3]   # invariant: the collector writes 12.5, never 12,5
-            if ($null -eq $freeGb -or $null -eq $freePct) { return (Warn "a volume's figures could not be read: '$d'") }
-            if ($freeGb -lt $script:Config.DiskFailGB) { $worst = 'Fail' } elseif ($freePct -lt $script:Config.DiskWarnPercent -and $worst -ne 'Fail') { $worst = 'Warn' }
+        $vols = @(Get-HealthVolumes -Health $c.Health)
+        if ($vols.Count -lt $n) { return (Warn ("a volume's figures could not be read: '{0}'" -f (@(@($c.Health.Disks) | Where-Object { $null -eq (Read-HealthVolume -Line ([string]$_)) })[0]))) }
+        $cfg = $script:Config
+        $parts = @(foreach ($v in $vols) { $v.Text + $(switch ($v.Verdict) { 'Fail' { ' - critical' } 'Warn' { ' - warning' } 'Skip' { " - smaller than $($cfg.DiskSmallVolumeGB) GB, not judged" } default { '' } }) })
+        $judged = @($vols | Where-Object { $_.Verdict -ne 'Skip' }).Count
+        $note = ''; if ($judged -lt $n) { $note = '; {0} small volume(s) listed, not judged' -f ($n - $judged) }
+        if ($judged -eq 0) { return (Warn ("every volume is smaller than {0} GB - a server always has a system volume" -f $cfg.DiskSmallVolumeGB) -Items $parts) }
+        switch ($vols[0].Verdict) {
+            'Fail' { return (Fail ("a volume is under {0} GB free and under {1}% ({2} volume(s) checked{3})" -f $cfg.DiskFailGB, $cfg.DiskWarnPercent, $judged, $note) -Items $parts) }
+            'Warn' { return (Warn ("a volume is below {0}% free ({1} volume(s) checked{2})" -f $cfg.DiskWarnPercent, $judged, $note) -Items $parts) }
         }
-        if ($worst -eq 'Fail') { return (Fail ("a volume has less than {0} GB free ({1} volume(s) checked)" -f $script:Config.DiskFailGB, $n) -Items $parts) }
-        if ($worst -eq 'Warn') { return (Warn ("a volume is below {0}% free ({1} volume(s) checked)" -f $script:Config.DiskWarnPercent, $n) -Items $parts) }
-        return (Pass ("{0} volume(s), all above the thresholds" -f $n) -Items $parts)
+        return (Pass ("{0} volume(s), all above the thresholds{1}" -f $judged, $note) -Items $parts)
     } -Fix 'Clear logs and temp files, extend the volume, or move data; a cumulative update needs several GB free on C:.'
 
 New-Check -Id 'H-UPT-01' -Console 'Health' -Group 'Capacity' -Title 'Uptime and pending reboot' -Needs 'Status' `
@@ -890,6 +956,44 @@ New-Check -Id 'H-CPU-01' -Console 'Health' -Group 'Capacity' -Title 'Processor l
         if ($pct -ge $script:Config.CpuWarnPercent) { return (Warn ('{0}; at or above {1}%' -f $text, $script:Config.CpuWarnPercent) -Items $top) }
         return (Pass $text)
     } -Fix 'Check again to see whether it stays busy; then Task Manager or Resource Monitor on the server (the busiest processes are named above). A scan, a backup or Windows Update can keep a server busy for a while.'
+
+function Get-HealthHardwareLine {
+    # The hardware line of a Health result: processors, cores, model and clock, memory, the machine model, and the
+    # one-thread speed score with how it was measured.  '' for a reading from before the collector had these fields.
+    param($Health)
+    if (-not $Health -or -not $Health.PSObject.Properties['HwSockets']) { return '' }
+    $cpus = ConvertTo-HealthNumber $Health.CpuCount; $gb = ConvertTo-HealthNumber $Health.MemoryTotalGB; $score = ConvertTo-HealthNumber $Health.CpuScore
+    $text = '{0} logical processor(s) ({1} socket(s), {2} core(s), {3}, {4} MHz), {5} GB, {6}' -f $(if ($null -ne $cpus) { [int]$cpus } else { '?' }), $Health.HwSockets, $Health.HwCores, $Health.HwCpuName, $Health.HwClockMHz, $(if ($null -ne $gb) { $gb } else { '?' }), $Health.HwModel
+    if ($null -ne $score) { $text += ('; one-thread speed score {0} (over {1} ms, the processor {2}% busy at the time)' -f $score, $Health.CpuScoreMs, $Health.CpuPercent) }
+    else { $err = Get-HealthReadError -Health $Health -Prefix 'speed score:'; $text += '; no speed score' + $(if ($err) { ' (' + $err + ')' } else { '' }) }
+    return $text
+}
+
+function Get-HealthHardwareText {
+    # The grid's Hardware cell: "2 cpu, 4 GB" (logical processors and memory, a physical box the same as a VM)
+    param($Health)
+    if (-not $Health) { return '' }
+    $cpus = ConvertTo-HealthNumber $Health.CpuCount; $gb = ConvertTo-HealthNumber $Health.MemoryTotalGB
+    if ($null -eq $cpus -and $null -eq $gb) { return '' }
+    return ('{0} cpu, {1} GB' -f $(if ($null -ne $cpus) { [int]$cpus } else { '?' }), $(if ($null -ne $gb) { $gb } else { '?' }))
+}
+
+New-Check -Id 'H-HW-01' -Console 'Health' -Group 'Capacity' -Title 'Hardware fit for patching' -Needs 'Health' `
+    -Why 'Microsoft''s minimum (two processors, two GB) installs Windows; it does not patch it in a sensible time. In the field a 2 vCPU, 4 GB server on a 2 GHz host spent its patch window at 100% processor while every reference called that enough. The three lines are on the Settings tab (Health).' `
+    -Test {
+        param($c)
+        $h = $c.Health
+        if (-not $h.PSObject.Properties['HwSockets']) { return (Warn 'hardware figures were not read - a reading from an older version of the collector; check again') }
+        $cpus = ConvertTo-HealthNumber $h.CpuCount; $gb = ConvertTo-HealthNumber $h.MemoryTotalGB; $score = ConvertTo-HealthNumber $h.CpuScore
+        if ($null -eq $cpus -or $null -eq $gb) { return (Warn 'the processor count or the memory size was not read - see H-COL-01 for the collector error') }
+        $text = Get-HealthHardwareLine -Health $h
+        $short = @()
+        if ($cpus -lt [double]$script:Config.MinLogicalProcessors) { $short += ('{0} logical processor(s), below the {1} the Settings tab expects (MinLogicalProcessors)' -f [int]$cpus, $script:Config.MinLogicalProcessors) }
+        if ($gb -lt [double]$script:Config.MinMemoryGB) { $short += ('{0} GB of memory, below the {1} GB the Settings tab expects (MinMemoryGB)' -f $gb, $script:Config.MinMemoryGB) }
+        if ($null -ne $score -and [double]$script:Config.MinCpuScore -gt 0 -and $score -lt [double]$script:Config.MinCpuScore) { $short += ('one-thread speed score {0}, below the {1} the Settings tab expects (MinCpuScore): a slow core, or a host with no time to give - patching will crawl' -f $score, $script:Config.MinCpuScore) }
+        if ($short.Count -gt 0) { return (Warn ('under the hardware line: ' + $text) -Items $short) }
+        return (Pass $text)
+    } -Fix 'Under-spec hardware breaks nothing, it makes everything slow: a cumulative update on two slow vCPUs and 4 GB runs for an hour or more while the agents compete for the same processor. Give the VM more memory and vCPUs where the host has them to spare, or move it to a host with faster cores - a cumulative update is largely one thread, so a slow core stays slow however many of them there are. Patch such servers in smaller waves, in their own window. The Speed column shows what the fleet scores after a few checks; set the three lines on the Settings tab from that.'
 
 # ---- Group Policy (collector 'Gpo', lib\13-GroupPolicy.ps1) ----
 New-Check -Id 'H-GPO-01' -Console 'Health' -Group 'Group Policy' -Title 'Group Policy applies without errors' -Severity 'High' -Needs 'Gpo' `
@@ -1244,14 +1348,35 @@ function Compare-SoeStandard {
 # ---------------------------------------------------------------------
 #  Health grid rows + report
 # ---------------------------------------------------------------------
+function Get-HealthCellColours {
+    # The colour of every grid cell that stands for a check: the check's own light, so a green or amber cell shows as
+    # such in a row that is red for another finding.  The row colour is the worst light; a cell without a check behind
+    # it (Server, Group, Checked, Worst) keeps it.  The three counts take their own colour when above zero.
+    param([object[]]$Checks, $Counts)
+    $lightOf = @{}
+    foreach ($r in @($Checks)) { $lightOf[[string]$r.Id] = [string]$r.Light }
+    $cells = @{}
+    foreach ($pair in @(@('Services', 'H-SVC-01'), @('Tasks', 'H-TSK-01'), @('Failed logons', 'H-LOG-01'), @('Lockouts', 'H-LOG-02'), @('Dormant', 'H-SW-01'), @('SOE', 'H-SOE-01'), @('Hardware', 'H-HW-01'), @('Speed', 'H-HW-01'), @('CPU', 'H-CPU-01'), @('RAM used', 'H-MEM-01'), @('Disk free (min)', 'H-DSK-01'), @('Up (d)', 'H-UPT-01'), @('Errors', 'H-EVT-01'), @('Clock', 'H-TIM-01'))) {
+        if ($lightOf.ContainsKey($pair[1])) { $cells[$pair[0]] = Get-LightColour $lightOf[$pair[1]] }
+    }
+    $gpo = @($Checks | Where-Object { [string]$_.Id -like 'H-GPO-*' })   # three checks behind one column: the worst of them
+    if ($gpo.Count -gt 0) { $cells['GPO'] = Get-LightColour (Get-WorstLight -Rows $gpo) }
+    if ($Counts) {
+        if ([int]$Counts.Red -gt 0) { $cells['Red'] = Get-LightColour 'Red' }
+        if ([int]$Counts.Amber -gt 0) { $cells['Amber'] = Get-LightColour 'Amber' }
+        if ([int]$Counts.Green -gt 0) { $cells['Green'] = Get-LightColour 'Green' }
+    }
+    return $cells
+}
+
 function Get-HealthSummaryRows {
     param([string[]]$Servers)
     $rows = @()
     foreach ($name in $Servers) {
         $h = Get-CollectorResult -Name 'Health' -Server $name
         $g = Get-ServerGroup -Name $name
-        if (-not $h) { $rows += [pscustomobject]@{ Server = $name; Group = $(if ($g) { $g.Name } else { '' }); Light = 'Grey'; Checked = ''; Red = ''; Amber = ''; Green = ''; Services = ''; Tasks = ''; 'Failed logons' = ''; Lockouts = ''; Dormant = ''; SOE = ''; GPO = ''; CPU = ''; 'RAM used' = ''; 'Disk free (min)' = ''; 'Up (d)' = ''; 'Errors' = ''; 'Clock' = ''; Worst = 'not checked' }; continue }
-        if (-not $h.Reachable) { $rows += [pscustomobject]@{ Server = $name; Group = $(if ($g) { $g.Name } else { '' }); Light = 'Grey'; Checked = $h.Checked.ToString('HH:mm:ss'); Red = ''; Amber = ''; Green = ''; Services = ''; Tasks = ''; 'Failed logons' = ''; Lockouts = ''; Dormant = ''; SOE = ''; GPO = ''; CPU = ''; 'RAM used' = ''; 'Disk free (min)' = ''; 'Up (d)' = ''; 'Errors' = ''; 'Clock' = ''; Worst = 'unreachable: ' + $h.Error }; continue }
+        if (-not $h) { $rows += [pscustomobject]@{ Server = $name; Group = $(if ($g) { $g.Name } else { '' }); Light = 'Grey'; Checked = ''; Red = ''; Amber = ''; Green = ''; Services = ''; Tasks = ''; 'Failed logons' = ''; Lockouts = ''; Dormant = ''; SOE = ''; GPO = ''; Hardware = ''; Speed = ''; CPU = ''; 'RAM used' = ''; 'Disk free (min)' = ''; 'Up (d)' = ''; 'Errors' = ''; 'Clock' = ''; Worst = 'not checked' }; continue }
+        if (-not $h.Reachable) { $rows += [pscustomobject]@{ Server = $name; Group = $(if ($g) { $g.Name } else { '' }); Light = 'Grey'; Checked = $h.Checked.ToString('HH:mm:ss'); Red = ''; Amber = ''; Green = ''; Services = ''; Tasks = ''; 'Failed logons' = ''; Lockouts = ''; Dormant = ''; SOE = ''; GPO = ''; Hardware = ''; Speed = ''; CPU = ''; 'RAM used' = ''; 'Disk free (min)' = ''; 'Up (d)' = ''; 'Errors' = ''; 'Clock' = ''; Worst = 'unreachable: ' + $h.Error }; continue }
         $checks = @(Get-CheckRows -Console 'Health' -Server $name)
         $c = Get-LightCounts -Rows $checks
         $worst = @($checks | Where-Object { $_.Light -eq 'Red' } | Select-Object -First 2 | ForEach-Object { $_.Title })
@@ -1259,12 +1384,10 @@ function Get-HealthSummaryRows {
         $s = $script:ServerStatus[$name]
         $benign = @((Get-BenignData).Services)
         $svcBad = @($h.StoppedAuto | Where-Object { -not (Test-BenignService -Name (($_ -split '\|')[0]) -List $benign) }).Count
-        # the fullest disk: "28.4% free (C:)"
+        # the volume the disk check is about: "28.4% free (C:)" - the fullest one judged (a small volume is listed, not judged)
         $diskMin = ''
-        if (@($h.Disks).Count -gt 0) {
-            $fullest = @($h.Disks | ForEach-Object { $f = $_ -split '\|'; [pscustomobject]@{ Drive = $f[0]; Pct = (ConvertTo-HealthNumber $f[3]) } } | Where-Object { $null -ne $_.Pct } | Sort-Object Pct | Select-Object -First 1)[0]
-            $diskMin = '{0}% free ({1})' -f $fullest.Pct, $fullest.Drive
-        }
+        $vol = Get-HealthWorstVolume -Health $h
+        if ($vol) { $diskMin = '{0}% free ({1})' -f $vol.FreePct, $vol.Drive }
         # the clock against its time source: "in sync" within a second, otherwise the offset
         $clock = 'unknown'
         $offset = ConvertTo-HealthNumber $h.TimeOffsetSec   # invariant (R6-D02)
@@ -1292,8 +1415,11 @@ function Get-HealthSummaryRows {
             # a count whose query failed is "not read", never 0 (a Security log the account cannot read gave 0 failed logons, R6-D04)
             Services = $(if (Get-HealthReadError -Health $h -Prefix 'services:') { 'not read' } else { $svcBad }); Tasks = $(if (Get-HealthReadError -Health $h -Prefix 'tasks:') { 'not read' } else { @($h.FailingTasks).Count })
             'Failed logons' = $(if (Get-HealthReadError -Health $h -Prefix 'failed logons:') { 'not read' } else { $h.LogonFailureTotal }); Lockouts = $(if (Get-HealthReadError -Health $h -Prefix 'lockouts:') { 'not read' } else { @($h.Lockouts).Count }); Dormant = $dCount; SOE = $soe; GPO = (Get-GpoSummaryText -Server $name)
+            # the hardware and the one-thread speed score (H-HW-01): a reading from before the collector had them shows blank
+            Hardware = (Get-HealthHardwareText -Health $h); Speed = $(if ($h.PSObject.Properties['CpuScore'] -and $null -ne (ConvertTo-HealthNumber $h.CpuScore)) { [string]$h.CpuScore } else { '' })
             CPU = (Format-HealthPercent $h.CpuPercent); 'RAM used' = (Format-HealthPercent $h.MemoryFreePct -Invert); 'Disk free (min)' = $diskMin; 'Up (d)' = $(if ($s) { $s.UptimeDays } else { '' }); 'Errors' = $h.ErrorCount; 'Clock' = $clock
             Worst = ($worst -join '; ')
+            Cells = (Get-HealthCellColours -Checks $checks -Counts $c)   # each check's cell in its own colour (Set-GridRows -CellColourProperty)
         }
     }
     return $rows
@@ -1303,7 +1429,7 @@ function Get-HealthDetailsHtml {
     # The double-click page for one server: every check with its evidence and fix, then what the collector read.
     param([string]$Server)
     $h = Get-CollectorResult -Name 'Health' -Server $Server
-    if (-not $h) { return (New-DetailsHtml -Title "Health: $Server" -Console 'Health' -Subtitle 'not checked yet - press "Check health (ticked, or all)"') }
+    if (-not $h) { return (New-DetailsHtml -Title "Health: $Server" -Console 'Health' -Subtitle 'not checked yet - press "Check health (ticked or all)"') }
     if (-not $h.Reachable) { return (New-DetailsHtml -Title "Health: $Server" -Console 'Health' -Subtitle ('unreachable: ' + $h.Error)) }
     $checks = @(Get-CheckRows -Console 'Health' -Server $Server | ForEach-Object {
         [pscustomobject]@{ Light = $_.Light; Id = $_.Id; Check = $_.Title; Evidence = $_.Evidence; Summary = $_.Summary; Items = $_.Items; 'How to fix' = $(if ($_.Light -in 'Red', 'Amber') { $_.Fix } else { '' }) } })
@@ -1312,13 +1438,20 @@ function Get-HealthDetailsHtml {
     $services = @(ConvertFrom-PipeLines -Lines $h.StoppedAuto -Columns @('Name', 'Display', 'Start mode', 'State', 'Account', 'Gone', 'Program') | ForEach-Object {
         $_ | Add-Member -NotePropertyName 'Benign list' -NotePropertyValue $(if (Test-BenignService -Name $_.Name -List $benign) { 'yes - not counted' } else { '' }) -PassThru |
             Add-Member -NotePropertyName 'Program exists' -NotePropertyValue $(if ($_.Gone -eq '1') { 'NO - left behind by an uninstall' } elseif ($_.Gone -eq '0') { 'yes' } else { '' }) -PassThru })
-    $agents = @(Get-AgentRows -Server $Server | ForEach-Object { [pscustomobject]@{ Agent = $_.Name; Installed = $_.Installed; Running = $_.Running; Version = $_.Version; Detail = $_.Detail } })
+    # the agents FOUND on the server; the ones looked for and not there are a count, not rows (field 2026-11: 11 "False" rows
+    # said nothing about the server)
+    $agentsAll = @(Get-AgentRows -Server $Server)
+    $agents = @($agentsAll | Where-Object { $_.Installed } | ForEach-Object { [pscustomobject]@{ Agent = $_.Name; Running = $(if ($_.Running) { 'yes' } else { 'no' }); Version = $_.Version; Detail = $_.Detail } })
+    $agentNote = 'The agents found on the server; data\soe-agents.psd1 lists the ones looked for.'
+    if ($agentsAll.Count -gt 0) { $agentNote = ('The agents found on the server: {0} of the {1} looked for (data\soe-agents.psd1); the other {2} are not installed and not listed.' -f $agents.Count, $agentsAll.Count, ($agentsAll.Count - $agents.Count)) }
+    else { $agentNote = 'Not scanned yet, or the scan could not run: Check health reads the agents (data\soe-agents.psd1 lists the ones looked for).' }
     $facts = @(
         @('Collected', $h.Checked.ToString('yyyy-MM-dd HH:mm:ss')),
         @('Checks', ('{0} red, {1} amber, {2} green' -f $c.Red, $c.Amber, $c.Green)),
         @('Logon window', "$($h.WindowHours) h"), @('Event window', "$($h.EventWindowHours) h"),
         @('Time source', [string]$h.TimeSource), @('Clock offset', "$($h.TimeOffsetSec) s (last sync $($h.LastSyncHours) h ago)"),
-        @('Memory free', "$($h.MemoryFreePct) % ($($h.MemoryFreeMB) MB of $($h.MemoryTotalGB) GB)"), @('Processor', "$($h.CpuPercent) % busy over $($h.CpuSeconds) s, $($h.CpuCount) logical processor(s)"))
+        @('Memory free', "$($h.MemoryFreePct) % ($($h.MemoryFreeMB) MB of $($h.MemoryTotalGB) GB)"), @('Processor', "$($h.CpuPercent) % busy over $($h.CpuSeconds) s, $($h.CpuCount) logical processor(s)"),
+        @('Hardware', $(if (Get-HealthHardwareLine -Health $h) { Get-HealthHardwareLine -Health $h } else { 'not read - a reading from an older version of the collector' })))
     $sections = @(
         @{ Heading = 'Checks'; Rows = $checks; Columns = @('Light', 'Id', 'Check', 'Evidence', 'How to fix') },
         @{ Heading = 'Automatic services not running'; Rows = $services; Columns = @('Name', 'Display', 'Start mode', 'State', 'Account', 'Program exists', 'Program', 'Benign list'); Note = 'Services on the benign list (data\benign-services.psd1) are shown here but not counted by H-SVC-01. "Program exists: NO" = the service was left behind by an uninstall: it can never start - remove it (sc.exe delete <name>, under a change record).' },
@@ -1328,7 +1461,7 @@ function Get-HealthDetailsHtml {
         @{ Heading = 'Disks'; Rows = (ConvertFrom-PipeLines -Lines $h.Disks -Columns @('Drive', 'Size GB', 'Free GB', 'Free %')); Columns = @('Drive', 'Size GB', 'Free GB', 'Free %') },
         @{ Heading = 'Top error sources (System + Application)'; Rows = (ConvertFrom-PipeLines -Lines $h.ErrorTop -Columns @('Count', 'Source')); Columns = @('Count', 'Source') },
         @{ Heading = 'Machine certificates expiring'; Rows = (ConvertFrom-PipeLines -Lines $h.Certs -Columns @('Subject', 'Expires', 'Thumbprint', 'Days left')); Columns = @('Subject', 'Expires', 'Days left', 'Thumbprint') },
-        @{ Heading = 'Agents'; Rows = $agents; Columns = @('Agent', 'Installed', 'Running', 'Version', 'Detail'); Note = 'From "Agents + settings scan"; the agents looked for are listed in data\soe-agents.psd1.' },
+        @{ Heading = 'Agents'; Rows = $agents; Columns = @('Agent', 'Running', 'Version', 'Detail'); Note = $agentNote },
         @{ Heading = 'Collector errors'; Lines = @($h.Errors); Note = 'Queries the Health collector could not run on this server (H-COL-01).' })
     # the SOE comparison right after the checks: every rule of the group's standard against this server
     $soeName = Get-SoeStandardNameForServer -Server $Server
@@ -1360,7 +1493,7 @@ function Export-HealthReport {
         $fg = $cap.($m[1])
         if ($null -ne $fg.Max) { $notes += ('{0}: {1}% to {2}%, average {3}%, highest on {4}; {5} warning, {6} critical' -f $m[0], [int][math]::Round($fg.Min), [int][math]::Round($fg.Max), [int][math]::Round($fg.Avg), $fg.Worst, $fg.Warning, $fg.Critical) }
     }
-    return (Export-ConsoleReport -Console 'Health' -Title 'Health report' -Summary $summary -SummaryColumns @('Server', 'Group', 'Light', 'Red', 'Amber', 'Green', 'Services', 'Tasks', 'Failed logons', 'Lockouts', 'Dormant', 'SOE', 'GPO', 'CPU', 'RAM used', 'Disk free (min)', 'Up (d)', 'Errors', 'Clock', 'Worst') -Notes $notes -Sections @(
+    return (Export-ConsoleReport -Console 'Health' -Title 'Health report' -Summary $summary -SummaryColumns @('Server', 'Group', 'Light', 'Red', 'Amber', 'Green', 'Services', 'Tasks', 'Failed logons', 'Lockouts', 'Dormant', 'SOE', 'GPO', 'Hardware', 'Speed', 'CPU', 'RAM used', 'Disk free (min)', 'Up (d)', 'Errors', 'Clock', 'Worst') -Notes $notes -Sections @(
         @{ Name = 'Needs attention'; Rows = $attention; Columns = @('Level', 'Item', 'Servers', 'Which', 'Example') },
         @{ Name = 'Checks'; Rows = $checkRows; Columns = @('Server', 'Id', 'Group', 'Title', 'Verdict', 'Light', 'Evidence', 'Fix') },
         @{ Name = 'SOE compliance'; Rows = $soeRows; Columns = @('Server', 'Standard', 'Type', 'Name', 'Expected', 'Actual', 'Verdict', 'Light', 'Note') },
@@ -1411,13 +1544,22 @@ function Get-ShortServerName {
 
 function Get-HealthThresholds {
     # Where each dial turns amber and red, in the dial's own unit (% busy, % used).  Fail is $null for the disk: its
-    # critical limit is a size (DiskFailGB free), not a percentage.  Text = the limits as the Settings tab words them.
+    # critical limit needs a size as well (DiskFailGB free), not a percentage alone.  Text = the limits as the Settings tab words them.
     $cfg = $script:Config
     return @{
         Cpu    = @{ Warn = [double]$cfg.CpuWarnPercent; Fail = [double]$cfg.CpuFailPercent; Text = ('warning at {0}% busy, critical at {1}%' -f $cfg.CpuWarnPercent, $cfg.CpuFailPercent) }
         Memory = @{ Warn = 100.0 - $cfg.MemoryWarnPercent; Fail = 100.0 - $cfg.MemoryFailPercent; Text = ('warning below {0}% free, critical below {1}%' -f $cfg.MemoryWarnPercent, $cfg.MemoryFailPercent) }
-        Disk   = @{ Warn = 100.0 - $cfg.DiskWarnPercent; Fail = $null; Text = ('warning below {0}% free, critical below {1} GB' -f $cfg.DiskWarnPercent, $cfg.DiskFailGB) }
+        Disk   = @{ Warn = 100.0 - $cfg.DiskWarnPercent; Fail = $null; Text = ('warning below {0}% free, critical when also below {1} GB' -f $cfg.DiskWarnPercent, $cfg.DiskFailGB) }
     }
+}
+
+function Get-HealthWorstVolume {
+    # The volume the disk check is about on one server: the worst judged one (Get-HealthVolumes order); a skipped one only
+    # when nothing else was read.  $null without a reading.
+    param($Health)
+    $vols = @(Get-HealthVolumes -Health $Health)
+    if ($vols.Count -eq 0) { return $null }
+    return $vols[0]
 }
 
 function Get-HealthCapacity {
@@ -1431,12 +1573,10 @@ function Get-HealthCapacity {
     $out.Cpu = ConvertTo-HealthNumber $h.CpuPercent
     $free = ConvertTo-HealthNumber $h.MemoryFreePct
     if ($null -ne $free) { $out.Memory = 100 - $free }
-    foreach ($line in @($h.Disks)) {
-        $f = ([string]$line) -split '\|'
-        if ($f.Count -lt 4) { continue }
-        $pct = ConvertTo-HealthNumber $f[3]
-        if ($null -ne $pct -and ($null -eq $out.Disk -or (100 - $pct) -gt $out.Disk)) { $out.Disk = 100 - $pct; $out.DiskDrive = $f[0] }
-    }
+    # the disk dot is the volume the check is about (the one under the limits, else the fullest judged) - never a
+    # recovery partition that was given a letter: that one is listed, not judged, and must not move the dot
+    $vol = Get-HealthWorstVolume -Health $h
+    if ($vol) { $out.Disk = $vol.UsedPct; $out.DiskDrive = $vol.Drive }
     $verdicts = @{}
     foreach ($r in @(Get-CheckRows -Console 'Health' -Server $Server)) { if ($r.Id -in 'H-CPU-01', 'H-MEM-01', 'H-DSK-01') { $verdicts[$r.Id] = [string]$r.Verdict } }
     foreach ($pair in @(@('Cpu', 'H-CPU-01'), @('Memory', 'H-MEM-01'), @('Disk', 'H-DSK-01'))) {
@@ -1620,8 +1760,8 @@ function Get-HealthAttentionRows {
         $who = @(Get-UniqueNames @($noRun | ForEach-Object { $_.Server }))
         $rows += New-HealthAttentionRow -Id 'couldnotrun' -Level 'Warning' -Item 'Checks that could not run' -Members $who -Of $checked -Example ('{0}: {1} check(s) - {2}' -f (Get-ShortServerName $noRun[0].Server), @($noRun | Where-Object { $_.Server -eq $noRun[0].Server }).Count, $noRun[0].Evidence) -Order 2
     }
-    if ($unreach.Count -gt 0) { $rows += New-HealthAttentionRow -Id 'unreachable' -Level 'Unreachable' -Item 'Could not be reached (WinRM 5985)' -Members @($unreach | ForEach-Object { $_.Server }) -Of @($Servers).Count -Example ((Get-ShortServerName $unreach[0].Server) + ': ' + $unreach[0].Error) -Order 1 }
-    if ($never.Count -gt 0) { $rows += New-HealthAttentionRow -Id 'notchecked' -Level 'Not checked' -Item 'Not checked yet' -Members $never -Of @($Servers).Count -Example 'press "Check health (ticked, or all)"' -Order 3 }
+    if ($unreach.Count -gt 0) { $rows += New-HealthAttentionRow -Id 'unreachable' -Level 'Unreachable' -Item ('Could not be reached (WinRM {0})' -f (Get-WinRMPortText)) -Members @($unreach | ForEach-Object { $_.Server }) -Of @($Servers).Count -Example ((Get-ShortServerName $unreach[0].Server) + ': ' + $unreach[0].Error) -Order 1 }
+    if ($never.Count -gt 0) { $rows += New-HealthAttentionRow -Id 'notchecked' -Level 'Not checked' -Item 'Not checked yet' -Members $never -Of @($Servers).Count -Example 'press "Check health (ticked or all)"' -Order 3 }
     return @($rows | Sort-Object -Property @{ Expression = 'Order'; Ascending = $true }, @{ Expression = 'Count'; Descending = $true }, @{ Expression = 'Item'; Ascending = $true })
 }
 
@@ -1630,13 +1770,13 @@ function Get-HealthAttentionHtml {
     param([string]$Id, [string[]]$Servers)
     if ($Id -in 'unreachable', 'notchecked') {
         $rows = @(foreach ($s in $Servers) { $h = Get-CollectorResult -Name 'Health' -Server $s; [pscustomobject]@{ Server = $s; State = $(if (-not $h) { 'not checked yet' } else { 'unreachable: ' + [string]$h.Error }) } })
-        $what = $(if ($Id -eq 'unreachable') { 'Could not be reached (WinRM 5985)' } else { 'Not checked yet' })
-        $lines = @('A server without a reading is a blind spot: nothing on this page or in the dials covers it.', 'Unreachable: check that the server is up, that WinRM answers on port 5985 (the O/S Patching console''s status check shows the error in full), and that the account may connect.', 'Not checked yet: tick the servers and press "Check health (ticked, or all)".')
+        $what = $(if ($Id -eq 'unreachable') { ('Could not be reached (WinRM {0})' -f (Get-WinRMPortText)) } else { 'Not checked yet' })
+        $lines = @('A server without a reading is a blind spot: nothing on this page or in the dials covers it.', ('Unreachable: check that the server is up, that WinRM answers on port {0} (the O/S Patching console''s status check shows the error in full), and that the account may connect.' -f (Get-WinRMPortText)), 'Not checked yet: tick the servers and press "Check health (ticked or all)".')
         return (New-DetailsHtml -Title ('Needs attention: ' + $what) -Console 'Health' -Facts @(@('Servers', [string]@($Servers).Count)) -Sections @(@{ Heading = 'Servers'; Rows = $rows; Columns = @('Server', 'State') }, @{ Heading = 'What to do'; Lines = $lines }))
     }
     if ($Id -eq 'couldnotrun') {
         $rows = @(foreach ($s in $Servers) { foreach ($r in @(Get-CheckRows -Console 'Health' -Server $s | Where-Object { $_.Verdict -eq 'Error' })) { [pscustomobject]@{ Server = $s; Check = ('{0} {1}' -f $r.Id, $r.Title); Reason = $r.Evidence } } })
-        $lines = @('These checks have no verdict on these servers, so they are neither clear nor failing.', '"collector not available": that collector did not run or was refused on the server - press "Check health (ticked, or all)", which runs every collector, and look at the log for the error (often access denied).', 'Anything else is a check that broke on the data it was given - the Reason says what; report it with the server''s details page.')
+        $lines = @('These checks have no verdict on these servers, so they are neither clear nor failing.', '"collector not available": that collector did not run or was refused on the server - press "Check health (ticked or all)", which runs every collector, and look at the log for the error (often access denied).', 'Anything else is a check that broke on the data it was given - the Reason says what; report it with the server''s details page.')
         return (New-DetailsHtml -Title 'Needs attention: checks that could not run' -Console 'Health' -Facts @(@('Servers', [string]@($Servers).Count)) -Sections @(@{ Heading = 'Checks without a verdict'; Rows = $rows; Columns = @('Server', 'Check', 'Reason') }, @{ Heading = 'What to do'; Lines = $lines }))
     }
     $chk = @(Get-Checks -Console 'Health' | Where-Object { $_.Id -eq $Id })[0]
@@ -1661,7 +1801,7 @@ function Update-HealthDashboard {
     if (-not $script:Gui['HealthDashCpu']) { return }
     $fig = Get-HealthCapacityFigures -Servers $Servers
     $lim = Get-HealthThresholds
-    foreach ($d in @(@('HealthDashCpu', 'Processor', 'busy', 'Cpu', 'Processor busy on each server shown, a few seconds averaged at the last check (H-CPU-01) - a snapshot: check again before acting'), @('HealthDashMem', 'Memory', 'in use', 'Memory', 'Physical memory in use on each server shown (H-MEM-01)'), @('HealthDashDisk', 'Disk', 'used, fullest volume', 'Disk', 'Space used on the fullest volume of each server shown (H-DSK-01); a volume under the GB limit is critical whatever its percentage'))) {
+    foreach ($d in @(@('HealthDashCpu', 'Processor', 'busy', 'Cpu', 'Processor busy on each server shown, a few seconds averaged at the last check (H-CPU-01) - a snapshot: check again before acting'), @('HealthDashMem', 'Memory', 'in use', 'Memory', 'Physical memory in use on each server shown (H-MEM-01)'), @('HealthDashDisk', 'Disk', 'used, fullest volume', 'Disk', 'Space used on the volume the disk check judged on each server shown (H-DSK-01: the one under the limits, else the fullest; a volume smaller than DiskSmallVolumeGB is listed, not judged); critical needs the GB limit and the % limit both crossed'))) {
         $box = $script:Gui[$d[0]]; $old = $box.Image
         $box.Image = New-HealthGauge -Title $d[1] -Subtitle $d[2] -Figure $fig.($d[3]) -Limits $lim[$d[3]]
         if ($old) { $old.Dispose() }
@@ -1708,7 +1848,8 @@ function Update-HealthGrid {
     $servers = @(Get-GroupRows -Combo $script:Gui['HealthGroupCombo'] | ForEach-Object { $_.Server })
     $names = @(Get-UniqueNames $servers)
     $rows = @(Get-HealthSummaryRows -Servers $names)
-    Set-GridRows -Grid $grid -Rows $rows -RowColour { param($r) Get-LightColour $r.Light } -ToolTipProperty 'Worst'
+    # the row in the colour of the worst check, every cell that stands for a check in its own (no Light column: the colours say it)
+    Set-GridRows -Grid $grid -Rows $rows -RowColour { param($r) Get-LightColour $r.Light } -ToolTipProperty 'Worst' -CellColourProperty 'Cells'
     $script:Gui['HealthCount'].Text = ('{0} server(s), {1} red, {2} amber' -f $rows.Count, @($rows | Where-Object { $_.Light -eq 'Red' }).Count, @($rows | Where-Object { $_.Light -eq 'Amber' }).Count)
     Update-HealthDashboard -Servers $names
 }
@@ -1763,29 +1904,68 @@ function Update-SoeItemsGrid {
     $script:Gui['SoeLabel'].Text = $label
 }
 
-function Update-SoeConfigPointsGrid {
-    # The catalogue of configuration points with the value the reference server returned for each.
-    $grid = $script:Gui['SoeConfigGrid']
-    if (-not $grid) { return }
+# What the lower pane of the SOE standards page can show for the reference server (the "Show:" box, in this order)
+$script:SoeShowModes = @('configuration points the reference has', 'configuration points (all, for a value by hand)', 'software', 'agent', 'feature', 'service', 'setting')
+
+function Test-SoePointAbsent {
+    # A configuration point the server does not have: no file, no key, not configured, or not read at all
+    param([string]$Value)
+    return (-not $Value -or $Value -like 'NotConfigured*' -or $Value -in 'file missing', 'key missing' -or $Value -like '(not read*')
+}
+
+function Update-SoeRefCombo {
+    # The reference-server list = every server the probe collector has read.  Refilled only when that set changed, only
+    # from a console repaint (never from the combo's own events) and never while the operator is in the box: clearing a
+    # type-ahead combo's items inside its own SelectedIndexChanged, with the suggestion list up, took the whole tool down
+    # (field test 2026-11 - an access violation inside the suggestion list, nothing a catch can hold).
     $combo = $script:Gui['SoeRefCombo']
-    $keep = Get-ComboChoice -Combo $combo
+    if (-not $combo) { return }
     $probed = @()
     if ($script:Results.ContainsKey('Probes')) { $probed = @(Get-UniqueNames @($script:Results['Probes'].Keys | Where-Object { $script:Results['Probes'][$_].Reachable })) }
-    # refilling the combo raises its SelectedIndexChanged, whose handler calls this function: the flag stops the loop
-    $script:SoeRefFilling = $true
+    $have = @($combo.Items | ForEach-Object { [string]$_ })
+    if (($have -join "`n") -ceq ($probed -join "`n")) { return }
+    if ($combo.DroppedDown -or $combo.Focused) { return }   # the list is refreshed at the next repaint instead
+    $keep = Get-ComboChoice -Combo $combo
+    $suggest = $combo.AutoCompleteMode
+    $script:SoeRefFilling = $true   # refilling raises SelectedIndexChanged, whose handler repaints the grid: the flag stops the loop
     try {
+        $combo.AutoCompleteMode = 'None'   # the suggestion list must not watch the items change
         $combo.Items.Clear()
         foreach ($s in $probed) { [void]$combo.Items.Add($s) }
         if ($keep -and $combo.Items.Contains($keep)) { $combo.SelectedItem = $keep } elseif ($combo.Items.Count -gt 0) { $combo.SelectedIndex = 0 }
-    } finally { $script:SoeRefFilling = $false }
-    $ref = Get-ComboChoice -Combo $combo
+    } finally { $combo.AutoCompleteMode = $suggest; $script:SoeRefFilling = $false }
+}
+
+function Update-SoeConfigPointsGrid {
+    # The lower pane: what the reference server has.  The configuration points it answers (a point the server does not
+    # have - Zabbix's file on a server without Zabbix - is left out, so the pane never reads as if the agent were there;
+    # the "(all ...)" mode lists every catalogue point so a value can be typed), or its installed software, agents,
+    # features, services and settings with their versions and values, each a rule the standard can take.  Reads the two
+    # combos; never refills them (Update-SoeRefCombo does, from a console repaint only).
+    $grid = $script:Gui['SoeConfigGrid']
+    if (-not $grid) { return }
+    $ref = Get-ComboChoice -Combo $script:Gui['SoeRefCombo']
+    $show = ''; if ($script:Gui['SoeShowCombo']) { $show = [string]$script:Gui['SoeShowCombo'].SelectedItem }
+    if (-not $show) { $show = $script:SoeShowModes[0] }
     $rows = @()
-    foreach ($p in @((Get-SoeConfigPoints).Points)) {
-        $value = ''
-        if ($ref) { $v = Get-ProbeValue -Server $ref -Type $p.Type -Path $p.Path -Key $p.Key; if ($null -ne $v) { $value = $v } else { $value = '(not read - run Check health)' } }
-        $rows += [pscustomobject]@{ Point = [string]$p.Name; Type = [string]$p.Type; Where = [string]$p.Path; Key = [string]$p.Key; Value = $value; Note = [string]$p.Note }
+    if ($show -like 'configuration points*') {
+        $all = ($show -eq $script:SoeShowModes[1]) -or -not $ref
+        foreach ($p in @((Get-SoeConfigPoints).Points)) {
+            $value = ''
+            if ($ref) { $v = Get-ProbeValue -Server $ref -Type $p.Type -Path $p.Path -Key $p.Key; if ($null -ne $v) { $value = $v } else { $value = '(not read - run Check health)' } }
+            if (-not $all -and (Test-SoePointAbsent -Value $value)) { continue }
+            $rows += [pscustomobject]@{ Point = [string]$p.Name; Type = [string]$p.Type; Where = [string]$p.Path; Key = [string]$p.Key; Value = $value; Note = [string]$p.Note }
+        }
+    } elseif ($ref) {
+        foreach ($cand in @(Get-SoeCandidates -Server $ref | Where-Object { $_.Type -eq $show })) {
+            $where = [string]$cand.Extra; $value = [string]$cand.Value; $note = ''
+            if ($show -eq 'service') { $value = $value -replace ';', ', ' }   # "Auto;Running" -> "Auto, Running", the words the rule takes
+            if ($show -eq 'agent') { $note = [string]$cand.Extra; $where = '' }
+            $rows += [pscustomobject]@{ Point = [string]$cand.Name; Type = $show; Where = $where; Key = ''; Value = $value; Note = $note; Candidate = $cand }
+        }
+        $rows = @($rows | Sort-Object { [string]$_.Point })
     }
-    Set-GridRows -Grid $grid -Rows $rows -RowColour { param($r) if ($r.Value -like 'NotConfigured*' -or $r.Value -in 'file missing', 'key missing' -or $r.Value -like '(not read*') { 'WhiteSmoke' } elseif ($r.Value -like 'ERROR:*') { 'MistyRose' } else { 'White' } } -ToolTipProperty 'Note'
+    Set-GridRows -Grid $grid -Rows $rows -RowColour { param($r) if (Test-SoePointAbsent -Value ([string]$r.Value)) { 'WhiteSmoke' } elseif ($r.Value -like 'ERROR:*') { 'MistyRose' } else { 'White' } } -ToolTipProperty 'Note'
 }
 
 function Select-SoeStandard {
@@ -1828,13 +2008,16 @@ function Show-SoePicker {
     $dlg.AcceptButton = $ok; $dlg.CancelButton = $cancel
     $refreshCount = { $n = @($grid.Items | Where-Object { $_.Checked }).Count; $count.Text = ('{0} of {1} ticked - they become rules of the standard and are saved at once' -f $n, $grid.Items.Count) }
     $reload = {
-        $rows = @()
-        $ref = Get-ComboChoice -Combo $combo; if ($ref) { $rows = @(Get-SoeCandidates -Server $ref) }
-        if ($typeCombo.SelectedItem -and $typeCombo.SelectedItem -ne 'all') { $rows = @($rows | Where-Object { $_.Type -eq $typeCombo.SelectedItem }) }
-        if ($filter.Text) { $q = $filter.Text; $rows = @($rows | Where-Object { ([string]$_.Name).IndexOf($q, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or ([string]$_.Value).IndexOf($q, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }) }   # plain text, not a wildcard
-        Set-GridRows -Grid $grid -Rows $rows -NoKeepChecks
-        if ($all.Checked) { Set-GridChecks -Grid $grid -Checked $true }
-        & $refreshCount
+        # an error here would leave the dialog's message loop with nothing to catch it: logged instead
+        try {
+            $rows = @()
+            $ref = Get-ComboChoice -Combo $combo; if ($ref) { $rows = @(Get-SoeCandidates -Server $ref) }
+            if ($typeCombo.SelectedItem -and $typeCombo.SelectedItem -ne 'all') { $rows = @($rows | Where-Object { $_.Type -eq $typeCombo.SelectedItem }) }
+            if ($filter.Text) { $q = $filter.Text; $rows = @($rows | Where-Object { ([string]$_.Name).IndexOf($q, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or ([string]$_.Value).IndexOf($q, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }) }   # plain text, not a wildcard
+            Set-GridRows -Grid $grid -Rows $rows -NoKeepChecks
+            if ($all.Checked) { Set-GridChecks -Grid $grid -Checked $true }
+            & $refreshCount
+        } catch { Write-PatchLog ("The candidate list could not be built: {0}" -f (Get-ShortError $_)) 'ERROR' }
     }
     $combo.Add_SelectedIndexChanged($reload); $combo.Add_TextChanged($reload); $typeCombo.Add_SelectedIndexChanged($reload); $filter.Add_TextChanged($reload)
     $all.Add_CheckedChanged({ Set-GridChecks -Grid $grid -Checked $all.Checked; & $refreshCount })
@@ -1848,42 +2031,285 @@ function Show-SoePicker {
     return $picked
 }
 
-function Show-SoeItemEditor {
-    # "Add by hand" / "Edit": a small form for one item.  Returns the item or $null.
+# ---------------------------------------------------------------------
+#  The item editor ("Add by hand..." and the double-click edit).  A Type list; under it only the boxes that type
+#  uses, each labelled for it; a list wherever the value must match something exactly (the agent names of
+#  data\soe-agents.psd1, the keys the Settings collector writes, start types, states); for a registry or file rule
+#  the known configuration points of data\soe-config-points.psd1 fill the path and the key.  Help opens
+#  Get-SoeItemHelpHtml.  The rows are a table that lays itself out at any display scaling (field test 2026-11).
+# ---------------------------------------------------------------------
+$script:SoeItemTypes = @('software', 'forbidden', 'agent', 'feature', 'service', 'setting', 'registry', 'file')
+$script:SoeItemFields = @('name', 'path', 'key', 'expected', 'version', 'startType', 'state', 'note')   # the rows under Type, in this order
+# per type: the boxes it uses, and the label that says what goes in each
+$script:SoeItemLayout = @{
+    software  = [ordered]@{ name = 'Product name (as the inventory lists it; * wildcard ok)'; version = 'Version rule (>= 10.7, = 24.08; empty = any version)'; note = 'Note' }
+    forbidden = [ordered]@{ name = 'Product name that must NOT be installed (* wildcard ok)'; note = 'Note' }
+    agent     = [ordered]@{ name = 'Agent (one of data\soe-agents.psd1)'; version = 'Version rule (>= 5.4; empty = any version)'; note = 'Note' }
+    feature   = [ordered]@{ name = 'Windows feature name (as Get-WindowsFeature lists it)'; state = 'Must be'; note = 'Note' }
+    service   = [ordered]@{ name = 'Service name (the short name, e.g. W32Time)'; startType = 'Start type'; state = 'State'; note = 'Note' }
+    setting   = [ordered]@{ key = 'Setting key (what the Settings collector reads)'; expected = 'Expected value (exact; * ? wildcards; re:<regex>)'; note = 'Note' }
+    registry  = [ordered]@{ name = 'Name of the rule (pick a known point, or type one)'; path = 'Registry key (HKLM:\...)'; key = 'Value name (* = every value, as name=data)'; expected = 'Expected data (exact; * ? wildcards; re:<regex>; absent)'; note = 'Note' }
+    file      = [ordered]@{ name = 'Name of the rule (pick a known point, or type one)'; path = 'Configuration file (full path on the server)'; key = 'Setting name on its "name = value" line, or re:<regex> with (the value) in a group'; expected = 'Expected value (exact; * ? wildcards; re:<regex>; absent)'; note = 'Note' }
+}
+
+function Get-SoeSettingKeys {
+    # The keys a setting rule can name: every Add-S 'Key' of the Settings collector, plus every key a scanned server
+    # returned (the TLS.* keys are built at run time, so they appear once a server has been checked).
+    $keys = @()
+    foreach ($m in [regex]::Matches([string]$script:RemoteSettingsScript, "Add-S '([^']+)'")) { $keys += $m.Groups[1].Value }
+    if ($script:Results -and $script:Results.ContainsKey('Settings')) {
+        foreach ($r in @($script:Results['Settings'].Values)) { if ($r -and $r.Reachable) { foreach ($line in @($r.Lines)) { if ($line -match '^([^=]+)=') { $keys += $Matches[1] } } } }
+    }
+    return @($keys | Sort-Object -Unique)
+}
+
+function New-SoeItemEditorForm {
+    # The "SOE item" form.  Returns the form and its controls: Fields and Labels by item property, Shown = the fields
+    # the current type uses, Points = the configuration-point catalogue.  Show-SoeItemEditor shows it.
     param($Item)
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = 'SOE item'; $dlg.Size = New-Object System.Drawing.Size(600, 420); $dlg.StartPosition = 'CenterParent'; $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9); $dlg.FormBorderStyle = 'FixedDialog'
-    $y = 14
-    $fields = @{}
-    foreach ($spec in @(@('type', 'Type: agent, software, forbidden, feature, service, setting, registry, file'), @('name', 'Name (wildcards ok for software)'), @('path', 'Path (registry key or config file; registry / file only)'), @('key', 'Key (setting key; registry value name; file setting or re:<regex>)'), @('expected', 'Expected value (setting / registry / file; * or re:<regex> ok)'), @('version', 'Version rule, e.g. >= 10.7 (agents, software)'), @('startType', 'Start type (services: Auto / Manual / Disabled)'), @('state', 'State (features: Installed/Absent; services: Running/Stopped)'), @('note', 'Note'))) {
-        $l = New-Object System.Windows.Forms.Label; $l.Text = $spec[1]; $l.Location = New-Object System.Drawing.Point(12, $y); $l.AutoSize = $true
-        $t = New-Object System.Windows.Forms.TextBox; $t.Location = New-Object System.Drawing.Point(330, ($y - 3)); $t.Width = 200
-        if ($Item -and $Item.PSObject.Properties[$spec[0]]) { $t.Text = [string]$Item.($spec[0]) }
-        $dlg.Controls.Add($l); $dlg.Controls.Add($t); $fields[$spec[0]] = $t
-        $y += 30
+    $dlg.Text = 'SOE item'; $dlg.StartPosition = 'CenterParent'; $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9); $dlg.FormBorderStyle = 'FixedDialog'
+    $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false; $dlg.ShowInTaskbar = $false
+    $dlg.AutoSize = $true; $dlg.AutoSizeMode = 'GrowAndShrink'
+    $table = New-Object System.Windows.Forms.TableLayoutPanel
+    $table.AutoSize = $true; $table.AutoSizeMode = 'GrowAndShrink'; $table.ColumnCount = 2; $table.Padding = New-Object System.Windows.Forms.Padding(12, 12, 12, 10)
+    [void]$table.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+    [void]$table.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+    $fields = @{}; $labels = @{}
+    # row 0: the type, a fixed list
+    $typeLabel = New-Object System.Windows.Forms.Label; $typeLabel.Text = 'Type'; $typeLabel.AutoSize = $true; $typeLabel.Anchor = 'Left'; $typeLabel.Margin = New-Object System.Windows.Forms.Padding(0, 6, 12, 6)
+    $typeBox = New-Object System.Windows.Forms.ComboBox; $typeBox.DropDownStyle = 'DropDownList'; $typeBox.Width = 360; $typeBox.Anchor = 'Left'; $typeBox.Margin = New-Object System.Windows.Forms.Padding(0, 3, 0, 3)
+    foreach ($t in $script:SoeItemTypes) { [void]$typeBox.Items.Add($t) }
+    $table.Controls.Add($typeLabel, 0, 0); $table.Controls.Add($typeBox, 1, 0); $fields['type'] = $typeBox; $labels['type'] = $typeLabel
+    # the rows under it: a list where the value must match something (name, key, start type, state), a box elsewhere;
+    # an edited item's value waits in the Tag of a list until Set-SoeItemEditorType has filled the list
+    $row = 1
+    foreach ($f in $script:SoeItemFields) {
+        $l = New-Object System.Windows.Forms.Label; $l.Text = $f; $l.AutoSize = $true; $l.Anchor = 'Left'; $l.Margin = New-Object System.Windows.Forms.Padding(0, 6, 12, 6)
+        if ($f -in 'name', 'key') { $c = New-Object System.Windows.Forms.ComboBox; $c.DropDownStyle = 'DropDown' }
+        elseif ($f -in 'startType', 'state') { $c = New-Object System.Windows.Forms.ComboBox; $c.DropDownStyle = 'DropDownList' }
+        else { $c = New-Object System.Windows.Forms.TextBox }
+        $c.Width = 360; $c.Anchor = 'Left'; $c.Margin = New-Object System.Windows.Forms.Padding(0, 3, 0, 3)
+        $value = ''; if ($Item -and $Item.PSObject.Properties[$f]) { $value = [string]$Item.$f }
+        if ($c -is [System.Windows.Forms.TextBox]) { $c.Text = $value } else { $c.Tag = $value }
+        $table.Controls.Add($l, 0, $row); $table.Controls.Add($c, 1, $row); $fields[$f] = $c; $labels[$f] = $l
+        $row++
     }
-    $req = New-Object System.Windows.Forms.CheckBox; $req.Text = 'Required (a miss is Red; otherwise Amber)'; $req.Location = New-Object System.Drawing.Point(12, $y); $req.AutoSize = $true; $req.Checked = $true
+    [void]$fields['startType'].Items.AddRange([object[]]@('(any)', 'Auto', 'Manual', 'Disabled'))   # Win32_Service.StartMode, as the inventory reads it
+    $fields['startType'].SelectedItem = $(if ([string]$fields['startType'].Tag -in 'Auto', 'Manual', 'Disabled') { [string]$fields['startType'].Tag } else { '(any)' })
+    $req = New-Object System.Windows.Forms.CheckBox; $req.Text = 'Required (a miss is Red; otherwise Amber)'; $req.AutoSize = $true; $req.Checked = $true; $req.Margin = New-Object System.Windows.Forms.Padding(0, 8, 12, 4)
     if ($Item -and $Item.PSObject.Properties['required'] -and $null -ne $Item.required) { $req.Checked = [bool]$Item.required }
-    $run = New-Object System.Windows.Forms.CheckBox; $run.Text = 'Must be running (agents)'; $run.Location = New-Object System.Drawing.Point(330, $y); $run.AutoSize = $true
+    $run = New-Object System.Windows.Forms.CheckBox; $run.Text = 'Must be running'; $run.AutoSize = $true; $run.Margin = New-Object System.Windows.Forms.Padding(0, 8, 0, 4)
     if ($Item -and $Item.PSObject.Properties['mustRun']) { $run.Checked = [bool]$Item.mustRun }
-    $dlg.Controls.Add($req); $dlg.Controls.Add($run)
-    $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'OK'; $ok.Location = New-Object System.Drawing.Point(330, ($y + 36)); $ok.Size = New-Object System.Drawing.Size(95, 30); $ok.DialogResult = 'OK'
-    $cancel = New-Object System.Windows.Forms.Button; $cancel.Text = 'Cancel'; $cancel.Location = New-Object System.Drawing.Point(435, ($y + 36)); $cancel.Size = New-Object System.Drawing.Size(95, 30); $cancel.DialogResult = 'Cancel'
-    $dlg.Controls.Add($ok); $dlg.Controls.Add($cancel); $dlg.AcceptButton = $ok; $dlg.CancelButton = $cancel
-    $result = $null
-    if ($dlg.ShowDialog($script:Gui['Form']) -eq 'OK') {
-        $type = $fields['type'].Text.Trim().ToLower()
-        if ($type -notin 'agent', 'software', 'forbidden', 'feature', 'service', 'setting', 'registry', 'file') { $null = Show-PatcherMessage -Text "Type must be one of agent, software, forbidden, feature, service, setting, registry, file (got '$type')" -Icon 'Warning' }
-        elseif ($type -in 'registry', 'file' -and -not $fields['path'].Text.Trim()) { $null = Show-PatcherMessage -Text "A $type item needs a Path (the registry key or the configuration file)." -Icon 'Warning' }
-        else {
-            $src = 'by hand'; if ($Item -and $Item.PSObject.Properties['source'] -and $Item.source) { $src = $Item.source }
-            $result = New-SoeItem -Type $type -Name $fields['name'].Text.Trim() -Path $fields['path'].Text.Trim() -Key $fields['key'].Text.Trim() -Expected $fields['expected'].Text -Version $fields['version'].Text.Trim() -StartType $fields['startType'].Text.Trim() -State $fields['state'].Text.Trim() -Required $req.Checked -MustRun $run.Checked -Source $src -Note $fields['note'].Text
-            if ($type -eq 'setting' -and -not $result.key) { $result.key = $result.name }
-            if (-not $result.name) { $result.name = $result.key }
-        }
+    $table.Controls.Add($req, 0, $row); $table.Controls.Add($run, 1, $row); $row++
+    $help = New-Object System.Windows.Forms.Button; $help.Text = 'Help'; $help.Size = New-Object System.Drawing.Size(95, 30); $help.Anchor = 'Left'; $help.Margin = New-Object System.Windows.Forms.Padding(0, 10, 0, 0)
+    $help.Add_Click({ Show-DetailsWindow -Title 'Help: SOE items by hand' -Html (Get-SoeItemHelpHtml) })
+    $buttons = New-Object System.Windows.Forms.FlowLayoutPanel; $buttons.AutoSize = $true; $buttons.FlowDirection = 'RightToLeft'; $buttons.Anchor = 'Right'; $buttons.Margin = New-Object System.Windows.Forms.Padding(0, 10, 0, 0)
+    $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'OK'; $ok.Size = New-Object System.Drawing.Size(95, 30); $ok.DialogResult = 'OK'
+    $cancel = New-Object System.Windows.Forms.Button; $cancel.Text = 'Cancel'; $cancel.Size = New-Object System.Drawing.Size(95, 30); $cancel.DialogResult = 'Cancel'
+    $buttons.Controls.Add($cancel); $buttons.Controls.Add($ok)   # right to left: Cancel at the edge, OK beside it
+    $table.Controls.Add($help, 0, $row); $table.Controls.Add($buttons, 1, $row)
+    $dlg.Controls.Add($table)
+    $dlg.AcceptButton = $ok; $dlg.CancelButton = $cancel
+    $ed = @{ Form = $dlg; Table = $table; Fields = $fields; Labels = $labels; Required = $req; MustRun = $run; OK = $ok; Cancel = $cancel; Help = $help; Points = @((Get-SoeConfigPoints).Points); Shown = @() }
+    # the list handlers find the editor here ($this is the list; a local of this function is gone when the event fires)
+    if (-not $script:Gui) { $script:Gui = @{} }
+    $script:Gui['SoeItemEditor'] = $ed
+    $typeBox.Add_SelectedIndexChanged({ $editor = $script:Gui['SoeItemEditor']; if ($editor) { Set-SoeItemEditorType -Editor $editor -Type ([string]$this.SelectedItem) } })
+    $fields['name'].Add_SelectedIndexChanged({ $editor = $script:Gui['SoeItemEditor']; if ($editor) { Set-SoeItemEditorPoint -Editor $editor -Name ([string]$this.SelectedItem) } })
+    $type = 'software'; if ($Item -and $Item.PSObject.Properties['type'] -and [string]$Item.type -in $script:SoeItemTypes) { $type = [string]$Item.type }
+    $typeBox.SelectedItem = $type   # the handler lays the rows out for this type
+    if (@($ed.Shown).Count -eq 0) { Set-SoeItemEditorType -Editor $ed -Type $type }
+    return $ed
+}
+
+function Set-SoeItemEditorType {
+    # Shows the boxes the type uses, labelled for it, with the lists it needs; hides the others.  What is already in
+    # the boxes stays (an edited item's value comes from the Tag of a list the first time).
+    param($Editor, [string]$Type)
+    $layout = $script:SoeItemLayout[$Type]; if (-not $layout) { $layout = [ordered]@{} }
+    $shown = @()
+    foreach ($f in $script:SoeItemFields) {
+        $use = $layout.Contains($f)
+        $Editor.Labels[$f].Visible = $use; $Editor.Fields[$f].Visible = $use
+        if ($use) { $Editor.Labels[$f].Text = [string]$layout[$f]; $shown += $f }
     }
-    $dlg.Dispose()
+    $Editor.Shown = $shown
+    $Editor.MustRun.Visible = ($Type -eq 'agent')
+    # the name: an agent is picked from the catalogue; a registry / file rule may take a known point's name; the rest is typed
+    $name = $Editor.Fields['name']; $keep = [string]$name.Text; if (-not $keep -and $name.Tag) { $keep = [string]$name.Tag }; $name.Tag = $null
+    $name.Items.Clear()
+    if ($Type -eq 'agent') {
+        $name.DropDownStyle = 'DropDownList'
+        $cat = Import-ToolData -Name 'soe-agents.psd1'
+        foreach ($a in @($cat.Agents)) { [void]$name.Items.Add([string]$a.Name) }
+        if ($keep -and $name.Items.Contains($keep)) { $name.SelectedItem = $keep }
+    } else {
+        $name.DropDownStyle = 'DropDown'
+        if ($Type -in 'registry', 'file') { foreach ($p in @($Editor.Points | Where-Object { [string]$_.Type -eq $Type })) { [void]$name.Items.Add([string]$p.Name) } }
+        $name.Text = $keep
+    }
+    # the key: a setting is one the collector writes; a registry value name or a file setting is typed
+    $key = $Editor.Fields['key']; $keepKey = [string]$key.Text; if (-not $keepKey -and $key.Tag) { $keepKey = [string]$key.Tag }; $key.Tag = $null
+    $key.Items.Clear()
+    if ($Type -eq 'setting') { foreach ($k in (Get-SoeSettingKeys)) { [void]$key.Items.Add($k) } }
+    $key.Text = $keepKey
+    # the state: a feature is Installed or Absent; a service Running or Stopped, or either
+    $state = $Editor.Fields['state']; $keepState = [string]$state.SelectedItem; if (-not $keepState -and $state.Tag) { $keepState = [string]$state.Tag }; $state.Tag = $null
+    $state.Items.Clear()
+    if ($Type -eq 'feature') { [void]$state.Items.AddRange([object[]]@('Installed', 'Absent')); $state.SelectedItem = $(if ($keepState -in 'Installed', 'Absent') { $keepState } else { 'Installed' }) }
+    elseif ($Type -eq 'service') { [void]$state.Items.AddRange([object[]]@('(any)', 'Running', 'Stopped')); $state.SelectedItem = $(if ($keepState -in 'Running', 'Stopped') { $keepState } else { '(any)' }) }
+}
+
+function Set-SoeItemEditorPoint {
+    # A known configuration point picked by name (registry / file): its path, key and note go into the boxes
+    param($Editor, [string]$Name)
+    $type = [string]$Editor.Fields['type'].SelectedItem
+    if ($type -notin 'registry', 'file' -or -not $Name) { return }
+    $p = @($Editor.Points | Where-Object { [string]$_.Type -eq $type -and [string]$_.Name -eq $Name })[0]
+    if (-not $p) { return }
+    $Editor.Fields['path'].Text = [string]$p.Path; $Editor.Fields['key'].Text = [string]$p.Key
+    if (-not $Editor.Fields['note'].Text) { $Editor.Fields['note'].Text = [string]$p.Note }
+}
+
+function Get-SoeItemEditorValues {
+    # What the boxes hold, by item property.  A box the type does not use reads as empty, so does "(any)".
+    param($Editor)
+    $v = @{}
+    $type = [string]$Editor.Fields['type'].SelectedItem
+    $v['type'] = $type
+    $layout = $script:SoeItemLayout[$type]
+    foreach ($f in $script:SoeItemFields) {
+        $c = $Editor.Fields[$f]
+        $text = ''
+        if ($layout -and $layout.Contains($f)) {
+            if ($c -is [System.Windows.Forms.ComboBox] -and $c.DropDownStyle -eq 'DropDownList') { $text = [string]$c.SelectedItem } else { $text = [string]$c.Text }
+        }
+        if ($text -eq '(any)') { $text = '' }
+        if ($f -notin 'expected', 'note') { $text = $text.Trim() }
+        $v[$f] = $text
+    }
+    $v['required'] = [bool]$Editor.Required.Checked
+    $v['mustRun'] = ($type -eq 'agent' -and [bool]$Editor.MustRun.Checked)
+    return $v
+}
+
+function Get-SoeItemProblem {
+    # Why the boxes cannot make a rule yet, in the operator's words - or '' when they can.
+    param($Values)
+    $t = [string]$Values['type']
+    if ($t -notin $script:SoeItemTypes) { return 'Pick a Type first.' }
+    switch ($t) {
+        'agent'   { if (-not $Values['name']) { return 'Pick the agent (the list is data\soe-agents.psd1).' } }
+        'setting' { if (-not $Values['key']) { return 'Pick or type the setting key.' }; if (-not $Values['expected']) { return 'Type the expected value.' } }
+        { $_ -in 'registry', 'file' } {
+            if (-not $Values['path']) { if ($t -eq 'registry') { return 'Type the registry key (HKLM:\...).' } else { return 'Type the full path of the configuration file on the server.' } }
+            if (-not $Values['key']) { if ($t -eq 'registry') { return 'Type the value name (* = every value).' } else { return 'Type the setting name on its "name = value" line, or re:<regex>.' } }
+            if (-not $Values['expected']) { return 'Type the expected value (or absent, for a value that must not exist).' }
+        }
+        default   { if (-not $Values['name']) { return 'Type the name.' } }
+    }
+    if ($t -eq 'service' -and -not $Values['startType'] -and -not $Values['state']) { return 'Pick a start type or a state (or both) - otherwise there is nothing to check.' }
+    if ($Values['version'] -and [string]$Values['version'] -notmatch '^\s*(>=|<=|=|>|<)?\s*\S*\d\S*\s*$') { return 'The version rule reads like ">= 10.7" or "= 24.08" (empty = any version).' }
+    foreach ($f in 'key', 'expected') {
+        $x = [string]$Values[$f]
+        if ($x -like 're:*') { try { $null = New-Object System.Text.RegularExpressions.Regex($x.Substring(3)) } catch { return ('The re: pattern in "{0}" is not a valid regular expression: {1}' -f $f, $_.Exception.Message) } }
+    }
+    return ''
+}
+
+function Show-SoeItemEditor {
+    # "Add by hand" / "Edit": the form for one item.  Returns the item or $null.  A form that is not complete comes
+    # back with everything still in it and the reason in a pop-up.
+    param($Item)
+    $ed = New-SoeItemEditorForm -Item $Item
+    $dlg = $ed.Form
+    $result = $null
+    try {
+        while ($dlg.ShowDialog($script:Gui['Form']) -eq 'OK') {
+            $v = Get-SoeItemEditorValues -Editor $ed
+            $problem = Get-SoeItemProblem -Values $v
+            if ($problem) { $null = Show-PatcherMessage -Text $problem -Icon 'Warning'; continue }
+            $src = 'by hand'; if ($Item -and $Item.PSObject.Properties['source'] -and $Item.source) { $src = $Item.source }
+            $result = New-SoeItem -Type $v['type'] -Name $v['name'] -Path $v['path'] -Key $v['key'] -Expected $v['expected'] -Version $v['version'] -StartType $v['startType'] -State $v['state'] -Required $v['required'] -MustRun $v['mustRun'] -Source $src -Note $v['note']
+            if (-not $result.name) { $result.name = $result.key }
+            break
+        }
+    } finally { $script:Gui.Remove('SoeItemEditor'); $dlg.Dispose() }
     return $result
+}
+
+function Get-SoeItemHelpHtml {
+    # The Help button of the item editor: what each box means, by type, with the file and registry rules walked through.
+    $types = @(
+        [pscustomobject]@{ Type = 'software';  'Use it for' = 'a product that must be installed, at a version';                     Boxes = 'Product name (* ok), Version rule';                         Example = 'Google Chrome*   >= 130' }
+        [pscustomobject]@{ Type = 'forbidden'; 'Use it for' = 'a product that must NOT be installed';                               Boxes = 'Product name (* ok)';                                       Example = 'TeamViewer*' }
+        [pscustomobject]@{ Type = 'agent';     'Use it for' = 'an SOE agent of data\soe-agents.psd1: installed, at a version, running'; Boxes = 'Agent (list), Version rule, Must be running';           Example = 'Zabbix Agent   >= 6.0, running' }
+        [pscustomobject]@{ Type = 'feature';   'Use it for' = 'a Windows feature that must be installed, or absent';                Boxes = 'Feature name, Must be (list)';                              Example = 'SNMP-Service   Installed' }
+        [pscustomobject]@{ Type = 'service';   'Use it for' = 'how a service must be set up and whether it must run';               Boxes = 'Service name, Start type (list), State (list)';            Example = 'W32Time   Auto, Running' }
+        [pscustomobject]@{ Type = 'setting';   'Use it for' = 'a value the Settings collector reads on every server';               Boxes = 'Setting key (list), Expected value';                        Example = 'TimeZone = AUS Eastern Standard Time' }
+        [pscustomobject]@{ Type = 'registry';  'Use it for' = 'a registry value, read on the server';                               Boxes = 'Name, Registry key, Value name, Expected data';             Example = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate > WUServer = http://wsus.corp.local:8530' }
+        [pscustomobject]@{ Type = 'file';      'Use it for' = 'a line of a configuration file, read on the server';                 Boxes = 'Name, Configuration file, Setting name or re:<regex>, Expected value'; Example = 'C:\Program Files\Zabbix Agent\zabbix_agentd.conf > Server = zabbix.corp.local' }
+    )
+    $fileLines = @(
+        'Type: file.  Pick a known point from the Name list (Zabbix agent: Server, Splunk forwarder: indexers, NXLog: output host, Trellix (McAfee) agent: ePO server ...) and the file and the setting name are filled in - or type your own.',
+        'Configuration file: the full path on the server, e.g. C:\Program Files\Zabbix Agent\zabbix_agentd.conf.  Every server is read at the same path.',
+        'Setting name: the tool reads the file and takes the first line "name = value" (or "name: value") outside comment lines (# or ;).  For zabbix_agentd.conf the setting name is Server; for Splunk''s outputs.conf it is server.',
+        'Any other layout - XML, JSON, a keyword and its value, a key under one [section]: a re: pattern in the Setting name box finds the value; see "Finding the value with re:" below.',
+        'Expected value: what every server must have - see "The expected value" below.',
+        'What a server answers: the value, or "file missing", "key missing" or "ERROR: ...".  A missing file or line is Red when the rule is required (Amber otherwise); an error is never a pass.')
+    $findLines = @(
+        'Write re: and then a .NET regular expression.  The whole file is searched, case ignored, and the first match wins.  Put (brackets) round the part that is the value: the text inside the first (group) is what the rule compares - without a group the whole match is the value, usually more than you want.',
+        'The pieces that cover nearly every file: \s any whitespace, \S anything but whitespace, \d a digit, [^"]+ everything up to the next quote, [^<]+ everything up to the next tag, .*? as little as possible, ^ and $ the start and the end of a line, and \ before . ( ) [ ] ? * + to mean that character itself (a dot on its own matches any character).',
+        'Comment lines are not skipped by a re: pattern (they are by a plain setting name), so start the pattern with ^\s* when a commented-out example of the same setting sits above the real line.',
+        'A key that appears under several [sections]: (?s) lets .*? run across lines, so (?s)\[tcpout:primary\].*?^\s*server\s*=\s*(.+?)\s*$ takes the server line of that section only.',
+        'A pattern that runs for over 2 seconds counts as an error, never as a pass; one that will not compile is refused by the form.  After "Check health", double-click the server on the Health checks page: its SOE section shows what the pattern read (Actual) next to the Expected.')
+    $findRows = @(
+        [pscustomobject]@{ 'The file holds' = '<Site ... ServerName="epo01.corp.local" .../>   (SiteList.xml: an XML attribute)';          'Setting name' = 're:ServerName="([^"]+)"';                                  'The value read' = 'epo01.corp.local' }
+        [pscustomobject]@{ 'The file holds' = '<server> splunk01.corp.local </server>   (an XML element)';                                 'Setting name' = 're:<server>\s*([^<]+?)\s*</server>';                       'The value read' = 'splunk01.corp.local' }
+        [pscustomobject]@{ 'The file holds' = '    Host    siem01.corp.local   (nxlog.conf: a keyword, spaces, the value)';               'Setting name' = 're:^\s*Host\s+(\S+)';                                     'The value read' = 'siem01.corp.local' }
+        [pscustomobject]@{ 'The file holds' = '"serverUrl": "https://mgmt.corp.local",   (JSON)';                                         'Setting name' = 're:"serverUrl"\s*:\s*"([^"]+)"';                            'The value read' = 'https://mgmt.corp.local' }
+        [pscustomobject]@{ 'The file holds' = '[tcpout:primary] ... server = idx01:9997, idx02:9997   (outputs.conf: one section of several)'; 'Setting name' = 're:(?s)\[tcpout:primary\].*?^\s*server\s*=\s*(.+?)\s*$'; 'The value read' = 'idx01:9997, idx02:9997' }
+        [pscustomobject]@{ 'The file holds' = '# Server=127.0.0.1 on the line above Server=zabbix01.corp.local   (a commented twin)';      'Setting name' = 're:^\s*Server\s*=\s*(\S+)';                                'The value read' = 'zabbix01.corp.local - the ^\s* keeps the # line out' }
+        [pscustomobject]@{ 'The file holds' = 'ServerActive=zabbix01.corp.local';                                                         'Setting name' = 're:ServerActive\s*=.*   (no group)';                        'The value read' = 'ServerActive=zabbix01.corp.local - the whole match; put the value in (brackets)' }
+    )
+    $regLines = @(
+        'Type: registry.  Pick a known point from the Name list (Windows Update: WSUS server, Time: NTP source, Windows LAPS: backup directory ...) or type the key and the value name.',
+        'Registry key in PowerShell form: HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate.  HKLM: only - the tool reads the machine, not a user profile.',
+        'Value name: WUServer.  The value name * reads every value of the key as "name=data; name=data; ...", which a wildcard or a re: pattern can then match (SNMP permitted managers, Defender exclusion paths).',
+        'Expected data: http://wsus.corp.local:8530.  A number is compared as text: 1, not 0x1.',
+        'absent as the expected data: the value must NOT exist (a server without it answers NotConfigured, and that is the pass).')
+    $formLines = @(
+        'Plain text: the server must have exactly that (case does not matter).',
+        '* and ? wildcards: *.corp.local, http://wsus*.',
+        're:<regex>: a pattern the value must match - see "Matching the value with re:" below.',
+        'absent (also NotConfigured, key missing, file missing): the value, key or file must not be there.',
+        'Required ticked: a miss is Red on the Health checks page; unticked: Amber.  Empty version rule = any version.')
+    $matchLines = @(
+        'Here re: is a search over the value, case ignored: re:6\. passes 6.4 and also 16.0.  Write ^ at the start and $ at the end to mean the whole value, and \. for a real dot in a host name or a version.',
+        'A value pinned from the reference server that holds * or ? is saved as re:^...$ with every special character escaped, so it still means exactly that value - that is where a re:^ you did not write comes from.')
+    $matchRows = @(
+        [pscustomobject]@{ 'The rule' = 'one of two servers, nothing else';                                   'Expected value' = 're:^(wsus1|wsus2)\.corp\.local$';               Passes = 'wsus2.corp.local';            Fails = 'wsus3.corp.local; wsus1.corp.local.evil.com' }
+        [pscustomobject]@{ 'The rule' = 'any host of the domain, http or https, any port';                   'Expected value' = 're:^https?://[a-z0-9-]+\.corp\.local(:\d+)?$'; Passes = 'http://wsus.corp.local:8530';  Fails = 'http://wsus.other.local' }
+        [pscustomobject]@{ 'The rule' = 'a version on the 6 line';                                            'Expected value' = 're:^6\.\d+';                                     Passes = '6.4.12';                      Fails = '16.0; 5.0.9' }
+        [pscustomobject]@{ 'The rule' = 'a comma or semicolon list that must contain an entry';              'Expected value' = 're:(^|[,;])\s*10\.0\.0\.5\s*([,;]|$)';           Passes = '10.0.0.4, 10.0.0.5';          Fails = '10.0.0.50' }
+        [pscustomobject]@{ 'The rule' = 'every value of a registry key (value name *) must include a host'; 'Expected value' = 're:=10\.0\.0\.5(;|$)';                           Passes = '1=10.0.0.4; 2=10.0.0.5';      Fails = '1=10.0.0.50' }
+    )
+    $checkLines = @(
+        'OK saves the rule into soe\<standard>.json at once; double-click a row to edit it; the file is plain JSON, Notepad works too.',
+        '"Check health (ticked or all)" on the Health checks page reads every registry and file point of every standard on every server (the probe collector reads values and lines - nothing is ever run), then check H-SOE-01 compares each server with the standard assigned to it ("Assign to servers...").',
+        'A server''s SOE column says ok or N differ; double-click the server for the comparison line by line: expected, actual, verdict.',
+        'A setting rule takes its value from the Settings collector; software, forbidden and feature rules from the inventory; a service rule from the service list; an agent rule from the agent scan.')
+    return (New-DetailsHtml -Title 'SOE items by hand' -Console 'Health' -Subtitle 'what each box means, by type, and how a rule is checked - nothing is ever run on a server for this' -Sections @(
+        @{ Heading = 'The types'; Rows = $types; Columns = @('Type', 'Use it for', 'Boxes', 'Example') },
+        @{ Heading = 'A setting in a configuration file (type: file)'; Lines = $fileLines },
+        @{ Heading = 'A registry value (type: registry)'; Lines = $regLines },
+        @{ Heading = 'Finding the value with re: (the Setting name of a file rule)'; Lines = $findLines },
+        @{ Heading = 'Worked patterns for the Setting name'; Rows = $findRows; Columns = @('The file holds', 'Setting name', 'The value read') },
+        @{ Heading = 'The expected value'; Lines = $formLines },
+        @{ Heading = 'Matching the value with re: (the Expected value of any rule)'; Lines = $matchLines },
+        @{ Heading = 'Worked patterns for the Expected value'; Rows = $matchRows; Columns = @('The rule', 'Expected value', 'Passes', 'Fails') },
+        @{ Heading = 'How a rule is checked'; Lines = $checkLines }))
 }
 
 function New-HealthConsole {
@@ -1899,7 +2325,7 @@ function New-HealthConsole {
     $pages.TabPages.AddRange(@($pageChecks, $pageSoe, $pageGpo))
 
     # ---- Health checks page ----
-    $grid = New-ConsoleGrid -Columns @(@{ Name = 'Server'; Width = 170 }, @{ Name = 'Group'; Width = 100 }, @{ Name = 'Light'; Width = 55 }, @{ Name = 'Checked'; Width = 70 }, @{ Name = 'Red'; Width = 40 }, @{ Name = 'Amber'; Width = 50 }, @{ Name = 'Green'; Width = 50 }, @{ Name = 'Services'; Width = 60 }, @{ Name = 'Tasks'; Width = 50 }, @{ Name = 'Failed logons'; Width = 85 }, @{ Name = 'Lockouts'; Width = 65 }, @{ Name = 'Dormant'; Width = 60 }, @{ Name = 'SOE'; Width = 70 }, @{ Name = 'GPO'; Width = 120 }, @{ Name = 'CPU'; Width = 50 }, @{ Name = 'RAM used'; Width = 70 }, @{ Name = 'Disk free (min)'; Width = 110 }, @{ Name = 'Up (d)'; Width = 50 }, @{ Name = 'Errors'; Width = 55 }, @{ Name = 'Clock'; Width = 75 }, @{ Name = 'Worst'; Width = 420; Fill = $true })
+    $grid = New-ConsoleGrid -Columns @(@{ Name = 'Server'; Width = 170 }, @{ Name = 'Group'; Width = 100 }, @{ Name = 'Checked'; Width = 70 }, @{ Name = 'Red'; Width = 40 }, @{ Name = 'Amber'; Width = 50 }, @{ Name = 'Green'; Width = 50 }, @{ Name = 'Services'; Width = 60 }, @{ Name = 'Tasks'; Width = 50 }, @{ Name = 'Failed logons'; Width = 85 }, @{ Name = 'Lockouts'; Width = 65 }, @{ Name = 'Dormant'; Width = 60 }, @{ Name = 'SOE'; Width = 70 }, @{ Name = 'GPO'; Width = 120 }, @{ Name = 'Hardware'; Width = 90 }, @{ Name = 'Speed'; Width = 50 }, @{ Name = 'CPU'; Width = 50 }, @{ Name = 'RAM used'; Width = 70 }, @{ Name = 'Disk free (min)'; Width = 110 }, @{ Name = 'Up (d)'; Width = 50 }, @{ Name = 'Errors'; Width = 55 }, @{ Name = 'Clock'; Width = 75 }, @{ Name = 'Worst'; Width = 420; Fill = $true })
     $grid.Add_DoubleClick({   # $this = the grid; a local such as $grid is gone by the time the event fires
         if ($script:Gui['Busy']) { Write-PatchLog 'Busy - details are available again when the current action finishes' 'WARN'; return }
         if ($this.SelectedItems.Count -gt 0) { $n = $this.SelectedItems[0].Text; Show-DetailsWindow -Title "Health: $n" -Html (Get-HealthDetailsHtml -Server $n) }
@@ -1925,7 +2351,7 @@ function New-HealthConsole {
     $combo = New-GroupPicker -Toolbar $toolbar -OnChange { Update-HealthGrid; Update-HealthGpoPage }
     $script:Gui['HealthGroupCombo'] = $combo
     # ONE button collects everything the Health checks, the SOE standard check and the Security console need.
-    $toolbar.Controls.Add((New-GuiButton -Text 'Check health (ticked, or all)' -X 235 -Y 8 -W 190 -Colour 'LightGreen' -ReadOnly -Tip 'Status, inventory, health, agents, settings, configuration-point and Group Policy collectors on the ticked servers (all shown if none ticked). Reads only - except that the status check removes the toolkit''s own finished OS patch tasks (\WinRMToolkit\OSPatch-*), as every status check does. Includes the SOE standard check (H-SOE-01).' -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'Check health (ticked or all)' -X 235 -Y 8 -W 190 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Status, inventory, health, agents, settings, configuration-point and Group Policy collectors on the ticked servers (all shown if none ticked). Reads only - except that the status check removes the toolkit''s own finished OS patch tasks (\WinRMToolkit\OSPatch-*), as every status check does. Includes the SOE standard check (H-SOE-01).' -OnClick {
         Invoke-GuiAction -Name 'Health check' -ReadOnly -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['HealthGrid'])
             if ($servers.Count -eq 0) { $servers = @(Get-GridAllKeys -Grid $script:Gui['HealthGrid']) }
@@ -1940,7 +2366,7 @@ function New-HealthConsole {
         }
     }))
     $toolbar.Controls.Add((New-GuiButton -Text 'Tick all' -X 430 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['HealthGrid'] -Checked $true }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Untick' -X 505 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['HealthGrid'] -Checked $false }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Untick all' -X 505 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['HealthGrid'] -Checked $false }))
     $toolbar.Controls.Add((New-GuiButton -Text 'Report (HTML + CSV)' -X 580 -Y 8 -W 150 -ReadOnly -Tip 'Health checks and the SOE comparison of the servers shown' -OnClick {
         Invoke-GuiAction -Name 'Health report' -ReadOnly -Action { Show-ReportDone -Report (Export-HealthReport) }
     }))
@@ -1952,7 +2378,7 @@ function New-HealthConsole {
         }
     }))
     # what the row colours and the SOE column mean: on hover over the row count, not as a paragraph under the page
-    $script:Gui['Tips'].SetToolTip($count, 'Row colour = worst check: red = a failure (services, logons, disk, memory, processor, time ...) or a required SOE item that differs, amber = a warning, green = all clear, grey = not checked. SOE column: the standard on the server''s group-file line ("Assign SOE standard..." writes "; soe: <name>" after the name), else the group''s "# soe:" line, else soe\default.json; none = no standard applies. Double-click a server for every check, the SOE comparison, evidence and fixes.')
+    $script:Gui['Tips'].SetToolTip($count, 'Row colour = worst check: red = a failure (services, logons, disk, memory, processor, time ...) or a required SOE item that differs, amber = a warning, green = all clear, grey = not checked. Each cell that stands for a check carries that check''s own colour, so a green or amber cell shows inside a red row. SOE column: the standard on the server''s group-file line ("Assign SOE standard..." writes "; soe: <name>" after the name), else the group''s "# soe:" line, else soe\default.json; none = no standard applies. Double-click a server for every check, the SOE comparison, evidence and fixes.')
     $hSplit.BringToFront()
 
     # ---- SOE standards page ----
@@ -1974,25 +2400,39 @@ function New-HealthConsole {
     $cfgPanel = New-Object System.Windows.Forms.Panel; $cfgPanel.Dock = 'Fill'
     # the title is 21 px tall: the row under it starts at 27 so it never covers the combo's or the button's top edge
     $cfgBar = New-Object System.Windows.Forms.Panel; $cfgBar.Dock = 'Top'; $cfgBar.Height = 56
-    $cfgTitle = New-Object System.Windows.Forms.Label; $cfgTitle.Text = 'Configuration points to pin'; $cfgTitle.Location = New-Object System.Drawing.Point(8, 3); $cfgTitle.AutoSize = $true; $cfgTitle.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
-    $script:Gui['Tips'].SetToolTip($cfgTitle, 'Which update server, time source, monitoring or security server every server must point at. The list is data\soe-config-points.psd1 (add your own points); the values come from the reference server''s last "Check health".')
+    $cfgTitle = New-Object System.Windows.Forms.Label; $cfgTitle.Text = 'Pin from the reference server'; $cfgTitle.Location = New-Object System.Drawing.Point(8, 3); $cfgTitle.AutoSize = $true; $cfgTitle.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+    $script:Gui['Tips'].SetToolTip($cfgTitle, 'What the reference server has, from its last "Check health": the configuration points it answers (which update server, time source, monitoring or security server - the list is data\soe-config-points.psd1, add your own), or its installed software, agents, features, services and settings with their versions and values. Tick rows, press the button: each becomes a rule of the standard.')
     $refLbl = New-Object System.Windows.Forms.Label; $refLbl.Text = 'Reference server:'; $refLbl.Location = New-Object System.Drawing.Point(8, 33); $refLbl.AutoSize = $true
     $refCombo = New-Object System.Windows.Forms.ComboBox; $refCombo.Location = New-Object System.Drawing.Point(110, 29); $refCombo.Width = 240; $refCombo.DropDownStyle = 'DropDownList'
-    $refCombo.Add_SelectedIndexChanged({ if (-not $script:SoeRefFilling) { Update-SoeConfigPointsGrid } })
+    # the handlers only repaint the grid - never the combo's own items (Update-SoeRefCombo, from a console repaint) - and
+    # an error in them is logged: an exception out of a combo event has no catch above it but the message loop
+    $refCombo.Add_SelectedIndexChanged({ if (-not $script:SoeRefFilling) { try { Update-SoeConfigPointsGrid } catch { Write-PatchLog ("The reference server's rows could not be shown: {0}" -f (Get-ShortError $_)) 'ERROR' } } })
     Set-ComboTypeAhead -Combo $refCombo   # hundreds of scanned servers: type part of the name
-    $refCombo.Add_TextChanged({ if (-not $script:SoeRefFilling -and (Get-ComboChoice -Combo $this)) { Update-SoeConfigPointsGrid } })
-    $cfgBar.Controls.AddRange(@($cfgTitle, $refLbl, $refCombo))
-    $cfgBar.Controls.Add((New-GuiButton -Text 'Add ticked points to the standard' -X 360 -Y 27 -W 230 -H 26 -Colour 'LightGreen' -ReadOnly -Tip 'Each ticked point becomes a rule with the value the reference server has (or a value you type when the reference has none). Saved at once.' -OnClick {
-        Invoke-GuiAction -Name 'Add configuration points' -ReadOnly -Action {
+    $refCombo.Add_TextChanged({ if (-not $script:SoeRefFilling -and (Get-ComboChoice -Combo $this)) { try { Update-SoeConfigPointsGrid } catch { Write-PatchLog ("The reference server's rows could not be shown: {0}" -f (Get-ShortError $_)) 'ERROR' } } })
+    $showLbl = New-Object System.Windows.Forms.Label; $showLbl.Text = 'Show:'; $showLbl.Location = New-Object System.Drawing.Point(360, 33); $showLbl.AutoSize = $true
+    $showCombo = New-Object System.Windows.Forms.ComboBox; $showCombo.Location = New-Object System.Drawing.Point(400, 29); $showCombo.Width = 250; $showCombo.DropDownStyle = 'DropDownList'
+    foreach ($m in $script:SoeShowModes) { [void]$showCombo.Items.Add($m) }
+    $showCombo.SelectedIndex = 0
+    $showCombo.Add_SelectedIndexChanged({ try { Update-SoeConfigPointsGrid } catch { Write-PatchLog ("The reference server's rows could not be shown: {0}" -f (Get-ShortError $_)) 'ERROR' } })
+    $script:Gui['SoeShowCombo'] = $showCombo
+    $cfgBar.Controls.AddRange(@($cfgTitle, $refLbl, $refCombo, $showLbl, $showCombo))
+    $cfgBar.Controls.Add((New-GuiButton -Text 'Add to the standard (ticked)' -X 660 -Y 27 -W 190 -H 26 -Colour 'LightGreen' -ReadOnly -Tip 'Each ticked row becomes a rule: a configuration point with the value the reference server has (or a value you type when it has none), a product or agent at its version (>=), a feature, a service with its start type and state, a setting with its value. Saved at once.' -OnClick {
+        Invoke-GuiAction -Name 'Add from the reference server' -ReadOnly -Action {
             $std = $script:Gui['SoeStandard']; if (-not $std) { Show-GuiNotice 'Create or select a standard first (New).'; return }
             $picked = @($script:Gui['SoeConfigGrid'].Items | Where-Object { $_.Checked } | ForEach-Object { $_.Tag })
-            if ($picked.Count -eq 0) { Show-GuiNotice 'Tick the configuration points to add first.'; return }
+            if ($picked.Count -eq 0) { Show-GuiNotice 'Tick the rows to add first.'; return }
             $ref = Get-ComboChoice -Combo $script:Gui['SoeRefCombo']
             $added = 0
             foreach ($row in $picked) {
+                # a software, agent, feature, service or setting row: the same conversion "Add from server..." uses
+                if ($row.PSObject.Properties['Candidate'] -and $row.Candidate) {
+                    $it = ConvertTo-SoeItem -Candidate $row.Candidate -Server $ref
+                    if ($it) { $std.items = @($std.items) + $it; $added++ }
+                    continue
+                }
                 $value = [string]$row.Value
                 $source = "reference $ref"
-                if (-not $ref -or -not $value -or $value -like 'NotConfigured*' -or $value -in 'file missing', 'key missing' -or $value -like 'ERROR:*' -or $value -like '(not read*') {
+                if (-not $ref -or (Test-SoePointAbsent -Value $value) -or $value -like 'ERROR:*') {
                     if (-not (Test-GuiDialogAllowed 'The value prompt')) { return }
                     $value = Show-InputBox -Title ('Expected value - ' + $row.Point) -Prompt 'Value every server must have (plain text, * wildcard, or re:<regex>):' -Default ''
                     if (-not $value) { continue }
@@ -2001,7 +2441,7 @@ function New-HealthConsole {
                 $std.items = @($std.items) + (New-SoeItem -Type $row.Type -Name $row.Point -Path $row.Where -Key $row.Key -Expected $value -Required $true -Source $source -Note ([string]$row.Note))
                 $added++
             }
-            if ($added -gt 0) { Save-SoeStandard -Standard $std; Write-PatchLog "$added configuration point(s) added to standard '$($std.name)' and saved" 'OK'; Update-SoeItemsGrid }
+            if ($added -gt 0) { Save-SoeStandard -Standard $std; Write-PatchLog "$added item(s) from reference server $ref added to standard '$($std.name)' and saved" 'OK'; Update-SoeItemsGrid }
         }
     }))
     $cfgGrid = New-ConsoleGrid -Columns @(@{ Name = 'Point'; Width = 240 }, @{ Name = 'Type'; Width = 60 }, @{ Name = 'Where'; Width = 330 }, @{ Name = 'Key'; Width = 150 }, @{ Name = 'Value'; Width = 260; Fill = $true }, @{ Name = 'Note'; Width = 320 })
@@ -2061,7 +2501,7 @@ function New-HealthConsole {
             $it = Show-SoeItemEditor; if ($it) { $std.items = @($std.items) + $it; Save-SoeStandard -Standard $std; Update-SoeItemsGrid }
         }
     }))
-    $soeBar.Controls.Add((New-GuiButton -Text 'Remove ticked items' -X 815 -Y 4 -W 140 -H 32 -ReadOnly -Tip 'Removes the ticked rules from the standard (asks first). Saved at once.' -OnClick {
+    $soeBar.Controls.Add((New-GuiButton -Text 'Remove items (ticked)' -X 815 -Y 4 -W 140 -H 32 -ReadOnly -Tip 'Removes the ticked rules from the standard (asks first). Saved at once.' -OnClick {
         Invoke-GuiAction -Name 'Remove SOE items' -ReadOnly -Action {
             $std = $script:Gui['SoeStandard']; if (-not $std) { return }
             $drop = @($script:Gui['SoeItemsGrid'].Items | Where-Object { $_.Checked } | ForEach-Object { $_.Tag.Item })
@@ -2109,7 +2549,7 @@ function New-HealthConsole {
     $null = New-ConsoleBanner -Tab $tab -Console 'Health' -Title 'HEALTH CONSOLE' -Subtitle 'services, tasks, failed logons, dormant software, Group Policy, SOE standards - read-only'
     $pages.BringToFront()
     Update-SoeStandardCombo
-    Register-ConsoleRefresher -Console 'Health' -Refresh { Update-HealthGrid; Update-SoeConfigPointsGrid; Update-HealthGpoPage }
+    Register-ConsoleRefresher -Console 'Health' -Refresh { Update-HealthGrid; Update-SoeRefCombo; Update-SoeConfigPointsGrid; Update-HealthGpoPage }
 }
 
 function Get-SoeStandardSourceForServer {

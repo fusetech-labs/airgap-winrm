@@ -1,5 +1,7 @@
 ﻿# =====================================================================
 #  04-Patches.ps1  -  FIND AND VET THE PATCH FILES IN \patches
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  The tool is fully offline: you download the .msu (or .cab) files from
 #  the Microsoft Update Catalog on a machine that has internet, then
@@ -144,7 +146,7 @@ function Get-PatchFiles {
             # Hand-installed types: signature still checked (it is cheap insurance), no build or hash needed.
             $sigStatus = 'Unknown'; $signer = ''
             try { $sig = Get-AuthenticodeSignature -LiteralPath $file.FullName -ErrorAction Stop; $sigStatus = [string]$sig.Status; if ($sig.SignerCertificate) { $signer = $sig.SignerCertificate.Subject } } catch { }
-            $info = [pscustomobject]@{ TargetBuild = 0; Signature = $sigStatus; Signer = $signer; Hash = ''; Source = 'n/a'; Family = ''; DotNet = '' }
+            $info = [pscustomobject]@{ TargetBuild = 0; Signature = $sigStatus; Signer = $signer; Hash = ''; Source = 'n/a'; Family = ''; DotNet = ''; Kind = ''; Builds = @() }
         }
         # a .NET Framework rollup: the .NET line from inside the file, else from its name ("-ndp481")
         $dotNetLine = [string]$info.DotNet
@@ -158,19 +160,27 @@ function Get-PatchFiles {
             PatchType   = $c.PatchType
             Installable = $installable
             OsLine      = $osLine
-            OsFamily    = [string]$info.Family      # 'windows10.0' for a .NET rollup that names no build (else '')
+            OsFamily    = [string]$info.Family      # 'windows10.0' for a .NET rollup (else '')
             DotNetLine  = $dotNetLine               # '4.8.1' for a .NET rollup (else '')
             TargetBuild = $info.TargetBuild
-            TargetOs    = (Get-OsNameForBuild -Build $info.TargetBuild)
+            TargetBuilds = @($info.Builds | ForEach-Object { [int]$_ })   # several builds one file is for (22H2 / 23H2 share a rollup): TargetBuild stays 0
+            TargetOs    = $(if ($info.TargetBuild -gt 0) { Get-OsNameForBuild -Build $info.TargetBuild } elseif (@($info.Builds).Count -gt 0) { @($info.Builds | ForEach-Object { Get-OsNameForBuild -Build $_ }) -join ' / ' } else { 'unknown' })
             Signature   = $info.Signature
             Signer      = $info.Signer
             Hash        = $info.Hash
+            Kind        = [string]$info.Kind        # cumulative / servicing stack / dotnet / dynamic update / other / '' (Get-PatchKindFromText)
         }
         if ($installable -and $info.Signature -ne 'Valid') {
             Write-PatchLog "  -> $kb signature is '$($info.Signature)' (signer: '$($info.Signer)'). It will show as 'Blocked: signature' unless RequireValidSignature is turned off in 01-Config.ps1" 'WARN'
         }
-        if ($installable -and $info.TargetBuild -eq 0 -and $info.Family -and $info.DotNet) {
-            Write-PatchLog "  -> $kb is a .NET Framework $($info.DotNet) rollup for the $($info.Family) line: no Windows build inside - each server's .NET line decides (Not applicable, or READY and DISM checks the rest)" 'INFO'
+        if ($installable -and [string]$info.Kind -eq 'dynamic update') {
+            Write-PatchLog "  -> $kb is a Dynamic Update (a Safe OS package for setup media and the recovery environment), not an update for a running server: it shows as 'Blocked: dynamic update'. The cumulative update carries what the server needs - delete the file, or move it to patches\Other" 'WARN'
+        }
+        $fileBuilds = @($info.Builds | ForEach-Object { [int]$_ })
+        if ($installable -and $info.TargetBuild -eq 0 -and $fileBuilds.Count -gt 0) {
+            Write-PatchLog "  -> $kb is one file for several Windows builds ($(@($fileBuilds | ForEach-Object { Get-OsNameForBuild -Build $_ }) -join ' / ')): READY on a server with one of them, 'Blocked: wrong OS' on any other" 'INFO'
+        } elseif ($installable -and $info.TargetBuild -eq 0 -and $info.Family -and $info.DotNet) {
+            Write-PatchLog "  -> $kb is a .NET Framework $($info.DotNet) rollup for the $($info.Family) line: no Windows build inside - each server's .NET line decides (Not applicable, or READY). DISM takes a rollup for another build as an empty wrapper and calls that success, so the install checks afterwards that the KB is on the server" 'INFO'
         } elseif ($installable -and $info.TargetBuild -eq 0) {
             Write-PatchLog "  -> $kb target build could not be read from inside the file. It will show as 'Blocked: OS unknown' unless AllowUnknownTargetBuild is turned on" 'WARN'
         }
@@ -215,9 +225,11 @@ function Get-PatchFileInfo {
     if (Test-Path -LiteralPath $cache) {
         $h = @{}
         foreach ($line in (Get-Content -LiteralPath $cache)) { if ($line -match '^([A-Za-z]+)=(.*)$') { $h[$Matches[1]] = $Matches[2] } }
-        # Reader=3: the cache also holds the OS family and the .NET line (older entries are read again)
-        if ($h['Stamp'] -eq $stamp -and $h['Hash'] -and $h.ContainsKey('TargetBuild') -and $h.ContainsKey('Signature') -and $h['Reader'] -eq '3') {
-            return [pscustomobject]@{ TargetBuild = [int]$h['TargetBuild']; Signature = $h['Signature']; Signer = $h['Signer']; Hash = $h['Hash']; Source = $h['Source']; Family = [string]$h['Family']; DotNet = [string]$h['DotNet'] }
+        # Reader=5: the cache also holds the OS family, the .NET line, the kind of package and the builds a .NET rollup is for
+        # (read from inside its cab; older entries are read again)
+        if ($h['Stamp'] -eq $stamp -and $h['Hash'] -and $h.ContainsKey('TargetBuild') -and $h.ContainsKey('Signature') -and $h['Reader'] -eq '5') {
+            return [pscustomobject]@{ TargetBuild = [int]$h['TargetBuild']; Signature = $h['Signature']; Signer = $h['Signer']; Hash = $h['Hash']; Source = $h['Source']; Family = [string]$h['Family']; DotNet = [string]$h['DotNet']; Kind = [string]$h['Kind']
+                                      Builds = @([string]$h['Builds'] -split ';' | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ }) }
         }
     }
 
@@ -235,11 +247,33 @@ function Get-PatchFileInfo {
     }
     $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
     $secs = [math]::Round($watch.Elapsed.TotalSeconds, 1)
-    Write-PatchLog ("  -> {0}: target build {1} = {2} (from {3}); signature {4}; SHA256 {5}...  ({6} s, cached in patches\_info)" -f $file.Name, $build.Build, (Get-OsNameForBuild -Build $build.Build), $build.Source, $sigStatus, $hash.Substring(0, 12), $secs) 'INFO'
+    Write-PatchLog ("  -> {0}: target build {1} = {2} (from {3}); {4}; signature {5}; SHA256 {6}...  ({7} s, cached in patches\_info)" -f $file.Name, $build.Build, (Get-OsNameForBuild -Build $build.Build), $build.Source, $(if ($build.Kind) { 'a ' + $build.Kind + ' package' } else { 'kind of package not read' }), $sigStatus, $hash.Substring(0, 12), $secs) 'INFO'
 
-    @("Stamp=$stamp", "TargetBuild=$($build.Build)", "TargetOs=$(Get-OsNameForBuild -Build $build.Build)", "Source=$($build.Source)", "Family=$($build.Family)", "DotNet=$($build.DotNet)",
-      "Signature=$sigStatus", "Signer=$signer", "Hash=$hash", "File=$($file.Name)", "Read=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')", 'Reader=3') | Set-Content -LiteralPath $cache
-    return [pscustomobject]@{ TargetBuild = $build.Build; Signature = $sigStatus; Signer = $signer; Hash = $hash; Source = $build.Source; Family = [string]$build.Family; DotNet = [string]$build.DotNet }
+    @("Stamp=$stamp", "TargetBuild=$($build.Build)", "TargetOs=$(Get-OsNameForBuild -Build $build.Build)", "Builds=$(@($build.Builds) -join ';')", "Source=$($build.Source)", "Family=$($build.Family)", "DotNet=$($build.DotNet)", "Kind=$($build.Kind)",
+      "Signature=$sigStatus", "Signer=$signer", "Hash=$hash", "File=$($file.Name)", "Read=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')", 'Reader=5') | Set-Content -LiteralPath $cache
+    return [pscustomobject]@{ TargetBuild = $build.Build; Signature = $sigStatus; Signer = $signer; Hash = $hash; Source = $build.Source; Family = [string]$build.Family; DotNet = [string]$build.DotNet; Kind = [string]$build.Kind; Builds = @($build.Builds) }
+}
+
+function Get-PatchKindFromText {
+    # What kind of package the manifest inside a file names (the .xml of an .msu, the update.mum of a .cab):
+    #   cumulative       the monthly LCU: Package_for_RollupFix (the older .msu layout), or "Multiple_Packages" - the
+    #                    2022 / 2025 layout, whose _uup.xml names the servicing stack cab AND the big cab that holds
+    #                    the rollup as Multiple_Packages (read off a real KB5126655, 2026-10).  Checked first: the
+    #                    servicing stack named beside it is inside this very file
+    #   servicing stack  Package_for_ServicingStack alone - a separate SSU: goes before the cumulative update it prepares for
+    #   dotnet           Package_for_DotNetRollup - a .NET Framework rollup
+    #   dynamic update   Package_for_SafeOSDU - a Safe OS Dynamic Update: a package for setup media and the recovery
+    #                    environment (WinRE), not for a running server.  Installed on one it stages, and the reboot undoes
+    #                    it (field test 2026-11: it went first, being the smallest file, and was rolled back)
+    #   other            any other Package_for_KB... (a standalone fix, the Secure Boot DBX update ...)
+    #   ''               nothing recognisable
+    param([string]$Text)
+    if ($Text -match 'Package_for_RollupFix|name="Multiple_Packages"') { return 'cumulative' }
+    if ($Text -match 'Package_for_ServicingStack') { return 'servicing stack' }
+    if ($Text -match 'Package_for_DotNetRollup') { return 'dotnet' }
+    if ($Text -match 'Package_for_SafeOS') { return 'dynamic update' }
+    if ($Text -match 'Package_for_KB\d+') { return 'other' }
+    return ''
 }
 
 function Read-PatchTargetBuild {
@@ -249,15 +283,20 @@ function Read-PatchTargetBuild {
     #          pkgProperties.txt has Installer Version="10.0.20348.1960"; the bundled servicing
     #          stack cab is called SSU-20348.xxxx-x64.cab.  Any of the three gives the build.
     #   .cab : update.mum inside carries the package version.
-    #   .NET : a .NET Framework rollup (windows10.0-kb...-ndp481.msu) carries NO Windows build: pkgProperties says
-    #          Applies to="Windows 10.0" (the whole line) and the .xml names Package_for_DotNetRollup_481 - the
-    #          file is listed by its .NET line and OS family instead, and DISM checks the exact applicability.
-    # Returns @{ Build = <int, 0 = unknown>; Source = <where it was read from>; Family = 'windows10.0' or ''; DotNet = '4.8.1' or '' }
+    #   .NET : a .NET Framework rollup (windows10.0-kb...-ndp481.msu) names NO Windows build in its outer files: pkgProperties
+    #          says Applies to="Windows 10.0" (the whole line) and the .xml names Package_for_DotNetRollup_481.  The build is
+    #          in the update.mum INSIDE its cab: the <parent> editions the rollup is for (10.0.20348.1 = Server 2022) - two
+    #          expands, the cab out of the msu and update.mum out of the cab.  DISM does NOT refuse a rollup for another
+    #          build: it installs the wrapper with every part skipped and returns 0 (field 2026-11, KB5127687 on a Server
+    #          2019 toolkit PC), so the build has to be known here.  The file is also listed by its .NET line and OS family.
+    # Returns @{ Build = <int, 0 = unknown>; Source = <where it was read from>; Family = 'windows10.0' or ''; DotNet = '4.8.1' or '';
+    #            Builds = every build the file is for when there are several (22H2 / 23H2 share a rollup; Build stays 0 then);
+    #            Kind = what the manifest names (Get-PatchKindFromText: cumulative / servicing stack / dotnet / dynamic update / other / '') }
     param([Parameter(Mandatory = $true)][string]$Path)
     $file = Get-Item -LiteralPath $Path
     $build = 0
     $how = ''
-    $family = ''; $dotNet = ''
+    $family = ''; $dotNet = ''; $kind = ''; $builds = @()
     $temp = Join-Path $script:Config.PatchInfoFolder ('tmp-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     # Windows' own expand.exe by its full path: a Git for Windows or MSYS install puts a GNU "expand" (a text tool) on
     # the PATH ahead of System32 on some operator PCs, and every file then reads as "not found" (seen 2026-10-29)
@@ -273,6 +312,7 @@ function Read-PatchTargetBuild {
                 foreach ($m in [regex]::Matches($text, 'version="(\d{5})\.\d+\.\d+\.\d+"')) {
                     if ($build -eq 0) { $build = [int]$m.Groups[1].Value; $how = $xml.Name }
                 }
+                if (-not $kind) { $kind = Get-PatchKindFromText -Text $text }
             }
             if ($build -eq 0) {
                 foreach ($props in @(Get-ChildItem -LiteralPath $temp -Filter '*pkgProperties.txt' -ErrorAction SilentlyContinue)) {
@@ -285,6 +325,29 @@ function Read-PatchTargetBuild {
                 if ($listing -match 'SSU-(\d{5})\.') { $build = [int]$Matches[1]; $how = 'SSU cab name' }
             }
             if ($build -eq 0) {
+                # the update.mum inside the cab (a .NET rollup): the <parent> editions name the build the file is for
+                Write-PatchLog "expand.exe -F:*.cab `"$($file.FullName)`" `"$temp`"   (the outer files name no build: reading the update.mum inside the cab)" 'CMD'
+                $null = & $expand -F:*.cab "$($file.FullName)" "$temp" 2>&1
+                foreach ($cab in @(Get-ChildItem -LiteralPath $temp -Filter '*.cab' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch '^WSUSSCAN' } | Sort-Object Length -Descending)) {
+                    $inner = Join-Path $temp ('mum-' + $cab.BaseName)
+                    New-Item -ItemType Directory -Path $inner -Force | Out-Null
+                    $null = & $expand -F:update.mum "$($cab.FullName)" "$inner" 2>&1
+                    $mum = Join-Path $inner 'update.mum'
+                    if (-not (Test-Path -LiteralPath $mum)) { continue }
+                    $text = Get-Content -LiteralPath $mum -Raw
+                    if (-not $kind) { $kind = Get-PatchKindFromText -Text $text }
+                    $found = @()
+                    foreach ($el in [regex]::Matches($text, '<assemblyIdentity\b[^>]*>')) { if ($el.Value -match 'name="Microsoft-Windows-' -and $el.Value -match 'version="10\.0\.(\d{5})\.') { $found += [int]$Matches[1] } }
+                    $found = @($found | Sort-Object -Unique)
+                    if ($found.Count -gt 0) {
+                        $builds = $found
+                        if ($found.Count -eq 1) { $build = $found[0] }
+                        $how = ('update.mum inside {0}: the parent editions are at build {1}' -f $cab.Name, ($found -join ' / '))
+                        break
+                    }
+                }
+            }
+            if ($build -eq 0 -or $kind -eq 'dotnet') {
                 foreach ($props in @(Get-ChildItem -LiteralPath $temp -Filter '*pkgProperties.txt' -ErrorAction SilentlyContinue)) {
                     $text = Get-Content -LiteralPath $props.FullName -Raw
                     if ($text -match 'Applies to="Windows (\d+\.\d+)"') { $family = 'windows' + $Matches[1] }
@@ -300,8 +363,10 @@ function Read-PatchTargetBuild {
                     if ($listing -match '(?i)-NDP(\d{2,3})\.cab') { $dotNet = ConvertTo-DotNetLine -Digits $Matches[1] }
                     elseif ($file.Name -match '(?i)-ndp(\d{2,3})') { $dotNet = ConvertTo-DotNetLine -Digits $Matches[1] }
                 }
-                if ($family -and $dotNet) { $how = ('pkgProperties: a .NET Framework {0} rollup for the {1} line (no build inside)' -f $dotNet, $family) }
-                elseif ($family) { $how = ('pkgProperties: Applies to the {0} line (no build inside)' -f $family); $family = '' }   # only a .NET rollup is let through on the family alone
+                if ($build -eq 0 -and $builds.Count -eq 0) {
+                    if ($family -and $dotNet) { $how = ('pkgProperties: a .NET Framework {0} rollup for the {1} line (no build inside)' -f $dotNet, $family) }
+                    elseif ($family) { $how = ('pkgProperties: Applies to the {0} line (no build inside)' -f $family); $family = '' }   # only a .NET rollup is let through on the family alone
+                }
             }
         } else {
             Write-PatchLog "expand.exe -F:update.mum `"$($file.FullName)`" `"$temp`"" 'CMD'
@@ -310,6 +375,11 @@ function Read-PatchTargetBuild {
             if (Test-Path -LiteralPath $mum) {
                 $text = Get-Content -LiteralPath $mum -Raw
                 if ($text -match 'version="(\d{5})\.\d+\.\d+\.\d+"') { $build = [int]$Matches[1]; $how = 'update.mum' }
+                $kind = Get-PatchKindFromText -Text $text
+            } else {
+                # no update.mum: not a package DISM can add - a Setup Dynamic Update (setup files for installation media) or
+                # some other archive; said so here, so the log and the patch list do not call it an unreadable build
+                $how = 'no update.mum inside - not a Windows update package (a Setup Dynamic Update is setup files for installation media)'
             }
         }
     } catch {
@@ -318,7 +388,7 @@ function Read-PatchTargetBuild {
         Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
     }
     if ($build -eq 0 -and -not $how) { $how = 'not found' }
-    return @{ Build = $build; Source = $how; Family = $family; DotNet = $dotNet }
+    return @{ Build = $build; Source = $how; Family = $family; DotNet = $dotNet; Kind = $kind; Builds = @($builds) }
 }
 
 function ConvertTo-DotNetLine {
@@ -343,6 +413,8 @@ function Test-PatchOsMismatch {
         if ($a -in 22621, 22631 -and $b -in 22621, 22631) { return $false }   # Win11 22H2/23H2 share packages
         return ($a -ne $b)
     }
+    # one file for several builds (read from the update.mum inside a .NET rollup): the server's must be among them
+    if ($Patch.PSObject.Properties['TargetBuilds'] -and @($Patch.TargetBuilds).Count -gt 0) { return (-not (@($Patch.TargetBuilds | ForEach-Object { [int]$_ }) -contains $major)) }
     if (-not $Patch.OsLine) { return $false }
     if ($Patch.OsLine -eq 'windows10.0' -and $major -ge 22000) { return $true }
     if ($Patch.OsLine -eq 'windows11.0' -and $major -lt 22000) { return $true }
@@ -354,6 +426,9 @@ function Get-OsMismatchText {
     param($Status, $Patch)
     if ($Patch.TargetBuild -gt 0) {
         return ("wrong OS - file is for {0} (build {1}), server is build {2}" -f $Patch.TargetOs, $Patch.TargetBuild, $Status.Build)
+    }
+    if ($Patch.PSObject.Properties['TargetBuilds'] -and @($Patch.TargetBuilds).Count -gt 0) {
+        return ("wrong OS - file is for {0} (builds {1}), server is build {2}" -f $Patch.TargetOs, (@($Patch.TargetBuilds) -join ' / '), $Status.Build)
     }
     return ("wrong OS line - file is '{0}', server build is {1}" -f $Patch.OsLine, $Status.Build)
 }
@@ -394,6 +469,9 @@ function Get-PatchVerdict {
     $historyStale = ($known -and $known.Build -eq $srvMajor -and $srvUbr -ge 0 -and $srvUbr -lt $known.UBR)
     if ($Status.HistoryInstalledKBs -contains $Patch.KB -and -not $historyStale) { $v.Cell = 'Installed (history)'; $v.Reason = 'already installed (per Windows Update history)'; return $v }
     if ($Patch.PSObject.Properties['Installable'] -and -not $Patch.Installable) { $v.Cell = 'By hand'; $v.Reason = "$($Patch.PatchType) files are not installed by the tool - apply by hand, see the help text"; return $v }
+    # a Safe OS Dynamic Update is for setup media and the recovery environment: on a running server it stages, and the
+    # reboot undoes it (field test 2026-11) - the cumulative update of the same month carries what the server needs
+    if ($Patch.PSObject.Properties['Kind'] -and [string]$Patch.Kind -eq 'dynamic update') { $v.Cell = 'Blocked: dynamic update'; $v.Reason = 'a Dynamic Update (Safe OS package for setup media and WinRE), not an update for a running server - the reboot would undo it; the cumulative update covers the server. Delete the file or move it to patches\Other'; return $v }
     # a .NET Framework rollup is for one .NET line: a server that runs another (the Inventory knows) does not take it
     if ($Server -and $Patch.PSObject.Properties['DotNetLine'] -and $Patch.DotNetLine) {
         $inv = Get-CollectorResult -Name 'Inventory' -Server $Server
@@ -411,14 +489,17 @@ function Get-PatchVerdict {
     }
     if ($Status.FreeGB -lt $script:Config.MinFreeGB)  { $v.Cell = 'Blocked: disk';       $v.Reason = "low disk ($($Status.FreeGB) GB free on C:)"; return $v }
     if ($script:Config.RequireValidSignature -and $Patch.Signature -ne 'Valid') { $v.Cell = 'Blocked: signature'; $v.Reason = "file signature is '$($Patch.Signature)' - not a valid Microsoft-signed package"; return $v }
-    $hasFamily = ($Patch.PSObject.Properties['OsFamily'] -and $Patch.OsFamily)   # a .NET rollup: no build inside, the line (10.0 / 11.0) is known
-    if ($Patch.TargetBuild -le 0 -and -not $hasFamily -and -not $script:Config.AllowUnknownTargetBuild) { $v.Cell = 'Blocked: OS unknown'; $v.Reason = 'target build could not be read from inside the file - see patches\_info and the log'; return $v }
+    $hasFamily = ($Patch.PSObject.Properties['OsFamily'] -and $Patch.OsFamily)   # a .NET rollup whose build was not read: the line (10.0 / 11.0) is known
+    $hasBuilds = ($Patch.PSObject.Properties['TargetBuilds'] -and @($Patch.TargetBuilds).Count -gt 0)   # one file for several builds (22H2 / 23H2)
+    if ($Patch.TargetBuild -le 0 -and -not $hasFamily -and -not $hasBuilds -and -not $script:Config.AllowUnknownTargetBuild) { $v.Cell = 'Blocked: OS unknown'; $v.Reason = 'target build could not be read from inside the file - see patches\_info and the log'; return $v }
     # the server side of the same guard: a build that could not be read must not pass as "no mismatch"
     $srvBuild = 0; [void][int]::TryParse(([string]$Status.Build -split '\.')[0], [ref]$srvBuild)
     if ($srvBuild -le 0) { $v.Cell = 'Blocked: OS unknown'; $v.Reason = "the server's Windows build could not be read ('$($Status.Build)') - check the status log"; return $v }
     if (Test-PatchOsMismatch -Status $Status -Patch $Patch) { $v.Cell = 'Blocked: wrong OS'; $v.Reason = (Get-OsMismatchText -Status $Status -Patch $Patch); return $v }
     $v.Go = $true; $v.Cell = 'READY'; $v.Reason = 'ready'
-    if ($Patch.TargetBuild -le 0 -and $hasFamily) { $v.Reason = ('ready - a .NET Framework {0} package for the {1} line (no build inside); DISM checks the exact applicability (0x800F081E = not for this build)' -f $Patch.DotNetLine, $Patch.OsFamily) }
+    # a .NET rollup whose build could not be read from inside: DISM does not refuse a rollup for another build - it goes in as
+    # an empty wrapper with exit 0 (field 2026-11) - so the install checks afterwards that the KB is on the server
+    if ($Patch.TargetBuild -le 0 -and $hasFamily -and -not $hasBuilds) { $v.Reason = ('ready - a .NET Framework {0} package for the {1} line; its Windows build could not be read, and DISM takes a .NET rollup for another build as an empty wrapper (exit 0, nothing installed) - the install checks afterwards that the KB is on the server' -f $Patch.DotNetLine, $Patch.OsFamily) }
     # a copy of the file already on the server (STAGE ONLY, or kept by an earlier run): same name and size - the install's
     # copy step checks the hash and skips the transfer
     if ($Status.PSObject.Properties['StagedFiles']) {

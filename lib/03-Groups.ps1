@@ -1,5 +1,7 @@
 ﻿# =====================================================================
 #  03-Groups.ps1  -  READ THE SERVER LISTS (PatchGroup-A.txt etc.)
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  Rules for a group file (any *.txt in the root folder):
 #    * one server name per line (short name or FQDN)
@@ -48,6 +50,24 @@ function Get-UniqueNames {
         if ($t -and $seen.Add($t)) { $out += $t }
     }
     return $out
+}
+
+function Test-ThisComputer {
+    # Is this name the toolkit PC itself?  localhost, 127.0.0.1, ::1, the computer name or its FQDN - compared as text,
+    # so a box that shares the short name in another domain stays another box.  The toolkit PC can be a managed server
+    # like any other (its own WinRM listener, the account an administrator on it): the status check says so in the log,
+    # and the reboot takes it last, after its own Yes, with a longer countdown - the toolkit closes with the restart
+    # (field test 2026-11: the server running the toolkit has to be patched too).
+    param([string]$Name)
+    $t = ([string]$Name).Trim().TrimEnd('.')
+    if (-not $t) { return $false }
+    if (-not $script:ThisComputerNames) {
+        $names = @('localhost', '127.0.0.1', '::1', $env:COMPUTERNAME)
+        try { $ip = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties(); if ($ip.DomainName) { $names += ($ip.HostName + '.' + $ip.DomainName) } } catch { }
+        $script:ThisComputerNames = @($names | Where-Object { $_ })
+    }
+    foreach ($n in $script:ThisComputerNames) { if ($t -ieq $n) { return $true } }
+    return $false
 }
 
 function Read-GroupFile {

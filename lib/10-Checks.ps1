@@ -1,5 +1,7 @@
 ﻿# =====================================================================
 #  10-Checks.ps1  -  THE CHECK MODEL, VERDICTS, LIGHTS AND JSON FILES
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  A "check" is one question asked of one server: is PowerShell 2.0 removed?
 #  is the Logon audit subcategory on?  is W32Time running?  Each check is a

@@ -1,5 +1,7 @@
 # =====================================================================
 #  80-Console-Commands.ps1  -  THE COMMANDS CONSOLE
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  One PowerShell command, typed or picked from the cheat sheet, run on
 #  the ticked servers; every server's answer underneath, one after the
@@ -63,9 +65,9 @@ $script:CommandNotReadOnly = @{ 'Get-WindowsUpdateLog' = 'Get-WindowsUpdateLog w
     'Test-DbaLastBackup' = 'Test-DbaLastBackup (dbatools) restores the last backup of every database and drops it again' }
 # refused outright, with what to do instead
 $script:CommandRefused = @{
-    'Restart-Computer' = 'a restart goes through "Reboot ticked servers" (O/S Patching or Software tab): it checks that no servicing is running and records the change'
+    'Restart-Computer' = 'a restart goes through "Reboot (ticked)" (O/S Patching or Software tab): it checks that no servicing is running and records the change'
     'Stop-Computer'    = 'a shutdown is not done from this tool'
-    'shutdown'         = 'a restart goes through "Reboot ticked servers" (O/S Patching or Software tab): it checks that no servicing is running and records the change'
+    'shutdown'         = 'a restart goes through "Reboot (ticked)" (O/S Patching or Software tab): it checks that no servicing is running and records the change'
     'Read-Host'        = 'it waits for someone at the server''s screen - nobody is there, it would only time out'
     'Get-Credential'   = 'it waits for someone at the server''s screen - nobody is there, it would only time out'
     'Out-GridView'     = 'it opens a window on the server - nobody is there to see it'
@@ -790,7 +792,7 @@ function Update-CommandRiskLabel {
         'May change' { $label.ForeColor = 'DarkRed'; $label.Text = 'MAY CHANGE the servers - asks for a change record and a confirmation first: ' + (@($risk.Reasons | Select-Object -First 2) -join '; ') }
     }
     if ($run) {
-        if ($risk.Verdict -eq 'May change') { $run.Text = 'Run - MAY CHANGE...'; $run.BackColor = 'LightCoral' } else { $run.Text = 'Run on ticked servers'; $run.BackColor = 'LightGreen' }
+        if ($risk.Verdict -eq 'May change') { $run.Text = 'Run - MAY CHANGE (ticked servers)'; $run.BackColor = 'Tomato' } else { $run.Text = 'Run (ticked servers)'; $run.BackColor = 'LightSkyBlue' }
     }
 }
 
@@ -930,7 +932,7 @@ function New-CommandsConsole {
     $box.Add_KeyDown({ if ($_.KeyCode -eq 'Enter' -and -not $this.DroppedDown) { $_.SuppressKeyPress = $true; Start-CommandRun } })
     $script:Gui['CommandBox'] = $box
     # -ReadOnly: a read-only command may run alongside an install (Invoke-GuiAction refuses one that may change)
-    $run = New-GuiButton -Text 'Run on ticked servers' -W 170 -H 28 -Colour 'LightGreen' -ReadOnly -Tip 'Read-only commands run at once; one that may change the servers asks for a change record and a confirmation first' -OnClick { Start-CommandRun }
+    $run = New-GuiButton -Text 'Run (ticked servers)' -W 170 -H 28 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Read-only commands run at once; one that may change the servers asks for a change record and a confirmation first' -OnClick { Start-CommandRun }
     $run.Dock = 'Right'
     $script:Gui['CommandRunButton'] = $run
     $cmdBar.Controls.AddRange(@($box, $cmdLabel, $run)); $box.BringToFront()
@@ -984,7 +986,7 @@ function New-CommandsConsole {
     $combo = New-GroupPicker -Toolbar $toolbar -OnChange { Update-CommandServerGrid }
     $script:Gui['CommandGroupCombo'] = $combo
     $toolbar.Controls.Add((New-GuiButton -Text 'Tick all' -X 235 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['CommandGrid'] -Checked $true; Update-CommandServerCount }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Untick' -X 310 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['CommandGrid'] -Checked $false; Update-CommandServerCount }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Untick all' -X 310 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['CommandGrid'] -Checked $false; Update-CommandServerCount }))
     $tbHint = New-Object System.Windows.Forms.Label; $tbHint.Location = New-Object System.Drawing.Point(395, 14); $tbHint.AutoSize = $true; $tbHint.ForeColor = 'DimGray'
     $tbHint.Text = 'Read-only commands run at once. Anything that may change a server asks for a change record and a confirmation, and is recorded.'
     $toolbar.Controls.Add($tbHint)

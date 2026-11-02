@@ -1,5 +1,7 @@
 ﻿# =====================================================================
 #  06-Install.ps1  -  INSTALLING A PATCH OVER WinRM
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  The flow (see Install-PatchOnServers at the bottom):
 #    1. Fresh status check of the chosen servers (never trust old data)
@@ -231,6 +233,20 @@ $script:RemoteInstallScript = {
                     default      { throw "$pkgName - DISM returned $code ($hex). See $logPath on the server" }
                 }
                 $applied++
+            }
+            # Step B2: exit 0 without a reboot is checked against the servicing store.  DISM calls a .NET rollup for ANOTHER
+            # Windows build a success: the wrapper package goes in with every part skipped as not applicable, nothing changes,
+            # and Get-HotFix never lists the KB (field 2026-11: KB5127687, the Server 2022 rollup, "Installed" with exit 0 on
+            # a Server 2019 toolkit PC, READY again at the next check).  The KB must be there now, where the status check looks.
+            if (-not $r.RebootRequired -and $kb -ne 'KB?') {
+                $seen = $false
+                try { $seen = (@(Get-CimInstance -ClassName Win32_QuickFixEngineering -Filter "HotFixID='$kb'" -ErrorAction Stop).Count -gt 0) } catch { $r.Detail += "Win32_QuickFixEngineering not read: $($_.Exception.Message)" }
+                if (-not $seen) {
+                    try { $seen = (@(Get-ChildItem -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\Packages' -ErrorAction Stop | Where-Object { $_.PSChildName -match ('^Package_for_' + $kb + '[_~]') }).Count -gt 0) } catch { $r.Detail += "servicing store not read: $($_.Exception.Message)" }
+                }
+                # not "earlier packages went in": the wrapper installed nothing, so no PARTIAL prefix
+                if (-not $seen) { $applied = 0; throw "DISM returned 0 but $kb is not on the server afterwards (not in Get-HotFix, not in the servicing store): the package is for another Windows build - DISM takes a .NET rollup for the wrong build as an empty wrapper and calls that success. Nothing was installed; get the file for this server's build" }
+                $r.Detail += "$kb is on the server now (Get-HotFix / servicing store)"
             }
             $r.Success = $true
             $r.Message = 'Installed'
@@ -532,8 +548,19 @@ function New-PatchPlan {
     # With OnePatchPerRun (the default) only the first ready file per server goes; the rest wait for the reboot.
     param([string[]]$ComputerName, [object[]]$Patches)
     # the order one-patch-per-run takes them in: Windows before .NET (the list itself is by sub-folder, DotNet first), and
-    # the smaller Windows file first - a servicing stack update before the cumulative update it prepares for (R6-B09)
-    $rank = { param($p) switch ([string]$p.PatchType) { 'Windows' { 0 } 'DotNet' { 1 } default { 2 } } }
+    # among the Windows files by what the package IS (Kind, read from the manifest inside): a separate servicing stack
+    # update first, the cumulative update next, anything else after it.  Size decides only among files of one kind - a
+    # smaller file is not an earlier one: in the field (2026-11) a Dynamic Update went first for being the smallest and
+    # the reboot undid it, the servicing stack it needed being inside the cumulative update still waiting (R6-B09)
+    $rank = {
+        param($p)
+        $kind = ''; if ($p.PSObject.Properties['Kind']) { $kind = [string]$p.Kind }
+        switch ([string]$p.PatchType) {
+            'Windows' { switch ($kind) { 'servicing stack' { 0 } 'cumulative' { 1 } default { 2 } } }
+            'DotNet' { 3 }
+            default { 4 }
+        }
+    }
     $Patches = @($Patches | Sort-Object @{ Expression = { & $rank $_ } }, @{ Expression = { [double]$_.SizeMB } }, Name)
     $plan = @()
     foreach ($c in $ComputerName) {
@@ -550,8 +577,8 @@ function New-PatchPlan {
 function Limit-PlanToOnePatch {
     # One patch per server per run.  The first package of a run that returns 3010 leaves a reboot pending; in the
     # field (October 2026, Trellix Solidcore on the servers) the second package then failed and the first was rolled
-    # back at the reboot.  So the first ready file per server (New-PatchPlan's order: Windows files smallest first - a
-    # servicing stack update before the cumulative update - then .NET) goes, every other ready file waits with a reason.
+    # back at the reboot.  So the first ready file per server (New-PatchPlan's order: a separate servicing stack update,
+    # the cumulative update, other Windows files, then .NET) goes, every other ready file waits with a reason.
     param([object[]]$Plan)
     $first = @{}
     foreach ($item in @($Plan)) {
@@ -687,10 +714,17 @@ function Get-InstallRunState {
     if ($names.Count -eq 0) { return $out }
     $stamps = @($stamps | Select-Object -Unique)
     try {
+        if (-not $script:RunStateMisses) { $script:RunStateMisses = @{} }
+        # this computer among the flagged servers: its run state is read here, no WinRM call to itself
+        foreach ($self in @($names | Where-Object { Test-ThisComputer -Name $_ })) {
+            $rows = @(& $script:RemoteRunStateScript $script:Config.RemoteStaging $stamps | Where-Object { $_ -is [psobject] -and $_.PSObject.Properties['Runs'] })
+            if ($rows.Count -gt 0) { $out[$self.ToLower()] = $rows[-1]; $script:RunStateMisses[$self.ToLower()] = 0 }
+        }
+        $names = @($names | Where-Object { -not (Test-ThisComputer -Name $_) })
+        if ($names.Count -eq 0) { return $out }
         $conn = Get-ConnectionArgs
         $job = Invoke-Command -ComputerName $names @conn -ScriptBlock $script:RemoteRunStateScript -ArgumentList $script:Config.RemoteStaging, $stamps -AsJob -ErrorAction Stop
         Wait-PatcherJob -Job $job -Activity 'Checking the installs' -TimeoutSec (60 * [math]::Max(1, [math]::Ceiling($names.Count / 32.0)))
-        if (-not $script:RunStateMisses) { $script:RunStateMisses = @{} }
         foreach ($child in @($job.ChildJobs)) {
             # per server: its row, or why there is none - a server that cannot be asked (access denied, a name that no longer
             # resolves) is said so, once and then every tenth time, instead of a silent retry for InstallTimeoutMin
@@ -822,7 +856,7 @@ function Show-InstallOutcome {
     $reb = @($rs | Where-Object { $_.RebootRequired }).Count
     if ($bad.Count -eq 0) { Write-PatchLog ('   \o/  All installs succeeded. Nice one, {0}!' -f $script:Config.OperatorName) 'OK' }
     if (-not $script:Gui['Form'] -or -not (Test-GuiDialogAllowed 'The install result')) { return }   # no window (NoGui): the log has it
-    $text = "Installed OK: {0}`nFailed or unknown: {1}`nNeed a reboot: {2}`n`nDetails are in the log. Reboot with the 'Reboot ticked servers' button when you are ready." -f $good, $bad.Count, $reb
+    $text = "Installed OK: {0}`nFailed or unknown: {1}`nNeed a reboot: {2}`n`nDetails are in the log. Reboot with the 'Reboot (ticked)' button when you are ready." -f $good, $bad.Count, $reb
     $agentOff = @(Get-TrellixStoppedServers -Servers @($rs | ForEach-Object { [string]$_.Computer } | Select-Object -Unique))
     if ($agentOff.Count -gt 0) { $text += "`n`nThe Trellix Agent services are stopped on {0} of these server(s): after the reboot, tick them and press 'Start Trellix Agent (ticked)'." -f $agentOff.Count }
     if ($bad.Count -eq 0) { $null = Show-PatcherMessage -Title $Title -Text $text; return }
@@ -923,10 +957,8 @@ function Copy-PatchToServers {
         $n++
         $sess = $null
         try {
-            $conn = Get-ConnectionArgs
-            Write-PatchLog ("[{0}/{1}] New-PSSession -ComputerName {2} -Port {3}" -f $n, $goServers.Count, $c, $conn.Port) 'CMD'
-            $sess = New-PSSession -ComputerName $c @conn -ErrorAction Stop
-            $ready = Invoke-Command -Session $sess -ScriptBlock $script:RemoteStagingScript -ArgumentList $script:Config.RemoteStaging -ErrorAction Stop
+            $sess = New-ToolkitSession -ComputerName $c -Prefix ("[{0}/{1}] " -f $n, $goServers.Count)
+            $ready = Invoke-RemoteBlock -Session $sess -ScriptBlock $script:RemoteStagingScript -ArgumentList $script:Config.RemoteStaging
             Write-PatchLog "$c - $ready" 'INFO'
             foreach ($item in @($todo | Where-Object { $_.Computer -eq $c })) {
                 $dest = $script:Config.RemoteStaging.TrimEnd('\') + '\' + $item.Name
@@ -949,7 +981,7 @@ function Copy-PatchToServers {
                 $results += New-InstallResult -Computer $c -KB $item.KB -File $item.Name -Message "staging failed: $msg"
                 Write-ChangeLog -Record $change -Server $c -Action 'OS patch stage' -Item $item.KB -Result "staging failed: $msg"
             }
-        } finally { if ($sess) { Remove-PSSession -Session $sess -ErrorAction SilentlyContinue } }
+        } finally { Close-ToolkitSession -Session $sess }
     }
     Get-ServerStatus -ComputerName $goServers | Out-Null   # the grid now says READY (staged)
     $good = @($results | Where-Object { $_.Success }).Count
@@ -1061,10 +1093,8 @@ Continue to the safety checks?
         $sess = $null
         $launching = $false
         try {
-            $conn = Get-ConnectionArgs
-            Write-PatchLog ("[{0}/{1}] New-PSSession -ComputerName {2} -Port {3}" -f $n, $goServers.Count, $c, $conn.Port) 'CMD'
-            $sess = New-PSSession -ComputerName $c @conn -ErrorAction Stop
-            $ready = Invoke-Command -Session $sess -ScriptBlock $script:RemoteStagingScript -ArgumentList $script:Config.RemoteStaging -ErrorAction Stop
+            $sess = New-ToolkitSession -ComputerName $c -Prefix ("[{0}/{1}] " -f $n, $goServers.Count)
+            $ready = Invoke-RemoteBlock -Session $sess -ScriptBlock $script:RemoteStagingScript -ArgumentList $script:Config.RemoteStaging
             Write-PatchLog "$c - $ready" 'INFO'
 
             $remoteFiles = @()
@@ -1110,8 +1140,8 @@ Continue to the safety checks?
             # must still leave the run noted, or the grid says READY while the server installs (R6-06)
             Set-InstallFlag -Flag (New-InstallFlag -Server $c -Stamp $stamp -KBs $kbs -Files $remoteFiles -Change $change -ChangeText $changeText -Task ('\WinRMToolkit\OSPatch-' + $stamp))
             $launching = $true
-            Write-PatchLog ("Invoke-Command -Session [{0}] RemoteInstallLaunchScript  (install-{1}.ps1 as a one-shot SYSTEM task: {2})" -f $c, $stamp, ($remoteFiles -join ', ')) 'CMD'
-            $started = Invoke-Command -Session $sess -ScriptBlock $script:RemoteInstallLaunchScript -ArgumentList $script:Config.RemoteStaging, $stamp, $text, $desc -ErrorAction Stop
+            Write-PatchLog ("Invoke-Command -Session [{0}] RemoteInstallLaunchScript  (install-{1}.ps1 as a one-shot SYSTEM task: {2}{3})" -f $c, $stamp, ($remoteFiles -join ', '), $(if (Test-LocalSession -Session $sess) { '; this computer: the launch runs here' } else { '' })) 'CMD'
+            $started = Invoke-RemoteBlock -Session $sess -ScriptBlock $script:RemoteInstallLaunchScript -ArgumentList $script:Config.RemoteStaging, $stamp, $text, $desc
             $launching = $false
             $launched += $c
             Write-PatchLog "$c - $started; the install now belongs to the server and carries on whatever happens to this session" 'OK'
@@ -1139,7 +1169,7 @@ Continue to the safety checks?
             }
         } finally {
             # the session has done its work: the task on the server does not need it
-            if ($sess) { Remove-PSSession -Session $sess -ErrorAction SilentlyContinue }
+            Close-ToolkitSession -Session $sess
         }
     }
 
@@ -1202,9 +1232,12 @@ function Remove-DuplicateServers {
 }
 
 # RUNS ON THE TARGET SERVER: refuses to reboot while servicing is active, then schedules the
-# restart 10 s out with shutdown.exe so this call returns before the connection is cut.
+# restart $DelaySec out (10 s; 60 s when the server is the toolkit PC itself, so the log and the
+# change log are written before the toolkit goes down with it) with shutdown.exe, so this call
+# returns before the connection is cut.
 $script:RemoteRebootScript = {
-    param([string]$Operator, [string]$ChangeText = '', [string]$Staging = '')
+    param([string]$Operator, [string]$ChangeText = '', [string]$Staging = '', [int]$DelaySec = 10)
+    if ($DelaySec -lt 5) { $DelaySec = 5 }
     # Same "really servicing?" test as the status and install scripts: dism/wusa present, TiWorker actually
     # busy (CPU over 2 s), or the Windows Update agent installing.  An idle TiWorker does not block a reboot.
     # Its own block, so the check can be run on its own - nothing in it can reach shutdown.exe.
@@ -1229,13 +1262,13 @@ $script:RemoteRebootScript = {
     $comment = "WinRM Toolkit reboot requested by $Operator - change $ChangeText"
     $comment = $comment -replace '"', "'"   # PowerShell 5.1 passes a native argument's quotes unescaped: one would split the comment into extra switches
     if ($comment.Length -gt 500) { $comment = $comment.Substring(0, 500) }   # shutdown.exe takes at most 512 characters
-    $null = & shutdown.exe /r /t 10 /d p:2:17 /c $comment 2>&1
+    $null = & shutdown.exe /r /t $DelaySec /d p:2:17 /c $comment 2>&1
     if ($LASTEXITCODE -ne 0) { throw "shutdown.exe returned $LASTEXITCODE" }
     # the server's own change record: Application event 920, and change-log.txt when the (locked-down) staging folder exists
-    $line = '{0} | Reboot | restart in 10 s | change {1} | by {2} | scheduled' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $ChangeText, $Operator
+    $line = '{0} | Reboot | restart in {3} s | change {1} | by {2} | scheduled' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $ChangeText, $Operator, $DelaySec
     try { if (-not [System.Diagnostics.EventLog]::SourceExists('OfflinePatcher')) { New-EventLog -LogName Application -Source 'OfflinePatcher' -ErrorAction Stop }; Write-EventLog -LogName Application -Source 'OfflinePatcher' -EventId 920 -EntryType Information -Message ("WinRM Toolkit reboot on {0}: {1}" -f $env:COMPUTERNAME, $line) -ErrorAction Stop } catch { }
     if ($Staging -and (Test-Path -LiteralPath $Staging)) { try { Add-Content -LiteralPath ($Staging.TrimEnd('\') + '\change-log.txt') -Value $line -Encoding UTF8 -ErrorAction Stop } catch { } }
-    return "reboot scheduled in 10 s on $env:COMPUTERNAME"
+    return "reboot scheduled in $DelaySec s on $env:COMPUTERNAME"
 }
 
 function Restart-PatchedServers {
@@ -1268,8 +1301,11 @@ function Restart-PatchedServers {
     }
 
     $toReboot = @()
+    # this computer in a list is named as such: its restart takes the toolkit down with it (no separate question - the
+    # same Yes covers it, with a 60 s countdown so the records are written first)
+    $named = { param([string]$c) if (Test-ThisComputer -Name $c) { "$c   (this computer: the toolkit closes with the restart, 60 s countdown)" } else { $c } }
     if ($pending.Count -gt 0) {
-        $a = Show-PatcherMessage -Title 'Reboot?' -Buttons 'YesNo' -Icon 'Warning' -Default 'Button2' -Text ("These servers are PENDING A REBOOT. Reboot them now?`n`n{0}" -f ($pending -join "`n"))
+        $a = Show-PatcherMessage -Title 'Reboot?' -Buttons 'YesNo' -Icon 'Warning' -Default 'Button2' -Text ("These servers are PENDING A REBOOT. Reboot them now?`n`n{0}" -f (@($pending | ForEach-Object { & $named $_ }) -join "`n"))
         if ($a -eq 'Yes') { $toReboot += $pending } else { Write-PatchLog "$who answered $a - pending servers not rebooted" 'WARN' }
     }
     if ($advised.Count -gt 0) {
@@ -1278,7 +1314,7 @@ function Restart-PatchedServers {
         if ($a -eq 'Yes') { $toReboot += $advised } else { Write-PatchLog "$who answered $a - servers with a reboot advised after a removal are left alone" 'INFO' }
     }
     if ($notPending.Count -gt 0) {
-        $a = Show-PatcherMessage -Title 'Reboot servers that are NOT pending a reboot?' -Buttons 'YesNo' -Icon 'Warning' -Default 'Button2' -Text ("These servers do NOT need a reboot according to their status. Reboot them anyway?`n`n{0}`n`n(Logged-on users will be disconnected.)" -f ($notPending -join "`n"))
+        $a = Show-PatcherMessage -Title 'Reboot servers that are NOT pending a reboot?' -Buttons 'YesNo' -Icon 'Warning' -Default 'Button2' -Text ("These servers do NOT need a reboot according to their status. Reboot them anyway?`n`n{0}`n`n(Logged-on users will be disconnected.)" -f (@($notPending | ForEach-Object { & $named $_ }) -join "`n"))
         if ($a -eq 'Yes') { $toReboot += $notPending } else { Write-PatchLog "$who answered $a - servers not pending a reboot are left alone" 'INFO' }
     }
     if ($toReboot.Count -eq 0) { Write-PatchLog 'No reboot sent' 'INFO'; return }
@@ -1299,13 +1335,17 @@ function Restart-PatchedServers {
     if (-not $change) { return }
     $changeText = Format-ChangeText $change
 
-    foreach ($c in $toReboot) {
+    # the toolkit PC itself (Test-ThisComputer) goes last, with shutdown.exe run here and a 60 s countdown instead of 10:
+    # its restart closes the toolkit with everything on the screen, so the log and the change log are written first; the
+    # open run is on record and the next status check, after the toolkit is started again, finishes it (field test 2026-11)
+    $selfOnes = @($toReboot | Where-Object { Test-ThisComputer -Name $_ })
+    foreach ($c in (@($toReboot | Where-Object { $selfOnes -notcontains $_ }) + @($selfOnes))) {
+        $delay = 10; $selfText = ''
+        if ($selfOnes -contains $c) { $delay = 60; $selfText = ' (this computer - the toolkit closes with the restart; shutdown /a cancels it)' }
         try {
-            $conn = Get-ConnectionArgs
-            Write-PatchLog "Invoke-Command -ComputerName $c -Port $($conn.Port) (RemoteRebootScript: refuse if dism/TiWorker busy, then shutdown.exe /r /t 10)" 'CMD'
-            $msg = Invoke-Command -ComputerName $c @conn -ScriptBlock $script:RemoteRebootScript -ArgumentList $who, $changeText, $script:Config.RemoteStaging -ErrorAction Stop
-            Write-PatchLog "REBOOT $c - $msg (by $who)" 'OK'
-            Write-ChangeLog -Record $change -Server $c -Action 'Reboot' -Result 'reboot scheduled in 10 s'
+            $msg = Invoke-ToolkitCommand -ComputerName $c -ScriptBlock $script:RemoteRebootScript -ArgumentList @($who, $changeText, $script:Config.RemoteStaging, $delay) -Explain "RemoteRebootScript: refuse if dism/TiWorker busy, then shutdown.exe /r /t $delay"
+            Write-PatchLog "REBOOT $c - $msg$selfText (by $who)" 'OK'
+            Write-ChangeLog -Record $change -Server $c -Action 'Reboot' -Result "reboot scheduled in $delay s"
             $script:ServerStatus.Remove($c)   # old status is now meaningless
         } catch {
             $err = Get-ShortError $_
@@ -1435,9 +1475,7 @@ function Invoke-TrellixAgentChange {
         if ($st -and $st.Reachable -and -not $ta.Present) { Write-PatchLog "$c - no Trellix Agent services on this server; nothing to $Mode" 'INFO'; $results += [pscustomobject]@{ Server = $c; Mode = $Mode; Success = $true; Skipped = $true; Message = 'no Trellix Agent on the server'; Lines = @() }; continue }
         if ($ta.State -eq $want) { Write-PatchLog "$c - Trellix Agent services already $($ta.Text); nothing to do" 'INFO'; $results += [pscustomobject]@{ Server = $c; Mode = $Mode; Success = $true; Skipped = $true; Message = ('already ' + $ta.Text); Lines = @($st.TrellixAgentLines) }; continue }
         try {
-            $conn = Get-ConnectionArgs
-            Write-PatchLog ("Invoke-Command -ComputerName {0} -Port {1} (RemoteTrellixAgentScript {2}: masvc + macmnsvc {3})" -f $c, $conn.Port, $Mode, $what) 'CMD'
-            $r = Invoke-Command -ComputerName $c @conn -ScriptBlock $script:RemoteTrellixAgentScript -ArgumentList $Mode, $who, $changeText, $script:Config.RemoteStaging -ErrorAction Stop
+            $r = Invoke-ToolkitCommand -ComputerName $c -ScriptBlock $script:RemoteTrellixAgentScript -ArgumentList @($Mode, $who, $changeText, $script:Config.RemoteStaging) -Explain ("RemoteTrellixAgentScript {0}: masvc + macmnsvc {1}" -f $Mode, $what)
             $lines = @($r.Lines | ForEach-Object { [string]$_ })
             $errs = @($r.Errors | ForEach-Object { [string]$_ })
             # the status could not tell (the services unreadable, or no status yet), and the server finds neither service: no agent

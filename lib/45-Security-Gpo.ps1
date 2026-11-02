@@ -1,5 +1,7 @@
 # =====================================================================
 #  45-Security-Gpo.ps1  -  GPO RECOMMENDATIONS AND THEIR IMPACT
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  For every Security check that has a Group Policy answer
 #  (data\gpo-guidance.psd1), on every audited server:
@@ -621,7 +623,7 @@ function New-SecurityGpoPage {
     $showAll = New-Object System.Windows.Forms.CheckBox; $showAll.Text = 'Show settings already enforced'; $showAll.Location = New-Object System.Drawing.Point(516, 12); $showAll.AutoSize = $true
     $showAll.Add_CheckedChanged({ Update-SecurityGpoGrid -Servers (Get-SecurityShownServers) })
     $bar.Controls.AddRange(@($fl, $filter, $gl, $gpoCombo, $showAll))
-    $bar.Controls.Add((New-GuiButton -Text 'Check impact (ticked, or all)' -X 730 -Y 5 -W 200 -H 32 -Colour 'LightCoral' -ReadOnly -Tip 'Reads Group Policy and runs the impact checks on the servers ticked on the Servers page (all shown if none): SMB1 and SMB clients, NTLMv1 / Basic / anonymous logons, TLS services, LSA packages, PowerShell 2.0, ASR and AppLocker audit hits ... Read-only. Servers not audited yet are audited first.' -OnClick {
+    $bar.Controls.Add((New-GuiButton -Text 'Check impact (ticked or all)' -X 730 -Y 5 -W 200 -H 32 -Colour 'LightCoral' -ReadOnly -Tip 'Reads Group Policy and runs the impact checks on the servers ticked on the Servers page (all shown if none): SMB1 and SMB clients, NTLMv1 / Basic / anonymous logons, TLS services, LSA packages, PowerShell 2.0, ASR and AppLocker audit hits ... Read-only. Servers not audited yet are audited first.' -OnClick {
         Invoke-GuiAction -Name 'GPO impact check' -ReadOnly -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['SecurityGrid'])
             if ($servers.Count -eq 0) { $servers = @(Get-GridAllKeys -Grid $script:Gui['SecurityGrid']) }

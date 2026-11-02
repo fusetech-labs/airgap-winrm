@@ -1,5 +1,7 @@
 ﻿# =====================================================================
 #  40-Console-Security.ps1  -  THE SECURITY CONSOLE (tab 3): ISM AUDIT
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  What it does, per server, read-only:
 #    collectors  Status, Inventory, Agents, Settings (30-Console-Health.ps1)
@@ -1115,7 +1117,7 @@ function New-SecurityConsole {
     $toolbar = New-ConsoleToolbar -Tab $pageServers
     $combo = New-GroupPicker -Toolbar $toolbar -OnChange { Update-SecurityGrids }
     $script:Gui['SecurityGroupCombo'] = $combo
-    $toolbar.Controls.Add((New-GuiButton -Text 'AUDIT (ticked, or all)' -X 235 -Y 8 -W 170 -Colour 'LightCoral' -ReadOnly -Tip 'Status + Inventory + Agents + Settings + SecurityPolicy (auditpol, secedit) + Group Policy collectors. Read-only, needs admin on the servers. The impact checks of the GPO recommendations run from that page (Check impact).' -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'AUDIT (ticked or all)' -X 235 -Y 8 -W 170 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Status + Inventory + Agents + Settings + SecurityPolicy (auditpol, secedit) + Group Policy collectors. Read-only, needs admin on the servers. The impact checks of the GPO recommendations run from that page (Check impact).' -OnClick {
         Invoke-GuiAction -Name 'Security audit' -ReadOnly -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['SecurityGrid'])
             if ($servers.Count -eq 0) { $servers = @(Get-GridAllKeys -Grid $script:Gui['SecurityGrid']) }
@@ -1126,7 +1128,7 @@ function New-SecurityConsole {
         }
     }))
     $toolbar.Controls.Add((New-GuiButton -Text 'Tick all' -X 410 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['SecurityGrid'] -Checked $true }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Untick' -X 485 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['SecurityGrid'] -Checked $false }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Untick all' -X 485 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['SecurityGrid'] -Checked $false }))
     $toolbar.Controls.Add((New-GuiButton -Text 'Report (HTML + CSV)' -X 560 -Y 8 -W 150 -ReadOnly -OnClick {
         Invoke-GuiAction -Name 'Security report' -ReadOnly -Action { Show-ReportDone -Report (Export-SecurityReport) }
     }))
@@ -1190,7 +1192,7 @@ function New-SecurityConsole {
 
     $pl4 = New-Object System.Windows.Forms.Label; $pl4.Text = 'Note:'; $pl4.Location = New-Object System.Drawing.Point(14, 344); $pl4.AutoSize = $true
     $pNote = New-Object System.Windows.Forms.TextBox; $pNote.Location = New-Object System.Drawing.Point(60, 341); $pNote.Width = 500; $pNote.Text = [string]$prof.note
-    $pSave = New-GuiButton -Text 'Save settings' -X 580 -Y 336 -W 130 -H 32 -Colour 'LightCoral' -Tip 'Writes security\profile.json and the group-file lines, then recomputes every rating and report' -OnClick {
+    $pSave = New-GuiButton -Text 'Save settings' -X 580 -Y 336 -W 130 -H 32 -Colour 'LightGreen' -Tip 'Writes security\profile.json and the group-file lines, then recomputes every rating and report' -OnClick {
         Invoke-GuiAction -Name 'Security settings' -Action { Save-SecurityProfileFromPage } }   # writes group files: not read-only
     $pStatus = New-Object System.Windows.Forms.Label; $pStatus.Location = New-Object System.Drawing.Point(14, 380); $pStatus.AutoSize = $true; $pStatus.MaximumSize = New-Object System.Drawing.Size(980, 0); $pStatus.ForeColor = 'DimGray'
     $pageSettings.Controls.AddRange(@($box1, $box2, $pl4, $pNote, $pSave, $pStatus))
@@ -1222,7 +1224,7 @@ function New-SecurityConsole {
             if ($r) { $t = Get-SecurityTailoring; $t.rules = @($t.rules) + $r; Save-SecurityTailoring -Tailoring $t }
         }
     }))
-    $tbar.Controls.Add((New-GuiButton -Text 'Remove ticked rules' -X 125 -Y 8 -W 150 -ReadOnly -OnClick {
+    $tbar.Controls.Add((New-GuiButton -Text 'Remove rules (ticked)' -X 125 -Y 8 -W 150 -ReadOnly -OnClick {
         Invoke-GuiAction -Name 'Remove tailoring rules' -ReadOnly -Action {
             $drop = @($script:Gui['TailoringGrid'].Items | Where-Object { $_.Checked } | ForEach-Object { $_.Tag.Rule })
             if ($drop.Count -eq 0) { return }

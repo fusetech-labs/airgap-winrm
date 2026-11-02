@@ -1,5 +1,7 @@
 ﻿# =====================================================================
-#  05-WinRM.ps1  -  TALKING TO THE SERVERS OVER WinRM (TCP 5985)
+#  05-WinRM.ps1  -  TALKING TO THE SERVERS OVER WinRM (TCP 5985, or 5986 over HTTPS)
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  Three kinds of call are used, from "no auth" to "full auth":
 #    Test-WSMan      -> anonymous "identify" request. Proves the port and
@@ -320,12 +322,38 @@ function New-PatcherSessionOption {
     return (New-PSSessionOption -OpenTimeout ($script:Config.OpenTimeoutSec * 1000))
 }
 
+function Test-WinRMUseSsl {
+    # WinRMPort 5986 is the HTTPS listener: every call then goes with -UseSSL, and PowerShell checks the server's
+    # certificate the normal way - it must chain to a CA this PC trusts and carry the name in the group file. Nothing is
+    # skipped (no SkipCACheck, no SkipCNCheck): a certificate problem is an error to read, not one to silence.
+    return ([int]$script:Config.WinRMPort -eq 5986)
+}
+
+function Get-WinRMPortText {
+    # '5985' or '5986 (HTTPS)' - for the window title, tips, help pages and messages
+    if (Test-WinRMUseSsl) { return ('{0} (HTTPS)' -f $script:Config.WinRMPort) }
+    return ([string]$script:Config.WinRMPort)
+}
+
+function Get-WinRMSchemeText {
+    # 'HTTP' or 'HTTPS' - the transport the port setting selects
+    if (Test-WinRMUseSsl) { return 'HTTPS' }
+    return 'HTTP'
+}
+
+function Get-WinRMCallText {
+    # what a CMD log line shows after the computer name: '-Port 5985' or '-Port 5986 -UseSSL'
+    if (Test-WinRMUseSsl) { return ('-Port {0} -UseSSL' -f $script:Config.WinRMPort) }
+    return ('-Port {0}' -f $script:Config.WinRMPort)
+}
+
 function Get-ConnectionArgs {
     # A "splat" hashtable so every WinRM call is built the same way: @conn
     $splat = @{
         Port          = $script:Config.WinRMPort
         SessionOption = (New-PatcherSessionOption)
     }
+    if (Test-WinRMUseSsl) { $splat['UseSSL'] = $true }
     if ($script:Credential) { $splat['Credential'] = $script:Credential }
     return $splat
 }
@@ -357,13 +385,14 @@ function Clear-PatcherCredential {
 function Test-ServerWinRM {
     # The "no authentication" check. Good first step when a server shows as unreachable.
     param([Parameter(Mandatory = $true)][string]$ComputerName)
-    Write-PatchLog "Test-WSMan -ComputerName $ComputerName -Port $($script:Config.WinRMPort)" 'CMD'
+    if (Test-ThisComputer -Name $ComputerName) { Write-PatchLog "$ComputerName is this computer: the toolkit runs its work here, without a WinRM call to itself - nothing to test" 'OK'; return $true }
+    Write-PatchLog "Test-WSMan -ComputerName $ComputerName $(Get-WinRMCallText)" 'CMD'
     try {
-        $r = Test-WSMan -ComputerName $ComputerName -Port $script:Config.WinRMPort -ErrorAction Stop
+        $r = Test-WSMan -ComputerName $ComputerName -Port $script:Config.WinRMPort -UseSSL:(Test-WinRMUseSsl) -ErrorAction Stop
         Write-PatchLog "$ComputerName answers on WinRM (stack $($r.ProductVersion))" 'OK'
         return $true
     } catch {
-        Write-PatchLog "$ComputerName did NOT answer on $($script:Config.WinRMPort): $(Get-ShortError $_)" 'ERROR'
+        Write-PatchLog "$ComputerName did NOT answer on $(Get-WinRMPortText): $(Get-ShortError $_)" 'ERROR'
         return $false
     }
 }
@@ -405,12 +434,15 @@ function Wait-PatcherJob {
     # "Finished" means Completed / Failed / Stopped / Disconnected - NotStarted, Blocked and
     # Suspending (robust-connection retries after a network blip) are still "in progress".
     # -Stoppable (read-only collectors only): the "Stop waiting" button on the status bar gives up on the servers that
-    # have not answered, and a server still silent $StuckAfterSec after every other one has answered is given up on its
-    # own - one wedged WMI call must not hold a 500-server check for hours.  Nothing is ever stopped on an install job.
-    param($Job, [string]$Activity = 'Working', [int]$TimeoutSec = 3600, [switch]$Stoppable, [int]$StuckAfterSec = 0)
+    # have not answered, and each server has its own budget: one that has not answered $SilentAfterSec after its turn
+    # began (a throttled child starts later than the first wave) is given up on its own while the others carry on - a
+    # wedged WMI call, a half-dead server or an account that never gets an answer must not hold a 35-server check for
+    # ten minutes (field test 2026-11).  Nothing is ever stopped on an install job.
+    param($Job, [string]$Activity = 'Working', [int]$TimeoutSec = 3600, [switch]$Stoppable, [int]$SilentAfterSec = 0)
     $finished = @('Completed', 'Failed', 'Stopped', 'Disconnected')
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     $button = $null; $lent = $null
+    if ($null -eq $script:Gui) { $script:Gui = @{} }   # functions-only use (no window): the flags below still need a table
     $script:Gui['WaitStopped'] = $false   # this wait's own "Stop waiting" (Invoke-Collector reads it for the reason text)
     if ($Stoppable -and $script:Gui['StopButton']) {
         $button = $script:Gui['StopButton']
@@ -419,7 +451,7 @@ function Wait-PatcherJob {
         if ($script:Gui['StopOwner']) { $lent = @{ Text = $button.Text; Tip = $button.ToolTipText; Enabled = $button.Enabled; Stop = [bool]$script:Gui['StopRequested'] } }
         $script:Gui['StopRequested'] = $false; $button.Enabled = $true; $button.Text = 'Stop waiting'; $button.ToolTipText = 'Give up on the servers that have not answered yet (read-only checks only; nothing is changed on them)'; $button.Visible = $true
     }
-    $stuckSince = $null; $lastOpen = -1
+    $turnBegan = @{}   # child job -> seconds on the watch when it was first seen running (NotStarted = still queued for a slot)
     try {
         while ($finished -notcontains $Job.State -and $watch.Elapsed.TotalSeconds -lt $TimeoutSec) {
             $open = @($Job.ChildJobs | Where-Object { $finished -notcontains $_.State })
@@ -430,13 +462,18 @@ function Wait-PatcherJob {
                 foreach ($c in $open) { Stop-Job -Job $c -ErrorAction SilentlyContinue }
                 break
             }
-            if ($Stoppable -and $StuckAfterSec -gt 0 -and $open.Count -gt 0 -and $open.Count -lt @($Job.ChildJobs).Count) {
-                # the set of silent servers has not changed for StuckAfterSec: they are wedged, not slow
-                if ($open.Count -ne $lastOpen) { $lastOpen = $open.Count; $stuckSince = $watch.Elapsed.TotalSeconds }
-                elseif ($watch.Elapsed.TotalSeconds - $stuckSince -ge $StuckAfterSec) {
-                    Write-PatchLog ("{0}: {1} server(s) still silent {2} s after every other server answered - giving up on them: {3}" -f $Activity, $open.Count, $StuckAfterSec, (@($open | ForEach-Object { $_.Location }) -join ', ')) 'WARN'
-                    foreach ($c in $open) { Stop-Job -Job $c -ErrorAction SilentlyContinue }
-                    break
+            if ($Stoppable -and $SilentAfterSec -gt 0) {
+                $now = $watch.Elapsed.TotalSeconds
+                $late = @()
+                foreach ($c in $open) {
+                    if ($c.State -eq 'NotStarted') { continue }
+                    $key = [string]$c.InstanceId
+                    if (-not $turnBegan.ContainsKey($key)) { $turnBegan[$key] = $now; continue }
+                    if ($now - $turnBegan[$key] -ge $SilentAfterSec) { $late += $c }
+                }
+                if ($late.Count -gt 0) {
+                    Write-PatchLog ("{0}: {1} server(s) have not answered {2} s after their turn began - giving up on them, the others carry on: {3}" -f $Activity, $late.Count, $SilentAfterSec, (@($late | ForEach-Object { $_.Location }) -join ', ')) 'WARN'
+                    foreach ($c in $late) { Stop-Job -Job $c -ErrorAction SilentlyContinue }
                 }
             }
             Start-Sleep -Milliseconds 300
@@ -457,7 +494,7 @@ function Set-GuiStatus {
     # Updates the status bar text if the GUI exists; harmless from the console.
     param([string]$Text)
     $label = $script:Gui['StatusLabel']
-    if ($label) {
+    if ($label -and -not $label.IsDisposed) {   # a window closed under a running step (functions-only use after the GUI): nothing to update
         $label.Text = $Text
         [System.Windows.Forms.Application]::DoEvents()
     }
@@ -467,7 +504,7 @@ function Set-GuiProgress {
     # Patch-o-meter: -Percent 0..100 shows a real bar, -Marquee goes back to "busy, unknown length".
     param([int]$Percent = -1, [switch]$Marquee)
     $bar = $script:Gui['Progress']
-    if (-not $bar) { return }
+    if (-not $bar -or $bar.IsDisposed) { return }
     if ($Marquee) { $bar.Style = 'Marquee'; return }
     $bar.Style = 'Continuous'
     if ($Percent -lt 0) { $Percent = 0 }
@@ -490,6 +527,7 @@ function Invoke-Collector {
         [scriptblock]$Summary,        # optional: formats the per-server OK log line, receives the result
         [scriptblock]$Unreachable,    # optional: builds the "unreachable" object, receives (name, reason)
         [switch]$NoRetry,             # internal: stops the "prompt for credentials and retry" loop
+        [int]$SilentAfterSec = -1,    # internal (the retry): the first call's per-server silence budget; -1 = worked out below
         [switch]$NoStop               # a command that may change a server: no "Stop waiting" button and no giving up on a server
     )                                 # that is slower than the others - only the time limit ends it (and says it may have run)
     $names = @(Get-UniqueNames $ComputerName)
@@ -508,10 +546,8 @@ function Invoke-Collector {
     $names = @($names | Where-Object { Test-LooksLikeHostname $_ })
     if ($names.Count -eq 0) { return $early }
 
-    $conn = Get-ConnectionArgs
     $who  = 'current login'
     if ($script:Credential) { $who = $script:Credential.UserName }
-    Write-PatchLog ("Invoke-Command -ComputerName {0} -Port {1} -AsJob  ({2} collector, as {3})" -f ($names -join ','), $conn.Port, $Name, $who) 'CMD'
 
     # A read-only action running alongside an install keeps its hands off the servers being installed on.
     if ($script:Gui['NestedBusy'] -and $script:InstallTargets) {
@@ -523,31 +559,62 @@ function Invoke-Collector {
             if ($names.Count -eq 0) { return @() }
         }
     }
-    $call = @{
-        ComputerName  = $names
-        ScriptBlock   = $ScriptBlock
-        ThrottleLimit = $script:Config.MaxParallel
-        AsJob         = $true
-        ErrorAction   = 'SilentlyContinue'
+    # The toolkit PC itself in the list (Test-ThisComputer): the same script block runs HERE, as a local background job -
+    # no WinRM call to itself, so this PC needs no listener and no loopback rights (field test 2026-11: the server that
+    # runs the toolkit is patched too).  Every other name fans out over WinRM as before.
+    $asked = @($names)
+    $localNames = @($names | Where-Object { Test-ThisComputer -Name $_ })
+    $names = @($names | Where-Object { $localNames -notcontains $_ })
+    $localJob = $null
+    if ($localNames.Count -gt 0) {
+        Write-PatchLog ("Start-Job  ({0} collector on this computer - {1} - as {2}; no WinRM call to itself)" -f $Name, ($localNames -join ','), (Get-OperatorIdentity)) 'CMD'
+        $localCall = @{ ScriptBlock = $ScriptBlock }
+        if ($ArgumentList.Count -gt 0) { $localCall['ArgumentList'] = $ArgumentList }
+        $localJob = Start-Job @localCall
     }
-    if ($ArgumentList.Count -gt 0) { $call['ArgumentList'] = $ArgumentList }
-    $job = Invoke-Command @call @conn
-    # one limit covers the whole fan-out: with more servers than MaxParallel the later ones wait for a free slot, so
-    # the limit grows with the number of waves (an upper bound, not an expected time)
-    $waves = [math]::Max(1, [math]::Ceiling($names.Count / [double][math]::Max(1, $script:Config.MaxParallel)))
-    $baseTimeout = $TimeoutSec
-    $TimeoutSec = [int]($TimeoutSec * $waves)
-    # a collector only reads: the operator may stop waiting, and a server still silent one base timeout after all the
-    # others answered is given up (it is reported unreachable with that reason)
-    Wait-PatcherJob -Job $job -Activity ("{0}: {1} server(s)" -f $Name, $names.Count) -TimeoutSec $TimeoutSec -Stoppable:(-not $NoStop) -StuckAfterSec $(if ($NoStop) { 0 } else { $baseTimeout })
+    # a collector only reads: the operator may stop waiting, and a server that has not answered SilentServerSec (Settings
+    # tab) after its turn began is given up on its own, the others carry on (it is reported unreachable with that reason).
+    # A collector that asks for a limit of its own (-TimeoutSec: Impact 900 s, Analysis 300 s, a command at CommandTimeoutSec)
+    # is given that long per server instead - a slow but working server is not a wedged one (review 2026-11-03)
+    $silentSec = $SilentAfterSec
+    if ($silentSec -lt 0) {
+        $silentSec = [int]$script:Config.SilentServerSec
+        if ($PSBoundParameters.ContainsKey('TimeoutSec')) { $silentSec = $TimeoutSec }
+    }
+    if ($NoStop) { $silentSec = 0 }
+    $silentWhy = 'SilentServerSec on the Settings tab'
+    if ($silentSec -ne [int]$script:Config.SilentServerSec) { $silentWhy = "the $Name collector's own limit" }
+    $job = $null
+    if ($names.Count -gt 0) {
+        $conn = Get-ConnectionArgs
+        Write-PatchLog ("Invoke-Command -ComputerName {0} {1} -AsJob  ({2} collector, as {3})" -f ($names -join ','), (Get-WinRMCallText), $Name, $who) 'CMD'
+        $call = @{
+            ComputerName  = $names
+            ScriptBlock   = $ScriptBlock
+            ThrottleLimit = $script:Config.MaxParallel
+            AsJob         = $true
+            ErrorAction   = 'SilentlyContinue'
+        }
+        if ($ArgumentList.Count -gt 0) { $call['ArgumentList'] = $ArgumentList }
+        $job = Invoke-Command @call @conn
+        # one limit covers the whole fan-out: with more servers than MaxParallel the later ones wait for a free slot, so
+        # the limit grows with the number of waves (an upper bound, not an expected time)
+        $waves = [math]::Max(1, [math]::Ceiling($names.Count / [double][math]::Max(1, $script:Config.MaxParallel)))
+        $TimeoutSec = [int]($TimeoutSec * $waves)
+        Wait-PatcherJob -Job $job -Activity ("{0}: {1} server(s)" -f $Name, $names.Count) -TimeoutSec $TimeoutSec -Stoppable:(-not $NoStop) -SilentAfterSec $silentSec
+    }
+    if ($localJob) { Wait-PatcherJob -Job $localJob -Activity ("{0}: this computer" -f $Name) -TimeoutSec $TimeoutSec -Stoppable:(-not $NoStop) -SilentAfterSec $silentSec }
 
+    # every answer under the name it was asked by: a remote child by its Location, the local job once per alias of this
+    # computer in the list (localhost and the name are one box: one run, a row for each)
+    $answers = @()
+    if ($job) { foreach ($child in $job.ChildJobs) { $errs = @(); $o = Receive-Job -Job $child -ErrorAction SilentlyContinue -ErrorVariable errs; $answers += [pscustomobject]@{ Child = $child; Server = [string]$child.Location; Out = $o; Errors = @($errs) } } }
+    if ($localJob) { $child = $localJob.ChildJobs[0]; $errs = @(); $o = Receive-Job -Job $child -ErrorAction SilentlyContinue -ErrorVariable errs; foreach ($alias in $localNames) { $answers += [pscustomobject]@{ Child = $child; Server = $alias; Out = $o; Errors = @($errs) } } }
     $results = @($early)
     $denied  = @()
-    try {   # whatever a summary or unreachable block throws, the job is removed and every child read so far is kept
-        foreach ($child in $job.ChildJobs) {
-            $server = $child.Location
-            $jobErrors = @()
-            $out = Receive-Job -Job $child -ErrorAction SilentlyContinue -ErrorVariable jobErrors
+    try {   # whatever a summary or unreachable block throws, the jobs are removed and every answer read so far is kept
+        foreach ($answer in $answers) {
+            $child = $answer.Child; $server = $answer.Server; $out = $answer.Out; $jobErrors = @($answer.Errors)
             $result = $null
             # Only a real result object counts (every Remote*Script returns one with a Computer property);
             # a stray string in the output stream must never be mistaken for the result.
@@ -563,7 +630,7 @@ function Invoke-Collector {
             } else {
                 $reason = 'no data returned'
                 if ($jobErrors.Count -gt 0) { $reason = Get-ShortError $jobErrors[0] }
-                elseif ($child.State -eq 'Stopped') { $reason = $(if ($script:Gui['WaitStopped']) { 'given up: the operator stopped waiting' } else { "no answer while every other server had answered (or $TimeoutSec s passed) - given up" }) }
+                elseif ($child.State -eq 'Stopped') { $reason = $(if ($script:Gui['WaitStopped']) { 'given up: the operator stopped waiting' } elseif ($silentSec -gt 0) { "no answer within $silentSec s of its turn - given up ($silentWhy; the server is down, wedged, or the account gets no answer from it)" } else { "no answer within $TimeoutSec s - given up" }) }
                 elseif ($child.JobStateInfo.Reason) { $reason = Get-ShortError $child.JobStateInfo.Reason }
                 elseif ($out) { $first = ([string]($out | Select-Object -First 1)) -replace '\s+', ' '; $reason = 'unexpected output instead of a result object: ' + $first.Substring(0, [Math]::Min(80, $first.Length)) }
                 if ($Unreachable) { try { $result = & $Unreachable $server $reason } catch { $result = $null } }
@@ -576,8 +643,8 @@ function Invoke-Collector {
             $store[$server] = $result
             $results += $result
         }
-    } finally { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue }
-    Clear-CheckRowCache -Servers @($store.Keys | Where-Object { $names -contains $_ })   # only these servers' rows are stale now
+    } finally { foreach ($j in @($job, $localJob)) { if ($j) { Remove-Job -Job $j -Force -ErrorAction SilentlyContinue } } }
+    Clear-CheckRowCache -Servers @($store.Keys | Where-Object { $asked -contains $_ })   # only these servers' rows are stale now
 
     # Access denied with the current login?  Ask once (foreground) and retry just those servers - but never
     # from a read-only action running alongside an install: the install's remaining sessions would silently
@@ -587,7 +654,7 @@ function Invoke-Collector {
     } elseif ($denied.Count -gt 0 -and -not $NoRetry -and -not $script:Credential) {
         Write-PatchLog ("{0} server(s) refused the current login - offering a credential prompt" -f $denied.Count) 'WHY'
         if (Get-PatcherCredential -Reason "access denied on $($denied -join ', ')") {
-            $retried = Invoke-Collector -Name $Name -ScriptBlock $ScriptBlock -ComputerName $denied -ArgumentList $ArgumentList -TimeoutSec $TimeoutSec -Summary $Summary -Unreachable $Unreachable -NoRetry
+            $retried = Invoke-Collector -Name $Name -ScriptBlock $ScriptBlock -ComputerName $denied -ArgumentList $ArgumentList -TimeoutSec $TimeoutSec -SilentAfterSec $silentSec -NoStop:$NoStop -Summary $Summary -Unreachable $Unreachable -NoRetry
             # replace the "denied" placeholders by name as typed (a reachable result carries the server's own NetBIOS name)
             $results = @($results | Where-Object { $denied -notcontains $_.Computer }) + @($retried)
         }
@@ -622,6 +689,9 @@ function Get-ServerStatus {
     # Only servers this call really read: a check running alongside an install skips the servers being installed, and
     # their stored status (from before the launch) knows nothing of the run - it would read as "no record" (R6-01)
     $fresh = @(@($ComputerName) | Where-Object { $st = $script:ServerStatus[$_]; $st -and $st.Reachable -and $st.Checked -is [datetime] -and $st.Checked -ge $callStart })
+    # the toolkit PC itself in the list: a managed server like any other, worked without a WinRM call to itself - said once
+    # per check, so nobody wonders
+    foreach ($self in @($fresh | Where-Object { Test-ThisComputer -Name $_ })) { Write-PatchLog "$self is this computer, the toolkit PC: checked and patched like any other managed server, with every step run here instead of over WinRM; its reboot comes last, with a 60 s countdown, and closes the toolkit with it" 'WHY' }
     try { Update-InstallFlagsFromStatus -Servers $fresh } catch { Write-PatchLog "The open install runs could not be matched against the status: $(Get-ShortError $_)" 'WARN' }
     # a software item the tool stopped waiting for, finished since: its real result goes into the change log on this PC (50-Console-Software)
     try { Update-SoftwareLateResults -Servers $fresh } catch { Write-PatchLog "Late software results could not be added to the change log: $(Get-ShortError $_)" 'WARN' }
@@ -724,12 +794,50 @@ $script:RemoteDeleteScript = {
     Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
 }
 
+function New-ToolkitSession {
+    # The session an install, a staging copy or a software run works through: a PSSession over WinRM - or, for the
+    # toolkit PC itself (Test-ThisComputer), a LOCAL session: a marker that Invoke-RemoteBlock, Copy-FileToSession and
+    # Close-ToolkitSession recognise and serve on this PC, with no WinRM call to itself (field test 2026-11).
+    param([Parameter(Mandatory = $true)][string]$ComputerName, [string]$Prefix = '')
+    if (Test-ThisComputer -Name $ComputerName) {
+        Write-PatchLog ("{0}{1} is this computer: no session - the staging, the launch and the checks run here" -f $Prefix, $ComputerName) 'WHY'
+        return [pscustomobject]@{ ComputerName = $ComputerName; Local = $true; State = 'Opened' }
+    }
+    $conn = Get-ConnectionArgs
+    Write-PatchLog ("{0}New-PSSession -ComputerName {1} {2}" -f $Prefix, $ComputerName, (Get-WinRMCallText)) 'CMD'
+    return (New-PSSession -ComputerName $ComputerName @conn -ErrorAction Stop)
+}
+
+function Test-LocalSession {
+    # A local session marker from New-ToolkitSession (this computer), as opposed to a PSSession or nothing
+    param($Session)
+    return [bool]($Session -and $Session.PSObject.Properties['Local'] -and $Session.Local)
+}
+
+function Close-ToolkitSession {
+    param($Session)
+    if ($Session -and -not (Test-LocalSession -Session $Session)) { Remove-PSSession -Session $Session -ErrorAction SilentlyContinue }
+}
+
 function Invoke-RemoteBlock {
-    # Runs a script block inside the session - or locally when there is no session,
-    # which lets the copy logic be tested on one machine (see the Code Tour).
+    # Runs a script block inside the session - or here when there is no session or the session is this computer's
+    # local one (which also lets the copy logic be tested on one machine, see the Code Tour).
     param($Session, [scriptblock]$ScriptBlock, [object[]]$ArgumentList)
-    if ($Session) { return (Invoke-Command -Session $Session -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop) }
+    if ($Session -and -not (Test-LocalSession -Session $Session)) { return (Invoke-Command -Session $Session -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop) }
     return (& $ScriptBlock @ArgumentList)
+}
+
+function Invoke-ToolkitCommand {
+    # One script block on one server, answered at once (the reboot, the Trellix Agent services): over WinRM, or here
+    # when the server is this computer - the block itself does not know the difference.
+    param([Parameter(Mandatory = $true)][string]$ComputerName, [Parameter(Mandatory = $true)][scriptblock]$ScriptBlock, [object[]]$ArgumentList = @(), [string]$Explain = '')
+    if (Test-ThisComputer -Name $ComputerName) {
+        Write-PatchLog ("{0} is this computer: run here, no WinRM call{1}" -f $ComputerName, $(if ($Explain) { ' (' + $Explain + ')' } else { '' })) 'CMD'
+        return (& $ScriptBlock @ArgumentList)
+    }
+    $conn = Get-ConnectionArgs
+    Write-PatchLog ("Invoke-Command -ComputerName {0} {1}{2}" -f $ComputerName, (Get-WinRMCallText), $(if ($Explain) { ' (' + $Explain + ')' } else { '' })) 'CMD'
+    return (Invoke-Command -ComputerName $ComputerName @conn -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop)
 }
 
 function Copy-FileToSession {
@@ -762,6 +870,18 @@ function Copy-FileToSession {
         Write-PatchLog ("{0} - a partial copy ({1} MB) is there - resuming from that point (the final hash check catches a bad one)" -f $label, [math]::Round($offset / 1MB, 1)) 'INFO'
     }
 
+    # this computer (a local session): a plain file copy - no slices, no envelope; the same verification below
+    $completed = $false
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    if (Test-LocalSession -Session $Session) {
+        Set-GuiStatus "$label - copying $($local.Name) ($totalMB MB) on this computer..."
+        Write-PatchLog ("Copy-Item -LiteralPath '{0}' -Destination '{1}'   (this computer: a plain copy, {2} MB)" -f $Path, $Destination, $totalMB) 'CMD'
+        $destDir = Split-Path -Path $Destination -Parent
+        if ($destDir -and -not (Test-Path -LiteralPath $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+        Copy-Item -LiteralPath $Path -Destination $Destination -Force
+        $offset = 0; $completed = $true
+    }
+    if (-not $completed) {
     # 2. Slice size: 65% of the envelope, shrunk by the Base64 overhead, rounded to 16 KB.
     if ($SliceKB -le 0) {
         $SliceKB = [int]([math]::Floor($info.EnvelopeKB * 0.65 / 1.37 / 16) * 16)
@@ -814,6 +934,7 @@ function Copy-FileToSession {
             $fs.Close()
         }
     }
+    }   # end of the WinRM slice copy
     Set-GuiProgress -Marquee
     if (-not $completed) { throw "$label - the server kept rejecting even small slices (last size $SliceKB KB); what is copied so far stays and the next attempt resumes from it" }
 

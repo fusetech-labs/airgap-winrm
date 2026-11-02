@@ -1,5 +1,7 @@
 # =====================================================================
 #  50-Console-Software.ps1  -  THE SOFTWARE CONSOLE (deploy, update, remove)
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  Third-party software, handled the way OS patches are:
 #    - a catalogue, data\software-packages.psd1: what may be deployed, how
@@ -53,7 +55,7 @@ WHERE TO FIND SOFTWARE UPDATES  (on a machine that has internet, then copy the f
 
 The Software console deploys only what data\software-packages.psd1 describes: the folder, the file pattern, the
 signer and the exact silent command line of each package. The reboot is always suppressed, so it can be taken
-together with the OS patches ("Reboot ticked servers").
+together with the OS patches ("Reboot (ticked)").
 
 A. VMWARE TOOLS - DEPLOYED BY THIS TOOL, NOT BY VCENTER
    1. Download - NO BROADCOM ACCOUNT NEEDED. Every release is published openly at
@@ -1804,16 +1806,15 @@ function New-SoftwareResult {
 
 function Open-SoftwareSession {
     # A session with the staging folder and its software sub-folder locked down (RemoteStagingScript: admin-owned, SYSTEM + Administrators only).
+    # A local session (this computer, no WinRM call to itself) when the server is the toolkit PC: New-ToolkitSession.
     param([string]$Server)
-    $conn = Get-ConnectionArgs
-    Write-PatchLog ("New-PSSession -ComputerName {0} -Port {1}" -f $Server, $conn.Port) 'CMD'
-    $sess = New-PSSession -ComputerName $Server @conn -ErrorAction Stop
+    $sess = New-ToolkitSession -ComputerName $Server
     try {
         foreach ($folder in @($script:Config.RemoteStaging, ($script:Config.RemoteStaging.TrimEnd('\') + '\software'))) {
-            $ready = Invoke-Command -Session $sess -ScriptBlock $script:RemoteStagingScript -ArgumentList $folder -ErrorAction Stop
+            $ready = Invoke-RemoteBlock -Session $sess -ScriptBlock $script:RemoteStagingScript -ArgumentList $folder
             Write-PatchLog "$Server - $ready" 'INFO'
         }
-    } catch { Remove-PSSession -Session $sess -ErrorAction SilentlyContinue; throw }
+    } catch { Close-ToolkitSession -Session $sess; throw }
     return $sess
 }
 
@@ -1838,20 +1839,19 @@ function Invoke-SoftwarePoll {
     $sess = $Sessions[$Server]
     try {
         if (-not $sess -or [string]$sess.State -ne 'Opened') {
-            if ($sess) { Remove-PSSession -Session $sess -ErrorAction SilentlyContinue }
-            $conn = Get-ConnectionArgs
-            $sess = New-PSSession -ComputerName $Server @conn -ErrorAction Stop
+            Close-ToolkitSession -Session $sess
+            $sess = New-ToolkitSession -ComputerName $Server
             $Sessions[$Server] = $sess
             Write-PatchLog "$Server - reconnected" 'INFO'
         }
         $pollArgs = Get-SoftwarePollArguments -RunId $RunId -Operator $Operator -ChangeText $ChangeText -Abandon ([bool]$Abandon)
-        $rows = @(Invoke-Command -Session $sess -ScriptBlock $script:RemoteSoftwarePollScript -ArgumentList $pollArgs -ErrorAction Stop | Where-Object { $_ -is [psobject] -and $_.PSObject.Properties['TaskName'] })
+        $rows = @(Invoke-RemoteBlock -Session $sess -ScriptBlock $script:RemoteSoftwarePollScript -ArgumentList $pollArgs | Where-Object { $_ -is [psobject] -and $_.PSObject.Properties['TaskName'] })
         $script:SoftwarePollFails[$Server] = 0
         return , $rows
     } catch {
         $fails = 1 + [int]$script:SoftwarePollFails[$Server]; $script:SoftwarePollFails[$Server] = $fails
         if ($fails -eq 1 -or $fails % 20 -eq 0) { Write-PatchLog ("{0} - no answer ({1}); the task carries on there - asking again (attempt {2})" -f $Server, (Get-ShortError $_), $fails) 'WARN' }
-        if ($sess) { Remove-PSSession -Session $sess -ErrorAction SilentlyContinue }
+        Close-ToolkitSession -Session $sess
         $Sessions[$Server] = $null
         return $null
     }
@@ -1885,7 +1885,7 @@ function Invoke-SoftwareRun {
         try {
             Write-PatchLog ("Invoke-Command -Session [{0}] (RemoteSoftwareRunScript run {1}: guards, {2} item(s) queued as SYSTEM tasks in \WinRMToolkit\, the first started)" -f $c, $runId, $list.Count) 'CMD'
             $runArgs = Get-SoftwareRunArguments -Items $list -RunId $runId -Operator $who -ChangeText $changeText
-            $rows = @(Invoke-Command -Session $Sessions[$c] -ScriptBlock $script:RemoteSoftwareRunScript -ArgumentList $runArgs -ErrorAction Stop | Where-Object { $_ -is [psobject] -and $_.PSObject.Properties['Accepted'] })
+            $rows = @(Invoke-RemoteBlock -Session $Sessions[$c] -ScriptBlock $script:RemoteSoftwareRunScript -ArgumentList $runArgs | Where-Object { $_ -is [psobject] -and $_.PSObject.Properties['Accepted'] })
             foreach ($r in $rows) {
                 if ($r.Accepted) { $waiting[$c][$r.TaskName] = $r.Item; Write-PatchLog ("{0} - {1}: {2}" -f $c, $r.Item, $r.Message) 'INFO' }
                 else {
@@ -2054,7 +2054,7 @@ function Install-SoftwareOnServers {
     $todo = @($plan | Where-Object { $_.Go })
     if ($todo.Count -eq 0) { $null = Show-PatcherMessage -Text 'Nothing to do - every server is current, not applicable, blocked or unreachable. The log has the reason per server.' -Title 'Nothing to do'; return @() }
     $goServers = @(Get-UniqueNames ($todo | ForEach-Object { $_.Computer }))
-    $how = "Each installer is copied to $($script:Config.RemoteStaging)\software (SHA256 verified), then run on the server as a one-shot SYSTEM task, one item at a time, with the reboot suppressed. Exit 3010 = a reboot completes it: take it with the OS patches (Reboot ticked servers)."
+    $how = "Each installer is copied to $($script:Config.RemoteStaging)\software (SHA256 verified), then run on the server as a one-shot SYSTEM task, one item at a time, with the reboot suppressed. Exit 3010 = a reboot completes it: take it with the OS patches (Reboot (ticked))."
     foreach ($g in @($todo | Group-Object Id)) { $note = [string]$g.Group[0].File.Package.Note; if ($note) { $how += "`n" + $g.Group[0].Name + ': ' + $note } }
     if ($StageOnly) { $how = "STAGE ONLY: the installers are copied to $($script:Config.RemoteStaging)\software on each server and verified (SHA256). Nothing is installed; INSTALL / UPDATE later uses the staged copy." }
     $stopAgent = ((-not $StageOnly) -and (Test-TrellixStopOn -Console 'Software'))   # read once: the plan the operator approves is what happens (R6-B07)
@@ -2142,7 +2142,7 @@ function Install-SoftwareOnServers {
         }
         if (-not $StageOnly -and $itemsByServer.Count -gt 0) { $results += @(Invoke-SoftwareRun -Sessions $sessions -ItemsByServer $itemsByServer -Change $change -Action $action) }
     } finally {
-        foreach ($s in @($sessions.Values)) { if ($s) { Remove-PSSession -Session $s -ErrorAction SilentlyContinue } }
+        foreach ($s in @($sessions.Values)) { Close-ToolkitSession -Session $s }
         $script:InstallTargets = @()
     }
     # with the status: an exit 3010 shows as a pending reboot straight away, not at the next Check
@@ -2179,7 +2179,7 @@ function Get-UninstallPlan {
 }
 
 function Uninstall-SoftwareOnServers {
-    # UNINSTALL ticked products: fresh inventory, the plan, the change record, the pre-action confirmations, one more
+    # UNINSTALL (ticked products): fresh inventory, the plan, the change record, the pre-action confirmations, one more
     # confirmation for the removal itself, a re-check, then the run (no copy - the server uninstalls from its own registry).
     param([Parameter(Mandatory = $true)][object[]]$Rows)
     $action = 'Software removal'
@@ -2237,7 +2237,7 @@ function Uninstall-SoftwareOnServers {
         }
         if ($itemsByServer.Count -gt 0) { $results += @(Invoke-SoftwareRun -Sessions $sessions -ItemsByServer $itemsByServer -Change $change -Action $action) }
     } finally {
-        foreach ($s in @($sessions.Values)) { if ($s) { Remove-PSSession -Session $s -ErrorAction SilentlyContinue } }
+        foreach ($s in @($sessions.Values)) { Close-ToolkitSession -Session $s }
         $script:InstallTargets = @()
     }
     Update-SoftwareFacts -ComputerName $goServers
@@ -2613,7 +2613,7 @@ function Get-SoftwareDetailsHtml {
 
 function Show-SoftwareDetails {
     param([string]$Name)
-    if (-not (Get-CollectorResult -Name 'SoftwareState' -Server $Name) -and -not (Get-CollectorResult -Name 'Inventory' -Server $Name)) { Show-GuiNotice "$Name has not been checked yet. Tick it and press 'Check (ticked)'."; return }
+    if (-not (Get-CollectorResult -Name 'SoftwareState' -Server $Name) -and -not (Get-CollectorResult -Name 'Inventory' -Server $Name)) { Show-GuiNotice "$Name has not been checked yet. Tick it and press 'Check software (ticked)'."; return }
     Show-DetailsWindow -Title "Software: $Name" -Html (Get-SoftwareDetailsHtml -Name $Name)
 }
 
@@ -2634,7 +2634,7 @@ function Get-SoftwareHelpHtml {
         @((Get-HelpSwatch 'honeydew' 'Green'), 'Every package that applies is at or above the file''s version.'),
         @((Get-HelpSwatch 'palegreen' 'Green cell'), 'In any row: that package''s version (or a newer one) is installed. A yellow cell is what INSTALL / UPDATE would do.'),
         @((Get-HelpSwatch 'navajowhite' 'Orange cell'), 'The Trellix Agent cell only, in any row: the two ePO agent services (masvc, macmnsvc) are stopped or disabled - set so by INSTALL / UPDATE or PATCH IT! with the box ticked, or by hand. ePO hears nothing from the server meanwhile; a scan warns about it. After the install and the reboot, tick the server and press "Start Trellix Agent (ticked)". "Running (Auto)" is the normal state; empty = the agent is not on the server.'))
-    $sections += @{ Heading = 'The server grid: one example row per colour'; Note = ('One column per package shown - at most {0} (MaxSoftwareColumns, Settings tab), chosen in the Software library window - with the ticked version of it, else the newest usable file. When the library holds more packages than that, All packages counts what every package would do on the server. Double-click a row for its page: every package''s verdict, staged files, tasks, the server''s own change record and the products. Pending reboot "YES: software: ..." = an install or removal since the server''s last boot ended with exit 3010 (reboot suppressed): Reboot ticked servers counts it as pending, and the OS patches are not blocked by it.' -f $script:Config.MaxSoftwareColumns); Html = ($mock + $rows) }
+    $sections += @{ Heading = 'The server grid: one example row per colour'; Note = ('One column per package shown - at most {0} (MaxSoftwareColumns, Settings tab), chosen in the Software library window - with the ticked version of it, else the newest usable file. When the library holds more packages than that, All packages counts what every package would do on the server. Double-click a row for its page: every package''s verdict, staged files, tasks, the server''s own change record and the products. Pending reboot "YES: software: ..." = an install or removal since the server''s last boot ended with exit 3010 (reboot suppressed): Reboot (ticked) counts it as pending, and the OS patches are not blocked by it.' -f $script:Config.MaxSoftwareColumns); Html = ($mock + $rows) }
     $sections += @{ Heading = 'Package cells: every value'; Note = 'The grid, the plan and the report all use Get-SoftwareVerdict, so the grid never promises what the plan refuses.'; Html = (New-HelpTable -Headers @('Cell', 'It means', 'Next step') -Rows @(
         @((Get-HelpCell 'not checked'), 'No inventory yet, or the hardware has not been read (a package with Requires).', 'Press Check.'),
         @((Get-HelpCell '?' 'lightgray'), 'The server could not be reached.', 'Fix WinRM first.'),
@@ -2660,13 +2660,13 @@ function Get-SoftwareHelpHtml {
         @((Get-HelpCell 'by hand'), 'Removal: no silent uninstall known - the tool will not remove it.'),
         @((Get-HelpCell 'Protected' 'gainsboro'), 'Removal: never - ProtectedProducts in software-packages.psd1, or a package that does not allow Uninstall (VMware Tools). For a package you registered: Edit... next to its installer and tick Uninstall.'),
         @((Get-HelpCell 'SOE' 'gainsboro'), 'Removal: never - the server''s SOE standard requires it (a required software or agent item).'))) }
-    $sections += @{ Heading = 'The buttons'; Note = ('Blue = asks the servers (read-only). {0} change a server; STAGE ONLY (steel blue) copies files onto the servers without installing. The others work on this PC only.' -f $(if (Test-TrellixInUse) { 'Red, coral, khaki and the two wheat-coloured Trellix Agent buttons' } else { 'Red, coral and khaki' })); Html = (New-HelpTable -TrellixRows -Headers @('Button', 'What it does', 'Warnings before anything changes') -Rows @(
-        @(((Get-HelpButton 'Check (ticked)' 'lightskyblue') + ' ' + (Get-HelpButton 'Check ALL shown' 'lightskyblue')), 'Status, inventory and the software state (hardware, staged files, toolkit tasks, the server''s change record). A server whose Trellix Agent services are stopped is named in a warning.', 'none - read-only, works during an install'),
+    $sections += @{ Heading = 'The buttons'; Note = ('Blue asks the servers (read-only). {0} change a server; STAGE ONLY (steel blue) copies files onto the servers without installing; green saves on this PC; grey works on this PC only.' -f $(if (Test-TrellixInUse) { 'Red, coral, khaki and the two wheat-coloured Trellix Agent buttons' } else { 'Red, coral and khaki' })); Html = (New-HelpTable -TrellixRows -Headers @('Button', 'What it does', 'Warnings before anything changes') -Rows @(
+        @(((Get-HelpButton 'Check software (ticked)' 'lightskyblue') + ' ' + (Get-HelpButton 'Check software (all shown)' 'lightskyblue')), 'Status, inventory and the software state (hardware, staged files, toolkit tasks, the server''s change record). A server whose Trellix Agent services are stopped is named in a warning.', 'none - read-only, works during an install'),
         @(('<span class="btn">&#9745; Stop the Trellix Agent services first</span>'), 'A tick box above STAGE ONLY, on by default (StopTrellixAgentForInstall on the Settings tab). Ticked: right after the re-check, INSTALL / UPDATE sets the two Trellix Agent services (masvc, macmnsvc) to Disabled and stops them on each server, under the install''s change record, before anything is copied - the field test (October 2026) saw installs fail and roll back with the agent running. A server where that fails is not installed; untick the box to install with the agent running. STAGE ONLY and UNINSTALL never touch the services.', 'part of INSTALL / UPDATE'),
-        @((Get-HelpButton 'STAGE ONLY (copy, no install)' 'lightsteelblue'), 'Copies the ticked installers to C:\PatchStaging\software on the ticked servers and verifies them. Nothing is installed.', 'the plan'),
-        @((Get-HelpButton 'INSTALL / UPDATE  (no reboot)' 'tomato'), 'Fresh check, then the ticked installers on the ticked servers, the reboot suppressed.', 'the plan, the change record, the pre-action confirmations (Settings tab), a re-check'),
-        @((Get-HelpButton 'UNINSTALL ticked products' 'lightcoral'), 'Removes the products ticked in the inventory list.', 'the plan, the change record, the pre-action confirmations (Settings tab), a last confirmation naming every product, a re-check'),
-        @((Get-HelpButton 'Reboot ticked servers' 'khaki'), 'The O/S Patching console''s reboot: pending servers by default, refused while servicing runs.', 'Yes/No per set, the change record'),
+        @((Get-HelpButton 'STAGE ONLY  (ticked installers, ticked servers)' 'lightsteelblue'), 'Copies the ticked installers to C:\PatchStaging\software on the ticked servers and verifies them. Nothing is installed.', 'the plan'),
+        @((Get-HelpButton 'INSTALL / UPDATE  (ticked installers, ticked servers)' 'tomato'), 'Fresh check, then the ticked installers on the ticked servers, the reboot suppressed.', 'the plan, the change record, the pre-action confirmations (Settings tab), a re-check'),
+        @((Get-HelpButton 'UNINSTALL (ticked products)' 'lightcoral'), 'Removes the products ticked in the inventory list.', 'the plan, the change record, the pre-action confirmations (Settings tab), a last confirmation naming every product, a re-check'),
+        @((Get-HelpButton 'Reboot (ticked)' 'khaki'), 'The O/S Patching console''s reboot: pending servers by default, refused while servicing runs.', 'Yes/No per set, the change record'),
         @(((Get-HelpButton 'Start Trellix Agent (ticked)' 'wheat') + ' ' + (Get-HelpButton 'Stop Trellix Agent (ticked)' 'wheat')), 'The two agent services on the ticked servers by hand: Start = Automatic and running (after the install and the reboot - the agent reports to ePO again), Stop = Disabled and stopped. Fresh status first; servers without the agent or already in that state are skipped; Start is refused while an OS patch run is still open on the server. Each server keeps its own record (Application event 940, C:\PatchStaging\change-log.txt).', 'a Yes/No naming the servers (No is the default), the change record of ''Trellix Agent services'' (a change record or a maintenance activity by default)'),
         @((Get-HelpButton 'Register...'), 'Next to each * NEW installer in the yellow box under the installer list (a .msi or .exe in any folder under software\ that no package claims yet): a form filled from the file, checked as you type, written into data\software-packages.psd1. Uninstall starts ticked: unticked, the product is protected and UNINSTALL refuses it.', 'none - nothing touches a server'),
         @((Get-HelpButton 'Software library...'), ('Above the installer list: every package with what its newest installer would do on the servers shown - how many to update, to install, already current, and the newest version deployed. Yellow = the library holds a newer version than some servers have (or a new install), green = current everywhere checked, red = installer blocked. Tick up to {0} to show as grid columns and in the installer list; Most needed ticks the ones with the most to do. The choice is kept (settings\software-shown.json).' -f $script:Config.MaxSoftwareColumns), 'none - nothing touches a server'),
@@ -2813,11 +2813,11 @@ function New-SoftwareConsole {
     })
     $script:Gui['SoftwareRegisterTimer'] = $regTimer
 
-    $right.Controls.Add((New-GuiButton -Text 'Open software folder' -X 10 -Y 162 -W 125 -ReadOnly -Tip 'Opens the \software folder in Explorer' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Open software folder' -X 10 -Y 162 -W 135 -ReadOnly -Tip 'Opens the \software folder in Explorer' -OnClick {
         Invoke-GuiAction -Name 'Open software folder' -ReadOnly -Action { Invoke-Item -LiteralPath $script:Config.SoftwareFolder } }))
-    $right.Controls.Add((New-GuiButton -Text 'Change log' -X 140 -Y 162 -W 125 -ReadOnly -Tip 'Every install, removal and reboot with its change record (changes\change-log.csv)' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Change log' -X 150 -Y 162 -W 85 -ReadOnly -Tip 'Every install, removal and reboot with its change record (changes\change-log.csv)' -OnClick {
         Invoke-GuiAction -Name 'Change log' -ReadOnly -Action { Show-ChangeLogWindow } }))
-    $right.Controls.Add((New-GuiButton -Text 'Where do I get software?' -X 270 -Y 162 -W 135 -ReadOnly -Tip 'Download and silent-install notes, VMware Tools first' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Where do I get software?' -X 240 -Y 162 -W 165 -ReadOnly -Tip 'Download and silent-install notes, VMware Tools first' -OnClick {
         Invoke-GuiAction -Name 'Software how-to' -ReadOnly -Action {
             if (-not (Test-GuiDialogAllowed 'The how-to window')) { return }
             $page = New-DetailsHtml -Title 'Where do I get software?' -Subtitle 'do this on a machine that has internet, then copy the files into the software sub-folders' -Console 'Software' -Sections @(@{ Heading = ''; Html = (ConvertTo-HtmlFromNotes -Text $script:SoftwareHowTo) })
@@ -2829,23 +2829,23 @@ function New-SoftwareConsole {
     $agentBox.Font = $script:Gui['Form'].Font; $agentBox.Location = New-Object System.Drawing.Point(10, 200)
     $script:Gui['Tips'].SetToolTip($agentBox, 'Ticked (the default): INSTALL / UPDATE sets the Trellix Agent services masvc and macmnsvc to Disabled and stops them on each server before the install, under the install''s change record - the field test saw installs fail and roll back with the agent running. A server where that fails is not installed. The Trellix Agent column then shows STOPPED (Disabled) in orange: after the reboot, press "Start Trellix Agent (ticked)". Unticked: the services are left as they are. STAGE ONLY and UNINSTALL never touch them.')
     $right.Controls.Add($agentBox); $script:Gui['TrellixStopBoxSoftware'] = $agentBox
-    $right.Controls.Add((New-GuiButton -Text 'STAGE ONLY  (copy the ticked installers, no install)' -X 10 -Y 228 -W 395 -H 34 -Colour 'LightSteelBlue' -Tip 'Copies and verifies the installers in C:\PatchStaging\software ahead of the change window' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'STAGE ONLY  (ticked installers, ticked servers)' -X 10 -Y 228 -W 395 -H 34 -Colour 'LightSteelBlue' -Tip 'Copies and verifies the installers in C:\PatchStaging\software ahead of the change window' -OnClick {
         Invoke-GuiAction -Name 'Stage software' -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['SoftwareServerGrid']); $files = @(Get-CheckedSoftwareFiles)
             if ($servers.Count -eq 0 -or $files.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server and one installer first.' -Icon 'Warning'; return }
             $r = @(Install-SoftwareOnServers -ComputerName $servers -Files $files -StageOnly | Where-Object { $_ -is [psobject] -and $_.PSObject.Properties['Success'] })
             if ($r.Count -gt 0) { $null = Show-PatcherMessage -Title 'Staging finished' -Text ("Staged: {0}`nFailed: {1}`n`nDetails are in the log." -f @($r | Where-Object { $_.Success }).Count, @($r | Where-Object { -not $_.Success }).Count) }
         } }))
-    $btnInstall = New-GuiButton -Text 'INSTALL / UPDATE  (ticked installers -> ticked servers, no reboot)' -X 10 -Y 268 -W 395 -H 52 -Colour 'Tomato' -Tip 'Fresh check, the plan, the change record, the pre-action confirmations - then the installers run with the reboot suppressed' -OnClick {
+    $btnInstall = New-GuiButton -Text 'INSTALL / UPDATE  (ticked installers, ticked servers)' -X 10 -Y 268 -W 395 -H 52 -Colour 'Tomato' -Tip 'Fresh check, the plan, the change record, the pre-action confirmations - then the installers run with the reboot suppressed' -OnClick {
         Invoke-GuiAction -Name 'Software install' -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['SoftwareServerGrid']); $files = @(Get-CheckedSoftwareFiles)
             if ($servers.Count -eq 0 -or $files.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server and one installer first.' -Icon 'Warning'; return }
             $r = @(Install-SoftwareOnServers -ComputerName $servers -Files $files | Where-Object { $_ -is [psobject] -and $_.PSObject.Properties['Success'] })
-            if ($r.Count -gt 0) { $null = Show-PatcherMessage -Title 'Software run finished' -Text ("Installed OK: {0}`nFailed or unknown: {1}`nNeed a reboot: {2}`n`nThe reboot was suppressed: take it with the OS patches ('Reboot ticked servers'). Details are in the log and the change log." -f @($r | Where-Object { $_.Success }).Count, @($r | Where-Object { -not $_.Success }).Count, @($r | Where-Object { $_.RebootRequired }).Count) }
+            if ($r.Count -gt 0) { $null = Show-PatcherMessage -Title 'Software run finished' -Text ("Installed OK: {0}`nFailed or unknown: {1}`nNeed a reboot: {2}`n`nThe reboot was suppressed: take it with the OS patches ('Reboot (ticked)'). Details are in the log and the change log." -f @($r | Where-Object { $_.Success }).Count, @($r | Where-Object { -not $_.Success }).Count, @($r | Where-Object { $_.RebootRequired }).Count) }
         } }
     $btnInstall.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
     $right.Controls.Add($btnInstall)
-    $right.Controls.Add((New-GuiButton -Text 'UNINSTALL ticked products  (inventory list below)' -X 10 -Y 326 -W 395 -H 40 -Colour 'LightCoral' -Tip 'The removal plan, the change record, the pre-action confirmations and a last confirmation naming every product' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'UNINSTALL  (ticked products)' -X 10 -Y 326 -W 395 -H 40 -Colour 'LightCoral' -Tip 'The removal plan, the change record, the pre-action confirmations and a last confirmation naming every product' -OnClick {
         Invoke-GuiAction -Name 'Software removal' -Action {
             $rows = @($script:Gui['SoftwareInvGrid'].CheckedItems | ForEach-Object { $_.Tag } | Where-Object { $_ })
             if ($rows.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one product in the inventory list first.' -Icon 'Warning'; return }
@@ -2857,7 +2857,7 @@ function New-SoftwareConsole {
                 $null = Show-PatcherMessage -Title 'Removal finished' -Text ("Removed: {0}`nFailed or unknown: {1}`nNeed a reboot: {2}{3}`n`nEvery server shows 'reboot advised' until it restarts. Details are in the log and the change log." -f @($r | Where-Object { $_.Success }).Count, @($r | Where-Object { -not $_.Success }).Count, @($r | Where-Object { $_.RebootRequired }).Count, $leftText)
             }
         } }))
-    $right.Controls.Add((New-GuiButton -Text 'Reboot ticked servers' -X 10 -Y 372 -W 395 -H 34 -Colour 'Khaki' -Tip 'The O/S Patching console''s reboot: fresh status, pending servers by default, a change record, refused while servicing runs' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Reboot (ticked)' -X 10 -Y 372 -W 395 -H 34 -Colour 'Khaki' -Tip 'The O/S Patching console''s reboot: fresh status, pending servers by default, a change record, refused while servicing runs' -OnClick {
         Invoke-GuiAction -Name 'Reboot' -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['SoftwareServerGrid'])
             if ($servers.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server first.' -Icon 'Warning'; return }
@@ -2878,7 +2878,11 @@ function New-SoftwareConsole {
     $right.Controls.Add((New-GuiButton -Text 'Report (HTML + CSV)' -X 10 -Y 448 -W 195 -H 30 -ReadOnly -Tip 'reports\Software-<date>.html and .csv for the servers shown' -OnClick {
         Invoke-GuiAction -Name 'Software report' -ReadOnly -Action { Show-ReportDone -Report (Export-SoftwareReport) } }))
     $right.Controls.Add((New-GuiButton -Text 'Open reports folder' -X 210 -Y 448 -W 195 -H 30 -ReadOnly -OnClick { Invoke-GuiAction -Name 'Open reports folder' -ReadOnly -Action { Open-ReportFolder } }))
-    $right.Controls.Add((New-GuiButton -Text 'Help' -X 10 -Y 484 -W 395 -H 30 -ReadOnly -Tip 'A page with an example of every row colour, cell and button' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Today''s log' -X 10 -Y 484 -W 195 -H 30 -ReadOnly -Tip 'Opens logs\Patcher-YYYYMMDD.log in Notepad' -OnClick {
+        Invoke-GuiAction -Name 'Open log' -ReadOnly -Action {
+            if (-not (Test-Path -LiteralPath (Get-PatchLogPath))) { Write-PatchLog 'Log file created' 'INFO' }
+            Start-Process notepad.exe -ArgumentList ('"{0}"' -f (Get-PatchLogPath)) } }))
+    $right.Controls.Add((New-GuiButton -Text 'Help' -X 210 -Y 484 -W 195 -H 30 -ReadOnly -Tip 'A page with an example of every row colour, cell and button' -OnClick {
         Invoke-GuiAction -Name 'Software help' -ReadOnly -Action { Show-ConsoleHelp -Console 'Software' -Html (Get-SoftwareHelpHtml) } }))
     # no explainer text on the panel: the Help page has every colour and step with an example, the tool tips the rest
     foreach ($c in $right.Controls) { if ($c.Width -ge 390) { $c.Anchor = 'Top, Left, Right' } }
@@ -2895,22 +2899,22 @@ function New-SoftwareConsole {
     $script:Gui['SoftwareGroupCombo'] = $combo
     $toolbar.Controls.Add((New-GuiButton -Text 'Reload lists + packages' -X 235 -Y 8 -W 150 -Tip 'Re-reads the group files, the patches and the software folders and the catalogue' -OnClick {
         Invoke-GuiAction -Name 'Reload' -Action { Initialize-ToolkitData } }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Check (ticked)' -X 390 -Y 8 -W 150 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Status, inventory and software state of the ticked servers. Works during an install.' -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'Check software (ticked)' -X 390 -Y 8 -W 150 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Status, inventory and software state of the ticked servers. Works during an install.' -OnClick {
         Invoke-GuiAction -Name 'Software check' -ReadOnly -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['SoftwareServerGrid'])
-            if ($servers.Count -eq 0) { Show-GuiNotice 'Tick at least one server first (or use "Check ALL shown").'; return }
+            if ($servers.Count -eq 0) { Show-GuiNotice 'Tick at least one server first (or use "Check software (all shown)").'; return }
             Update-SoftwareFacts -ComputerName $servers
             Show-TrellixAgentWarning -Servers $servers   # the agent services off on a server: the warning the scan owes
         } }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Check ALL shown' -X 545 -Y 8 -W 120 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Works during an install.' -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'Check software (all shown)' -X 545 -Y 8 -W 165 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Works during an install.' -OnClick {
         Invoke-GuiAction -Name 'Software check' -ReadOnly -Action {
             $all = @(Get-GridAllKeys -Grid $script:Gui['SoftwareServerGrid'])
             if ($all.Count -eq 0) { Show-GuiNotice 'No servers in the list. Add names to a group file (*.txt) and reload.'; return }
             Update-SoftwareFacts -ComputerName $all
             Show-TrellixAgentWarning -Servers $all
         } }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Tick all' -X 675 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['SoftwareServerGrid'] -Checked $true; $g = $script:Gui['SoftwareServerGrid']; $script:Gui['SoftwareCount'].Text = ('{0} server row(s) shown, {1} ticked' -f $g.Items.Count, $g.CheckedItems.Count); Start-SoftwareInventoryRefresh }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Untick' -X 750 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['SoftwareServerGrid'] -Checked $false; $g = $script:Gui['SoftwareServerGrid']; $script:Gui['SoftwareCount'].Text = ('{0} server row(s) shown, {1} ticked' -f $g.Items.Count, $g.CheckedItems.Count); Start-SoftwareInventoryRefresh }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Tick all' -X 720 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['SoftwareServerGrid'] -Checked $true; $g = $script:Gui['SoftwareServerGrid']; $script:Gui['SoftwareCount'].Text = ('{0} server row(s) shown, {1} ticked' -f $g.Items.Count, $g.CheckedItems.Count); Start-SoftwareInventoryRefresh }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Untick all' -X 795 -Y 8 -W 80 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['SoftwareServerGrid'] -Checked $false; $g = $script:Gui['SoftwareServerGrid']; $script:Gui['SoftwareCount'].Text = ('{0} server row(s) shown, {1} ticked' -f $g.Items.Count, $g.CheckedItems.Count); Start-SoftwareInventoryRefresh }))
 
     # ---- banner ----
     $null = New-ConsoleBanner -Tab $tab -Console 'Software' -Title ("{0}'S SOFTWARE SHED" -f $script:Config.OperatorName.ToUpper()) -Subtitle 'deploy, update, remove - the reboot waits for the OS patches'

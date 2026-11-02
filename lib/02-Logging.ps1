@@ -1,5 +1,7 @@
 ﻿# =====================================================================
 #  02-Logging.ps1  -  ONE FUNCTION THAT WRITES EVERYWHERE
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  Every message goes to three places so nothing is ever lost:
 #    1. logs\Patcher-YYYYMMDD.log   (permanent record, open it in Notepad)

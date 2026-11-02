@@ -1,5 +1,7 @@
 ﻿# =====================================================================
 #  11-ChangeLog.ps1  -  CHANGE RECORDS FOR EVERYTHING THAT CHANGES A SERVER
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  Before an OS patch install, a reboot, a software install / update, a
 #  software removal or a typed command that may change a server (Commands
@@ -41,9 +43,9 @@ $script:ChangeLogColumns = @('Time', 'Server', 'Action', 'Item', 'ChangeRef', 'C
 $script:ChangeActions = [ordered]@{
     'OS patch install'          = 'O/S Patching: PATCH IT! (Windows and .NET updates)'
     'OS patch stage'            = 'O/S Patching: STAGE ONLY (copies patch files, installs nothing)'
-    'Reboot'                    = 'Reboot ticked servers (both consoles)'
+    'Reboot'                    = 'Reboot (ticked) (both consoles)'
     'Software install / update' = 'Software: INSTALL / UPDATE'
-    'Software removal'          = 'Software: UNINSTALL ticked products'
+    'Software removal'          = 'Software: UNINSTALL (ticked products)'
     'Software stage'            = 'Software: STAGE ONLY (copies installers, installs nothing)'
     'Trellix Agent services'    = 'Both consoles: Start / Stop Trellix Agent (ticked) - the two agent services to Automatic and running, or Disabled and stopped'
     'Command (may change)'      = 'Commands: a typed command that is not read-only'

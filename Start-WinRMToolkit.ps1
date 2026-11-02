@@ -22,6 +22,8 @@
 #  folder writable only by the operators (not on an open share).
 # =====================================================================
 #Requires -Version 5.1
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 # ---------------------------------------------------------------------
 #  REVIEW RECORD  -  Start-WinRMToolkit.ps1

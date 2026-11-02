@@ -1,5 +1,7 @@
 ﻿# =====================================================================
 #  01-Config.ps1  -  SETTINGS AND SHARED STATE
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  Everything an operator might want to tweak lives in $script:Config.
 #  These are the defaults: the Settings tab saves the operator's changes
@@ -38,10 +40,11 @@ if (-not $script:RootFolder) { $script:RootFolder = (Get-Location).Path }
 $script:Config = @{
     # ---- Identity ----
     ToolName       = 'Sysadmin WinRM Toolkit'   # banner, window title, reports
-    ToolVersion    = '2.0'
-    SourceUrl      = 'https://github.com/ChrisFryer/Offline-Updates'   # the About tab shows it to copy; the tool never opens it
+    ToolVersion    = '2.1'
+    SourceUrl      = 'https://github.com/fusetech-labs/airgap-winrm'   # the About tab shows it to copy; the tool never opens it
     Author         = 'Chris Fryer'                       # the About tab
-    SupportEmail   = 'winrm.support@fusetech.com.au'     # the About tab shows it to copy; the tool sends no mail
+    SupportEmail   = 'products@fusetech.com.au'          # the About tab shows it to copy; the tool sends no mail
+    Website        = 'https://fusetech.com.au'           # the publisher's site, shown on the About tab; the tool never opens it
 
     # ---- Folders (relative to the root folder = where the launcher lives) ----
     PatchFolder    = Join-Path $script:RootFolder 'patches'   # one sub-folder per patch type (see PatchTypes)
@@ -64,6 +67,7 @@ $script:Config = @{
     ConsoleColours = @{ Patching = 'MidnightBlue'; Software = 'DarkCyan'; Health = 'DarkGreen'; Security = 'DarkRed'; Commands = 'Black';     Tour = 'DimGray'; Settings = 'DarkSlateGray'; About = 'SteelBlue' }
     ConsoleText    = @{ Patching = 'Gold';         Software = 'White';    Health = 'White';     Security = 'Gold';    Commands = 'LimeGreen'; Tour = 'White';   Settings = 'White';         About = 'White' }
     ConsoleNames   = @{ Patching = 'O/S Patching'; Tour = 'Code Tour' }   # any console not listed is shown by its key
+    BrandColour    = 'DodgerBlue'   # the Fusetech blue of the logo's F: the frame round the window, the window icon and the favicon of every HTML page
 
     # =================================================================
     #  Most values below are DEFAULTS that the Settings tab can change (the list is $script:SettingSpecs in
@@ -106,7 +110,9 @@ $script:Config = @{
 
     # ---- Health thresholds ----
     DiskWarnPercent      = 10      # free space below this percent = Warn
-    DiskFailGB           = 5       # free space below this many GB = Fail
+    DiskFailGB           = 5       # free space below this many GB, when also below DiskWarnPercent = Fail (a volume
+                                   # that cannot hold the GB is judged by its percentage; a large one is not red while it still holds the GB)
+    DiskSmallVolumeGB    = 2       # a volume smaller than this (a recovery or system partition given a letter) is listed, not judged
     UptimeWarnDays       = 60
     EventErrorWarn       = 50      # System + Application errors in the window
     EventWindowHours     = 24
@@ -126,6 +132,13 @@ $script:Config = @{
     CpuFailPercent       = 95      # ... at or above this percent = Fail
     CpuSampleSeconds     = 3       # the Health check reads the processor load once a second for this many seconds
     GpoStaleHours        = 24      # Group Policy not refreshed for longer than this = Warn (H-GPO-02), 7 x this = Fail
+    # Hardware fit for patching (H-HW-01): below any of these = Warn.  Microsoft's minimum installs Windows; it does not
+    # patch it in a sensible time (field test 2026-11: 2 vCPU / 4 GB on a 2 GHz host spent the window at 100% processor)
+    MinLogicalProcessors = 4       # logical processors (vCPUs) a server should have
+    MinMemoryGB          = 8       # physical memory in GB
+    MinCpuScore          = 6       # the one-thread speed score the Health collector measures (million integers sorted a second,
+                                   # about one second of one processor): a 3.2 GHz Xeon E5 v4 core scores about 12, a 2 GHz
+                                   # core on a busy host well under 6.  0 = the score is shown but not judged
     MaxRsopSettings      = 3000    # cap on the administrative-template settings read from a server's Resultant Set of Policy
 
     # ---- Security console: GPO recommendations (lib\45-Security-Gpo.ps1) ----
@@ -138,9 +151,12 @@ $script:Config = @{
     MaxLogBoxChars       = 1500000 # the log window keeps about this much text; older lines drop off (the log file keeps everything)
 
     # ---- WinRM ----
-    WinRMPort      = 5985        # HTTP WinRM. 5986 would be HTTPS.
+    WinRMPort      = 5985        # the HTTP listener. 5986 = WinRM over HTTPS: every call then goes with -UseSSL and the server's certificate is checked (README, Requirements)
     OpenTimeoutSec = 20          # give up on a silent server after this many seconds
     MaxParallel    = 16          # how many servers are checked at the same time
+    SilentServerSec = 180        # a read-only check gives up on a server that has not answered this many seconds after its turn began (a check with a limit of its own - Impact, Analysis, Commands - uses that instead)
+                                 # (it shows as unreachable with that reason, the other servers carry on); never applied to an install
+                                 # or to a command that may change a server.  Settings tab.
 
     # ---- Remote staging (on the target server) ----
     RemoteStaging  = 'C:\PatchStaging'   # patch files are copied here before install
@@ -199,5 +215,5 @@ $script:Banner = @'
   | |_    | | | | \___ \  |  _|     | |   |  _|   | |     | |_| |   | |       / _ \   |  _ \  \___ \
   |  _|   | |_| |  ___) | | |___    | |   | |___  | |___  |  _  |   | |___   / ___ \  | |_) |  ___) |
   |_|      \___/  |____/  |_____|   |_|   |_____|  \____| |_| |_|   |_____| /_/   \_\ |____/  |____/
-   Sysadmin WinRM Toolkit: patching, software, health, security and commands over WinRM (5985)
+   Sysadmin WinRM Toolkit: patching, software, health, security and commands over WinRM (5985, or 5986 over HTTPS)
 '@

@@ -1,5 +1,7 @@
 ﻿# =====================================================================
 #  21-Patching-Analysis.ps1  -  ANALYSE A FAILURE (O/S Patching console)
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  After a failed or rolled-back install the sysadmin needs to know WHERE
 #  it broke: in the tool's own run (staging, DISM), at the reboot (the

@@ -54,6 +54,8 @@
 #    -
 # =====================================================================
 #Requires -Version 5.1
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 [CmdletBinding()]
 param(
     [string]$Thumbprint = '',

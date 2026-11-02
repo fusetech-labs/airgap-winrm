@@ -1,7 +1,7 @@
-# Sysadmin WinRM Toolkit - patching, health and security over WinRM, offline
+# Airgap WinRM Toolkit - patching, health and ISM compliance for air-gapped Windows estates
 
 A readable Windows PowerShell 5.1 tool with a Windows Forms window. Five consoles (tabs) share one engine:
-every action is one WinRM connection to the servers in your group files on **TCP 5985**, nothing is ever
+every action is one WinRM connection to the servers in your group files on **TCP 5985** (or 5986 for WinRM over HTTPS), nothing is ever
 downloaded, no agent or service is installed on any server (a software run uses one-shot scheduled tasks, removed
 once their result is recorded), and credentials are only ever requested in the foreground with the standard Windows
 prompt and kept in memory. Every change to a server asks for a change record first and keeps it with the server.
@@ -15,7 +15,7 @@ prompt and kept in memory. Every change to a server asks for a change record fir
 | **Commands** | One PowerShell command on the ticked servers, every server's answer underneath - for an investigation, one step at a time. A **cheat sheet** of one-line commands (services, processes, disks, event logs, software, reboots, network, accounts) puts a command in the box with its `<placeholder>` ready to type over. | Only a command that may change one: change record and confirmation first |
 
 Long button and page names are shortened in this manual: **Report** stands for "Report (HTML + CSV)", **AUDIT** for
-"AUDIT (ticked, or all)", **Tailoring** for "Tailoring (risk
+"AUDIT (ticked or all)", **Tailoring** for "Tailoring (risk
 decisions)", and so on - the window shows the full text.
 
 Every console but Commands has a **Report** button (Commands has **Save output...** instead): an HTML file (summary on top, data below, works offline) and CSV files
@@ -48,7 +48,7 @@ Settings tab).
 | `lib\13-GroupPolicy.ps1` | The Group Policy collector (Health and Security): GPOs applied or filtered, extension results, errors, last refresh, secure channel, which GPO sets which value (RSoP). |
 | `lib\20-Console-Patching.ps1` | The O/S Patching tab: grid, inventory, software currency, report. |
 | `lib\21-Patching-Analysis.ps1` | The O/S Patching tab's **Analyse a failure**: the server's logs read after a failed install, weighed into findings and a timeline. |
-| `lib\30-Console-Health.ps1` | The Health tab: collectors, seventeen checks, the summary under the grid (processor, memory and disk dials, what needs attention), SOE standards, the Group Policy page. |
+| `lib\30-Console-Health.ps1` | The Health tab: collectors, eighteen checks, the summary under the grid (processor, memory and disk dials, what needs attention), SOE standards, the Group Policy page. |
 | `lib\40-Console-Security.ps1` | The Security tab: audit-policy collector, 118 checks, profile, tailoring, six views. |
 | `lib\45-Security-Gpo.ps1` | The Security tab's GPO recommendations: the impact checks run on the servers, the gap per setting, the GPO plan. |
 | `lib\46-Security-Compliance.ps1` | The Security tab's compliance dashboard (Essential Eight and ISM charts, by group) and the executive summary report. |
@@ -221,11 +221,11 @@ file name; the KB number is read from it.
 
 1. Edit `PatchGroup-A.txt` (and B, C) with one server per line. Add more `.txt` files for more groups.
 2. Copy the month's `.msu` files into `patches\Windows\` (and `patches\DotNet\`).
-3. Start the tool. Pick a group in the drop-down, press **Check ALL shown**. The **Inventory (roles + software)** box
+3. Start the tool. Pick a group in the drop-down, press **Check status (all shown)**. The **Inventory (roles + software)** box
    on the toolbar is ticked by default, so the same press also fills the Roles and Software columns and the software
    grid underneath; untick it for a quicker status-only check.
 4. Read the grid. Pink rows are pending a reboot and will be skipped. Grey rows did not answer (hover for the reason,
-   or press **Test WinRM port (no auth)**). The **Help** button at the foot of the right-hand panel opens a page that
+   or press **Test WinRM port (ticked)**). The **Help** button at the foot of the right-hand panel opens a page that
    shows an example of every row colour, column, KB cell and button and what to do about each.
 5. Tick the servers (or **Tick all**) and tick the file(s) on the right. Optional, before the window: press
    **STAGE ONLY**. The files are copied to `C:\PatchStaging` on the ticked servers and verified; nothing is installed,
@@ -242,7 +242,7 @@ file name; the KB number is read from it.
    every 5 minutes); untick it, or press **Let the servers go**, to come back later - the rows say INSTALLING until a
    status check records the results. While a run is watched every read-only button in every console still works;
    patching, reboot, reload and the credential buttons stay locked until it finishes.
-7. When it finishes, rows that need a reboot turn pink. Press **Reboot ticked servers** when the change window
+7. When it finishes, rows that need a reboot turn pink. Press **Reboot (ticked)** when the change window
    allows. It checks status first, leaves alone any server still INSTALLING, offers only the servers that are
    pending a reboot, asks separately about any others, asks again for any server whose Trellix Solidcore is not in
    Update Mode on reboot, asks for the change record, and a server refuses to reboot while DISM, expand.exe or one of
@@ -253,11 +253,14 @@ file name; the KB number is read from it.
 9. If an install failed, or the KB is READY again after the reboot: tick the server and press **Analyse a failure**.
    The page says where it broke (see Analyse a failure below).
 
-A .NET Framework update (`patches\DotNet`, a file name with `-ndp481` or `-ndp48`) carries no Windows build inside,
-only "Windows 10.0" and the .NET line, so the list shows it as ".NET 4.8.1 (windows10.0 line)". A server that runs
-another .NET line gets **Not applicable** (the inventory says which line it runs: download the update for that one), a
-Windows 11 / Server 2025 server gets **Blocked: wrong OS**, and on the rest DISM checks the exact applicability
-(0x800F081E = not for this build).
+A .NET Framework update (`patches\DotNet`, a file name with `-ndp481` or `-ndp48`) names no Windows build in its
+outer files, only "Windows 10.0" and the .NET line; the tool reads the build from the `update.mum` inside its cab (the
+parent editions, 20348 for Server 2022), so the list shows it as ".NET 4.8  Server 2022" and a server on another build
+gets **Blocked: wrong OS** like any cumulative update. A server that runs another .NET line gets **Not applicable**
+(the inventory says which line it runs: download the update for that one). DISM does not refuse a .NET rollup for the
+wrong build: it installs the wrapper with every part skipped and returns 0, and `Get-HotFix` never lists the KB (seen
+in the field, 2026-11). An install that ends with exit 0 and no reboot is therefore checked against `Get-HotFix` and
+the servicing store, and reported FAILED with that reason when the KB is not there.
 
 ### Finding this month's patch
 
@@ -305,6 +308,7 @@ the server owner's WinRM configuration.
 |---|---|---|
 | 0 | installed | success |
 | 3010 | installed, reboot required | success, row goes pink |
+| 0, but the KB is not in `Get-HotFix` or the servicing store afterwards | a .NET rollup for another Windows build: DISM installed its wrapper empty | failure, with that reason |
 | 0x800F081E | not applicable: wrong Windows line or missing prerequisite | failure |
 | 0x800F0922 | failed (pending reboot, missing SSU, full System Reserved partition) | failure, DISM log lines copied into our log |
 | other | see `C:\PatchStaging\dism-KB*.log` and `C:\Windows\Logs\CBS\CBS.log` on the server | failure |
@@ -332,7 +336,7 @@ hour, tomorrow, from a fresh start of the tool. Ticking the box again watches th
 the action running then has finished, if one is). A result that failed, or a run that ended without one (the task is gone,
 the server rebooted mid-way, the launch lost its answer), turns the row purple with **RUN UNKNOWN** and the finish
 pop-up offers **Analyse a failure** at once; the analysis clears the purple note, and a later status check that finds
-the run still going turns the row back to INSTALLING. **Reboot ticked servers** never reboots a server whose row says
+the run still going turns the row back to INSTALLING. **Reboot (ticked)** never reboots a server whose row says
 INSTALLING, and on a long run each server reached more than five minutes after the last status check is checked once
 more (Solidcore mode, pending reboot, disk) before its install starts. The task runs the script text through `powershell -Command`,
 so a GPO execution policy does not stop it; the text sits in the admin-only staging folder.
@@ -346,7 +350,7 @@ again. The status check therefore runs `sadmin status` on every server that has 
 still answers in lockdown) and shows the **Solidcore** column: the mode now and the mode **on reboot**, for example
 `Update now, Update on reboot`. Anything but Update or Disabled on either, or a mode that could not be read (a missing
 "on reboot" line included), gives
-**Blocked: Solidcore** on every KB, and **Reboot ticked servers** names such servers and asks separately. The tool
+**Blocked: Solidcore** on every KB, and **Reboot (ticked)** names such servers and asks separately. The tool
 reads the mode and never changes it - the Update Mode task in ePO does that. The guard is the
 `RequireSolidcoreUpdateMode` box on the Settings tab (on by default); the pre-action confirmation
 "Trellix Solidcore Update Mode" stays as the human's word on top of it.
@@ -354,6 +358,14 @@ reads the mode and never changes it - the Update Mode task in ePO does that. The
 **One patch per server per run** (`OnePatchPerRun`, on by default): the plan takes the first ready file per server and
 lists the others as "waits - one patch per run". A second package installed on top of the first one's pending reboot
 failed in the field; with the box off the files go in one run as before and the plan says so.
+
+**Which file is first** is decided by what each package is, read from the manifest inside the file (the patch list
+says "cumulative" or "servicing stack" after the size): a separate servicing stack update, then the cumulative update,
+then any other Windows file, then .NET - never the smallest file first. A **Dynamic Update** (the "Safe OS" package the
+catalogue lists beside each month's cumulative update, meant for installation media and the recovery environment)
+shows **Blocked: dynamic update** and is never installed: on a running server it stages, and the reboot undoes it.
+In the field one went first for being the smallest file and was rolled back, the servicing stack it needed being
+inside the cumulative update still waiting. Delete such a file or move it to `patches\Other`.
 
 ### The Trellix Agent services
 
@@ -383,7 +395,7 @@ is read, never changed.
 * **On the server.** Stop sets the start type to Disabled first, so nothing starts the services again at the boot,
   then stops them and waits up to 90 s each; Start sets Automatic on both first, then starts them. An "access is
   denied" is reported with the hint that the agent's self-protection may be on (an ePO policy). Each change writes
-  Application event 940 and a line in `C:\PatchStaging\change-log.txt`. Reboot ticked servers names every rebooted
+  Application event 940 and a line in `C:\PatchStaging\change-log.txt`. Reboot (ticked) names every rebooted
   server whose agent is disabled, and the install's finish pop-up counts them: start them when they are back.
 * **Where Trellix is not used.** Untick **Trellix is used here** on the Settings tab (`TrellixInUse`). At once, the
   Solidcore and Trellix Agent columns, the **Stop the Trellix Agent services first** boxes and the Start / Stop Trellix
@@ -497,7 +509,7 @@ Tools itself.
 ### Day-to-day use
 
 1. Download the installer (see above) into its folder (`software\VMwareTools\`; a new product: any folder, then **Register**), keep its file name, and press **Reload lists + packages**.
-2. Pick a group, press **Check ALL shown**: status, inventory and the software state (hardware, staged installers,
+2. Pick a group, press **Check software (all shown)**: status, inventory and the software state (hardware, staged installers,
    toolkit tasks, the server's own change record).
 3. The grid has one column per package shown: **INSTALL** / **UPDATE -> version**, **Installed**, **Newer**,
    **N/A (hardware)**, **Blocked: file**, **Task running**. "(staged)" means the installer is already on the server.
@@ -508,7 +520,7 @@ Tools itself.
    `C:\PatchStaging\software\<package>\` and verified; nothing is installed.
 5. In the window: **INSTALL / UPDATE**. You get the plan, the change record, the pre-action confirmations (Settings
    tab), a fresh re-check, then the run. When it finishes, servers that returned 3010 need a reboot; take it with the
-   OS patches through **Reboot ticked servers**.
+   OS patches through **Reboot (ticked)**.
 
 ### A big library
 
@@ -571,10 +583,10 @@ confirmation that names every product and flags the ones in use and any whose un
 then a re-check against a fresh inventory. A removal counts as done only when the inventory read straight afterwards
 agrees: an uninstaller that exits 0 while the product is still installed is reported **NOT REMOVED**.
 
-**A removal never reboots on purpose.** The reboot is the operator's own step (**Reboot ticked servers**, its own
+**A removal never reboots on purpose.** The reboot is the operator's own step (**Reboot (ticked)**, its own
 change record). But an uninstaller often leaves something for the next start - a service marked for deletion, files
 that were in use - so after any removal the server's Pending reboot reads **advised: removed <product>** until it
-restarts. Advised is not required: nothing is blocked, the row is not pink, and Reboot ticked servers asks about these
+restarts. Advised is not required: nothing is blocked, the row is not pink, and Reboot (ticked) asks about these
 servers separately, with No as the default. It clears itself at the next boot.
 
 **What the uninstaller left behind.** Some uninstallers do not remove their own service or scheduled task (field case:
@@ -618,7 +630,7 @@ The record is kept in two places so it stays with the servers:
 
 *The Health console: the checks per server, and under the grid the three dials and the Needs attention list.*
 
-**Check health (ticked, or all)** runs every collector at once: Status, Inventory, Health, Agents, Settings (112 facts per
+**Check health (ticked or all)** runs every collector at once: Status, Inventory, Health, Agents, Settings (112 facts per
 server: OS, RDP, SMB, TLS, UAC, firewall, Defender, PowerShell logging, AppLocker, LAPS, event-log sizes and more), the
 configuration points (registry values and config-file lines, see SOE standards below) and Group Policy. The checks,
 with their thresholds from `lib\01-Config.ps1`:
@@ -630,13 +642,14 @@ with their thresholds from `lib\01-Config.ps1`:
 | Failed logons (4625) | Security log, last `LogonFailWindowHours`, grouped by account and source | Amber at `LogonFailWarn`, Red at `LogonFailFail` |
 | Account lockouts (4740) | Security log, same window | Amber if any |
 | Dormant software | products installed longer ago than `DormantMonths` with no service, process or task using them | Amber, verify with the owner |
-| Disk space | every fixed drive | Amber below `DiskWarnPercent`, Red below `DiskFailGB` |
+| Disk space | every fixed volume with a drive letter; one smaller than `DiskSmallVolumeGB` (2 GB - a recovery or system partition given a letter) is listed, not judged | Amber below `DiskWarnPercent` free, Red when also below `DiskFailGB` - a small volume is judged by its percentage, a large one is not red while it still holds the GB |
 | Uptime and pending reboot | last boot, reboot flags | Amber over `UptimeWarnDays` or pending |
 | Event-log errors | Error and Critical entries in System + Application within `EventWindowHours` | Amber over `EventErrorWarn` |
 | Time synchronised | `w32tm /query /status /verbose`: source, phase offset, last sync | Red over `TimeOffsetFailSec` |
 | Certificates | `Cert:\LocalMachine\My` expiring within `CertExpiryDays` | Amber when expiring, Red when already expired |
 | Memory headroom | free physical memory; the three processes holding the most | Amber below `MemoryWarnPercent` (10%), Red below `MemoryFailPercent` (3%) |
 | Processor load | the processor load, read once a second for `CpuSampleSeconds` (3) and averaged - a snapshot; the three processes that used the most over those seconds | Amber at `CpuWarnPercent` (80%), Red at `CpuFailPercent` (95%) |
+| Hardware fit for patching | logical processors, memory, the processor model and clock, the machine model, and a one-thread speed score: four million integers sorted again and again for about a second on one processor, in millions sorted a second (a 3.2 GHz Xeon E5 v4 core scores about 12) | Amber below `MinLogicalProcessors` (4), `MinMemoryGB` (8) or `MinCpuScore` (6; 0 = shown, not judged). Microsoft's minimum installs Windows; it does not patch it in a sensible time |
 | Group Policy applies without errors | every client-side extension's last result, and Group Policy errors and warnings in the System and Group Policy logs within `EventWindowHours` | Red on a failed extension or an error, Amber on warnings; not applicable on a workgroup server |
 | Group Policy refreshed recently | the end of the last computer policy run | Amber over `GpoStaleHours` (24), Red over 7 x that |
 | Trust with the domain | `Test-ComputerSecureChannel` | Red when the secure channel is broken |
@@ -644,8 +657,11 @@ with their thresholds from `lib\01-Config.ps1`:
 | Collector errors | every query the Health collector could not run, with the reason | Amber |
 
 Everything is read-only. A query that fails on a server (no right to read the Security log, for example) shows up
-as a reason, never as a clean result. Double-click a server for every check with its evidence and fix. The grid's CPU and
-RAM used columns show the last reading next to the fullest disk.
+as a reason, never as a clean result. Double-click a server for every check with its evidence and fix. The grid's
+Hardware and Speed columns show what each server runs on and how fast one of its processors is; CPU and RAM used show
+the last reading next to the fullest disk. After a few checks the Speed column says what the fleet scores: set
+`MinCpuScore` on the Settings tab at the line where patching became too slow (2 vCPUs on a 2 GHz host, scoring well
+under 6, spent a whole patch window at 100% in the field).
 
 ### Summary: processor, memory, disk and what needs attention
 
@@ -656,8 +672,10 @@ Below the server grid, behind a divider you can drag, the servers shown at a gla
   a dot in the colour its own check gave it (green within the thresholds, amber warning, red critical), so the dials and
   the grid always agree. The dark band inside each dial is the range from the lowest to the highest reading; the highest
   is in the middle with its server. Underneath: the range and average, and how many servers are within, warning,
-  critical or without a reading; hover a dial for its thresholds in words. A disk is critical below `DiskFailGB` free whatever its percentage,
-  so the disk dial has no red zone - its red dots say which servers.
+  critical or without a reading; hover a dial for its thresholds in words. A disk is critical only when it is under
+  `DiskFailGB` free as well as under the percentage, so the disk dial has no red zone - its red dots say which servers.
+  Each server's dot is the volume its disk check is about: the one under the limits, else the fullest one judged; a
+  recovery partition that was given a letter never moves it.
 - **Needs attention** - one line per finding on the servers shown: every check that is red or amber on at least one
   server, plus the servers that could not be reached and those not checked yet. Critical first, then the findings on the
   most servers; checks that could not run at all are one line. Where names the servers, critical ones first - hover a
@@ -682,14 +700,20 @@ missing - is on the Security console's GPO recommendations page.
 
 An SOE standard is a list of rules, not a golden server, and the **SOE standards** page is only for composing them.
 **New**, then **Add from server...** (pick from a checked server's software, services, agents, features, settings and
-configuration points), **Add fleet agents** (the agents and versions most servers share), **Add by hand...**, or tick
-rows in the lower pane, **Configuration points**: the registry values and config-file lines an SOE deployment
-customises per server, such as the WSUS server, the KMS host, the NTP source, the DNS suffix list, the event-forwarding
-collector, the Zabbix, Splunk, NXLog and Trellix agent server addresses, SNMP contact and location, the page file and
-Defender exclusions. The catalogue is `data\soe-config-points.psd1` (add your own); the pane shows the value a
-reference server has, and a ticked point becomes the rule "every server must have this value" (wildcards and
-`re:<regex>` allowed). Nothing is ever executed on a server for this: the probe collector only reads registry values
-and lines of files. Every addition, edit or removal is saved to `soe\<name>.json` at once.
+configuration points), **Add fleet agents** (the agents and versions most servers share), **Add by hand...** (a form:
+pick the type and fill the boxes it shows - a list wherever the value must match exactly; for a registry or file rule
+pick a known configuration point and type the expected value; its Help button explains every box), or tick
+rows in the lower pane, **Pin from the reference server**: what one checked server has. **Show** picks the
+**configuration points** it answers - the registry values and config-file lines an SOE deployment customises per
+server, such as the WSUS server, the KMS host, the NTP source, the DNS suffix list, the event-forwarding collector, the
+Zabbix, Splunk, NXLog and Trellix agent server addresses, SNMP contact and location, the page file and Defender
+exclusions (the catalogue is `data\soe-config-points.psd1`, add your own; a point the server does not have, such as
+the Zabbix file on a server without Zabbix, is left out, so the pane never reads as if the agent were there; the
+"(all ...)" mode lists every point so a value can be typed) - or its installed **software** with versions, its
+**agents**, **features**, **services** or **settings**. **Add to the standard (ticked)** turns each row into a rule: a
+point becomes "every server must have this value" (wildcards and `re:<regex>` allowed), a product or agent ">= this
+version", a service its start type and state. Nothing is ever executed on a server for this: the probe collector only
+reads registry values and lines of files. Every addition, edit or removal is saved to `soe\<name>.json` at once.
 
 Item types: software (name pattern + version rule), service (must run, start type), agent, feature, setting (a
 Settings key with its expected value), registry and file (a configuration point with its expected value) and
@@ -836,7 +860,7 @@ page works out where it stands - read from the server's Resultant Set of Policy,
 
 Each row names the recommended GPO (one per area: "Server Baseline - Audit Policy", "- Security Options",
 "- Network Protocols", "- Remote Access", "- Logging", "- Platform Protection", ...), where the setting is in the Group
-Policy Management Editor, the value, and what could break. **Check impact (ticked, or all)** then looks on each server
+Policy Management Editor, the value, and what could break. **Check impact (ticked or all)** then looks on each server
 for signs that the impact would be felt - read-only, over the last `ImpactDays` (30) of the event logs:
 
 | Setting | The impact check looks for |
@@ -888,7 +912,7 @@ generated from; it is never edited by hand.
 
 *The Commands console: the command, every server's answer underneath, and the cheat sheet on the right.*
 
-For an investigation: type **one** PowerShell command, tick the servers, press Enter (or **Run on ticked servers**),
+For an investigation: type **one** PowerShell command, tick the servers, press Enter (or **Run (ticked servers)**),
 and every server's answer appears underneath under its own heading - formatted on the server, as its own console would
 show it, errors and warnings included. Read the answer, take what it shows into the next command: a service's program
 path into `Test-Path`, a process Id into `Get-CimInstance Win32_Process`, a port's owning process into `Get-Process`.
@@ -907,14 +931,15 @@ PC - and the line under the box says what Run will do:
 |---|---|---|
 | Read-only | `Get-` and `Test-` commands; the ones that only filter, sort, pick, measure, format or convert (`Where-Object`, `Select-Object`, `Format-Table` ...); tools known to only read, with their read-only arguments (`ipconfig /all`, `sc.exe qc`, `w32tm /query`, `netstat`, `quser`, `reg query` ...) | runs at once on the ticked servers (also while an install is running elsewhere) |
 | May change | anything else: another verb (`Stop-`, `Set-`, `Restart-Service` ...), a tool or argument not known to be read-only (`sc.exe delete`, `ipconfig /release`), a method call other than the plain ones (`.Delete()`, `.Kill()`), `> file`, setting a property, a command whose name is worked out only when it runs (`& $x`), a tool argument worked out when it runs, a cast to anything but a plain value type (a cast runs a constructor: `[IO.StreamWriter]'file'` empties the file), setting `$env:`, `function:`, `alias:`, `$PSDefaultParameterValues` or a preference variable, and a `Win32_Product` query (reading it makes Windows Installer check and repair every MSI). Shown in dark red in the cheat sheet. | a change record (Settings tab, action *Command (may change)*), a Yes/No naming the command and the servers (No is the default), then the pre-action confirmations if the Settings tab says so; recorded like every change: the change log, and on each server event 930 and `C:\PatchStaging\change-log.txt` before and after |
-| Refused | `Restart-Computer`, `shutdown` - a restart goes through **Reboot ticked servers**, which checks for servicing first; commands that wait for someone at the server's screen (`Read-Host`, `Get-Credential`, `Out-GridView`, `notepad`) | nothing |
+| Refused | `Restart-Computer`, `shutdown` - a restart goes through **Reboot (ticked)**, which checks for servicing first; commands that wait for someone at the server's screen (`Read-Host`, `Get-Credential`, `Out-GridView`, `notepad`) | nothing |
 
 The check lets through as read-only only what it can show to be read-only; everything else waits for the change
 record and the confirmation. A command runs as your account in a WinRM session (no profile), is stopped after
 `CommandTimeoutSec` (120 s), and each answer is cut at `CommandMaxOutputKB` (256 KB) - narrow it down with
 `Select-Object -First 20` or `Where-Object`. Both are on the Settings tab. A read-only command can be given up on
-(**Stop waiting**, or a server far slower than the rest); a command that may change a server cannot - only the time
-limit ends it, and a server it ended on is marked "may have run": check it before running the command again.
+(**Stop waiting**, or a server that has not answered `SilentServerSec` after its turn began); a command that may
+change a server cannot - only the time limit ends it, and a server it ended on is marked "may have run": check it
+before running the command again.
 
 ## Settings console
 
@@ -928,14 +953,14 @@ the settings in use again; **Restore defaults...** fills the page with the defau
 | Before any change: the pre-action confirmations | One row per product or task in use here - VMware snapshot and Trellix Solidcore Update Mode by default, Airlock offered but off. Each ticked row is a Yes/No pop-up naming the servers, asked in the list's order before every OS patch install, software install / update and removal (and before a command that may change a server, when The Commands console box says so); No stops the change. Add step, Remove step, Move up / down. |
 | Change records | The change management system (filled in every time), the fields that must be filled in, and per action: change record required / change record or maintenance / not recorded (see Change records). |
 | The running log and the log files | Whether the window shows the command (CMD) and reasoning (WHY) lines - the log file always has them - its size, and how many days of log files to keep (0 = all; applied when you save and at every start). |
-| Warnings and safety limits | Free space that refuses or warns, how long an OS patch install is watched, whether it is watched at all after PATCH IT! (`AutoCheckInstalls`, the box on the tab), PendingFileRenameOperations as a pending reboot, staging clean-up, the Trellix Solidcore guard (`RequireSolidcoreUpdateMode`), one patch per server per run (`OnePatchPerRun`), whether Trellix is used here at all (`TrellixInUse`: off takes its columns, boxes, buttons, warnings and confirmation away), whether the Trellix Agent services box starts ticked (`StopTrellixAgentForInstall`), the operator name. |
+| Warnings and safety limits | Free space that refuses or warns, how long an OS patch install is watched, whether it is watched at all after PATCH IT! (`AutoCheckInstalls`, the box on the tab), PendingFileRenameOperations as a pending reboot, staging clean-up, the Trellix Solidcore guard (`RequireSolidcoreUpdateMode`), one patch per server per run (`OnePatchPerRun`), how long a check waits for a server that does not answer (`SilentServerSec`, 180 s: the server shows as unreachable with that reason and the others carry on - a down or wedged server, or one the account gets no answer from, no longer holds a 35-server check for ten minutes; a check with a limit of its own, such as Impact, gives each server that long instead; never applied to an install), whether Trellix is used here at all (`TrellixInUse`: off takes its columns, boxes, buttons, warnings and confirmation away), whether the Trellix Agent services box starts ticked (`StopTrellixAgentForInstall`), the operator name. |
 | The Software console | The software install timeout, and how many packages it shows at once (see A big library). |
 | The Commands console | How long a command may run, how much of each server's answer is kept, and whether a command that may change a server also asks the pre-action confirmations (off by default: it always asks for the change record and its own confirmation). |
-| Health warning thresholds | The thresholds of the Health checks (disk, memory, processor and its sample length, uptime, event log, failed logons, scheduled-task failures, certificates, time, dormant and unknown software, Group Policy refresh). |
+| Health warning thresholds | The thresholds of the Health checks (disk, memory, processor and its sample length, uptime, event log, failed logons, scheduled-task failures, certificates, time, dormant and unknown software, Group Policy refresh, and the hardware line: logical processors, memory and the one-thread speed score a server should have). |
 | The Security console: GPO recommendations | How far back the impact checks look in the event logs (`ImpactDays`). |
 
 Not on the page, by design: the integrity guards `RequireValidSignature` and `AllowUnknownTargetBuild`, the WinRM port
-and timeouts, the folders, the query windows and intervals (`LogonFailWindowHours`, `MaxEvents`, `SoftwarePollSec`,
+and the session open timeout, the folders, the query windows and intervals (`LogonFailWindowHours`, `MaxEvents`, `SoftwarePollSec`,
 `ProgressEverySec`, `ProgressDetailEveryMin`, `MaxRsopSettings`, `AnalysisHoursBack`), the default SOE standard name and the fleet caps -
 those change in `lib\01-Config.ps1` only. A hand edit of `settings.json` that does not
 fit its setting is skipped at start-up with a warning in the log, and the default stays.
@@ -947,7 +972,7 @@ fit its setting is skipped at start-up with a warning in the log, and the defaul
 *The About tab: how the scripts load on this PC, and the code signature of every script.*
 
 The About tab shows the version, the author and the support address (**Copy support email** puts it on the
-clipboard), the source code link (<https://github.com/ChrisFryer/Offline-Updates>; **Copy GitHub link** puts it on the
+clipboard), the source code link (<https://github.com/fusetech-labs/airgap-winrm>; **Copy GitHub link** puts it on the
 clipboard - the tool itself never opens it or sends mail), the consoles, this copy's folder, PowerShell version,
 language mode and execution policy, where the settings and logs are, and the code signature of every script.
 
@@ -977,6 +1002,18 @@ because PowerShell's loader gives up on files that large.
   collector was never run for the server or failed; press the tab's Check / Audit button.
 * Many Amber rows saying "was not collected (auditpol returned no rows ...)": the account is not an administrator
   on the server. Set credentials and audit again.
+* On WinRM over HTTPS (`WinRMPort` 5986), a grey row whose reason says "unknown certificate authority" or "does not
+  match the CN": the listener's certificate is not trusted by the toolkit PC, or does not carry the name written in
+  the group file. The tool skips no certificate check, by design.
+* A grey row whose reason says "no answer within 180 s of its turn - given up": the server is down, wedged, or the
+  account gets no answer from it, and the check moved on without it (`SilentServerSec` on the Settings tab). Test
+  the server with **Test WinRM port (ticked)**, then set credentials or fix the server; the other servers were not
+  held up. **Stop waiting** on the status bar gives up on every silent server at once.
+* The install said "Installed (exit 0)" but the status check still says READY and `Get-HotFix` does not list the KB:
+  a .NET rollup for another Windows build (the Server 2022 file on a Server 2019 box). DISM installs its wrapper with
+  every part skipped and calls that success. The build is now read from inside the rollup's cab, so such a file shows
+  **Blocked: wrong OS**; and an exit 0 without a reboot is checked against `Get-HotFix` afterwards and reported FAILED
+  when the KB is not there. Get the rollup for the server's build.
 * "Data file unreadable" or "Could not read ... as JSON" in the log: a hand-edited file in `data\`, `soe\` or
   `security\` has a syntax error; the log names the file and the line. The tool keeps running with defaults.
 * The **Code Tour** tab has a troubleshooting checklist (topic F3) and how to extend the tool (F4).
@@ -988,9 +1025,12 @@ because PowerShell's loader gives up on files that large.
   policy is the exception: `auditpol /get /r` prints its column names and subcategory names in the server's language, so
   on a non-English server the audit-policy checks read "not collected" with the reason. If such servers are in scope, say
   so: reading the subcategory GUIDs instead is the fix.
-- **Row colours.** The server grids of the O/S Patching, Software, Health, Security and Commands consoles colour the whole
-  row by the server's worst finding and say the outcome in their Light column; the newer lists (GPO recommendations,
-  Needs attention, the compliance tables) say the outcome as a word in the first column and colour that cell only.
+- **Row colours.** The server grids of the O/S Patching, Software, Security and Commands consoles colour the whole
+  row by the server's worst finding and say the outcome in their Light column. The Health grid colours the row by the
+  worst check and each check's own cell by that check's light, so a green or amber cell shows inside a row that is red
+  for another finding (the Server, Group, Checked and Worst cells keep the row colour). The newer lists (GPO
+  recommendations, Needs attention, the compliance tables) say the outcome as a word in the first column and colour
+  that cell only.
 
 ## Requirements
 
@@ -1006,10 +1046,27 @@ the log window drops its oldest half past 1.5 MB (the log file keeps everything)
 
 * Windows PowerShell 5.1 on the machine running the tool.
 * WinRM reachable on TCP 5985 on the targets, with the operator's account in the local Administrators group.
+* **The toolkit PC itself** can be in a group file too (its name, its FQDN or `localhost`). The tool recognises it and
+  runs every step for it here - the checks as a local background job, the staging copy as a plain file copy, the
+  install launch, the Trellix Agent services and the reboot in its own process - with no WinRM call to itself, so the
+  toolkit PC needs no listener and the account needs no loopback rights. The status check says so once in the log.
+  Two things follow from the restart taking the toolkit down with it: **Reboot (ticked)** names the computer as
+  this one in its usual question, sends it last with a 60 s countdown instead of 10 (`shutdown /a` cancels it), and
+  the log file and the change log are written before it fires. Start the toolkit again when the computer is back -
+  the open run is on record, and the next status check finishes it.
+* **WinRM over HTTPS.** Where the servers have an HTTPS listener, set `WinRMPort = 5986` in `lib\01-Config.ps1` (it is
+  not on the Settings tab; 5985 stays the default). Every call - the status checks, the install sessions, the reboot,
+  the Trellix Agent buttons, **Test WinRM port** - then goes with `-UseSSL`, and the certificate is checked the normal
+  way: the listener's certificate must chain to a certificate authority the toolkit PC trusts and carry the server's
+  name as written in the group file (one more reason for FQDNs). Nothing is skipped - no `SkipCACheck`, no
+  `SkipCNCheck` - so a certificate problem shows as an error in the log, never as a silent fallback. The window title,
+  the About tab and the CMD lines in the log say which port and transport are in use.
 * Built for Windows Server 2022; Server 2019 and 2025 files are recognised and matched to the right servers. The
   target build is read from inside every patch file with `expand.exe` (offline, cached in `patches\_info\`) and
   compared with each server's build: 14393 = 2016, 17763 = 2019, 20348 = 2022, 26100 = 2025. A file for another build
-  shows **Blocked: wrong OS**; DISM refuses a wrong package anyway (0x800F081E).
+  shows **Blocked: wrong OS**; DISM refuses a wrong cumulative update anyway (0x800F081E). A wrong .NET rollup it takes
+  as an empty wrapper (exit 0), so its build is read from the `update.mum` inside its cab and the install checks
+  afterwards that the KB is on the server.
 * Every patch file must be Authenticode-signed by Microsoft (checked on the operator PC and again on the server).
   Every software installer must be signed by a signer its package names (`Signers`), checked twice the same way.
 * Use FQDNs in the group files. An IP address forces NTLM and would need `TrustedHosts`; never set that to `*`.
@@ -1030,3 +1087,8 @@ security and operational safety, each with what was done). It is kept with the o
 the published repository, which is why the REVIEW RECORD blocks refer to it as an internal record. Every `.ps1` starts
 with such a block, with space for the human reviewer's name, date, verdict and comments. Fill those in by hand and keep
 them in the files.
+
+---
+
+Not affiliated with or endorsed by Microsoft or Trellix. WinRM, Windows, Trellix and Solidcore are trademarks of their
+respective owners.

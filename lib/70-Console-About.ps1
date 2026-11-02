@@ -1,5 +1,7 @@
 ﻿# =====================================================================
 #  70-Console-About.ps1  -  THE ABOUT CONSOLE
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  What the toolkit is, who wrote it and where to get support, and where its
 #  source lives (the GitHub link and the support address are shown to
@@ -535,7 +537,7 @@ function Get-AboutHtml {
     $policy = @(Get-ExecutionPolicy -List | ForEach-Object { '{0} {1}' -f $_.Scope, $_.ExecutionPolicy }) -join ', '
     $settings = 'none saved - the defaults of lib\01-Config.ps1'
     if ($script:SettingsInfo -and $script:SettingsInfo.Exists) { $settings = ('{0} (saved {1} by {2})' -f $script:SettingsInfo.Path, $script:SettingsInfo.Saved, $script:SettingsInfo.SavedBy) }
-    $facts = @(@('Version', $script:Config.ToolVersion), @('Author', $script:Config.Author), @('Support', $script:Config.SupportEmail), @('Source code', $script:Config.SourceUrl), @('This copy', $script:RootFolder), @('Running as', (Get-OperatorIdentity)))
+    $facts = @(@('Version', $script:Config.ToolVersion), @('Author', $script:Config.Author), @('Support', $script:Config.SupportEmail), @('Website', $script:Config.Website), @('Source code', $script:Config.SourceUrl), @('This copy', $script:RootFolder), @('Running as', (Get-OperatorIdentity)))
     $consoles = @(
         [pscustomobject]@{ Console = 'O/S Patching'; Does = 'Windows and .NET updates: which server needs which file, the plan, the install over WinRM, the reboot. Roles, software currency, SQL and Exchange levels.' }
         [pscustomobject]@{ Console = 'Software'; Does = 'Third-party software from a catalogue (VMware Tools first): stage, install / update with the reboot suppressed, remove old or dormant products.' }
@@ -554,7 +556,7 @@ function Get-AboutHtml {
         [pscustomobject]@{ Item = 'Computer'; Value = $env:COMPUTERNAME })
     $sections = @(
         @{ Heading = 'What it is'; Lines = @(
-            'Offline administration of Windows Servers over WinRM (HTTP, port 5985): O/S patching, third-party software, health and SOE checks, and an ISM security audit - from one PowerShell 5.1 window, with no agent on the servers and no internet connection.',
+            ('Offline administration of Windows Servers over WinRM ({0}, port {1}): O/S patching, third-party software, health and SOE checks, and an ISM security audit - from one PowerShell 5.1 window, with no agent on the servers and no internet connection.' -f (Get-WinRMSchemeText), $script:Config.WinRMPort),
             ('Author: {0}.  Support: {1} - copy the address with the Copy support email button above.' -f $script:Config.Author, $script:Config.SupportEmail),
             ('Source code, issues and new versions: {0} - copy the link with the Copy GitHub link button above; the tool itself never connects to the internet.' -f $script:Config.SourceUrl),
             'Every install, update, removal and reboot goes through a plan, a change record and the pre-action confirmations (Settings tab), and is recorded three times: the running log, changes\change-log.csv and on the server itself (event log and C:\PatchStaging\change-log.txt). STAGE ONLY copies files without a change record by default; a typed command that may change a server, and the Trellix Agent buttons, ask for a change record and their own Yes/No (the Settings tab decides per action).') }
@@ -570,8 +572,8 @@ function Get-AboutHtml {
     }
     $sections += @{ Heading = 'Requirements'; Lines = @(
         'This PC: Windows PowerShell 5.1 with .NET Framework 4.x, in FullLanguage mode (application control that forces ConstrainedLanguage stops the window - signing the scripts with a certificate the policy trusts lifts that).',
-        'The servers: WinRM over HTTP (5985) from this PC, and an account that is a local administrator on them. No agent, no file shares, no internet.') }
-    return (New-DetailsHtml -Title ('{0} {1}' -f $script:Config.ToolName, $script:Config.ToolVersion) -Subtitle 'offline Windows Server administration over WinRM (HTTP 5985)' -Console 'About' -Facts $facts -Sections $sections)
+        ('The servers: WinRM over {0} ({1}) from this PC, and an account that is a local administrator on them. No agent, no file shares, no internet.' -f (Get-WinRMSchemeText), $script:Config.WinRMPort)) }
+    return (New-DetailsHtml -Title ('{0} {1}' -f $script:Config.ToolName, $script:Config.ToolVersion) -Subtitle ('offline Windows Server administration over WinRM ({0} {1})' -f (Get-WinRMSchemeText), $script:Config.WinRMPort) -Console 'About' -Facts $facts -Sections $sections)
 }
 
 function Update-AboutPage {
@@ -964,9 +966,9 @@ function New-AboutConsole {
     $tab.Controls.Add($view)
     $script:Gui['AboutView'] = $view
     $toolbar = New-ConsoleToolbar -Tab $tab
-    $toolbar.Controls.Add((New-GuiButton -Text 'Copy GitHub link' -X 8 -Y 10 -W 140 -H 36 -Colour 'LightSteelBlue' -ReadOnly -Tip $script:Config.SourceUrl -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'Copy GitHub link' -X 8 -Y 10 -W 140 -H 36 -ReadOnly -Tip $script:Config.SourceUrl -OnClick {
         Invoke-GuiAction -Name 'Copy GitHub link' -ReadOnly -Action { [System.Windows.Forms.Clipboard]::SetText([string]$script:Config.SourceUrl); Write-PatchLog "Copied to the clipboard: $($script:Config.SourceUrl)" 'OK' } }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Copy support email' -X 153 -Y 10 -W 150 -H 36 -Colour 'LightSteelBlue' -ReadOnly -Tip $script:Config.SupportEmail -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'Copy support email' -X 153 -Y 10 -W 150 -H 36 -ReadOnly -Tip $script:Config.SupportEmail -OnClick {
         Invoke-GuiAction -Name 'Copy support email' -ReadOnly -Action { [System.Windows.Forms.Clipboard]::SetText([string]$script:Config.SupportEmail); Write-PatchLog "Copied to the clipboard: $($script:Config.SupportEmail)" 'OK' } }))
     $toolbar.Controls.Add((New-GuiButton -Text 'Check signatures again' -X 308 -Y 10 -W 170 -H 36 -Colour 'Gainsboro' -ReadOnly -Tip 'Reads the code signature of every script again (after Sign-Toolkit.ps1, say)' -OnClick {
         Invoke-GuiAction -Name 'Check signatures' -ReadOnly -Action { Update-AboutPage -Recheck } }))

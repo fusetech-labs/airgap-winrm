@@ -1,5 +1,7 @@
 ﻿# =====================================================================
 #  60-Console-Settings.ps1  -  THE SETTINGS CONSOLE
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  One page, eight boxes, saved together with "Save settings":
 #    1. Before any change: the pre-action confirmations - which products

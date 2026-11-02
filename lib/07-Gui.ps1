@@ -1,5 +1,7 @@
 ﻿# =====================================================================
 #  07-Gui.ps1  -  THE SHELL: window, colour-coded tabs, shared log, helpers
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  Version 2 layout:
 #    [ tabs: O/S Patching | Software | Health | Security | Commands | Code Tour | Settings | About ]  (painted in the console colour)
@@ -42,7 +44,7 @@ $script:Quips = @(
     '3010 is a happy number. It means "reboot me", not "I failed".'
     'Zero servers pending reboot? Frame it.'
     'Green is good. Amber is work. Red is coffee.'
-    'Port 5985: the little door every server leaves open for you.'
+    'One WinRM port: the little door every server leaves open for you.'
     'Patch Tuesday is a lifestyle.'
     'A green audit is just a red audit that got attention.'
 )
@@ -57,13 +59,116 @@ function New-GuiButton {
     $b.Text = $Text; $b.Location = New-Object System.Drawing.Point($X, $Y); $b.Size = New-Object System.Drawing.Size($W, $H)
     # Every button carries a colour of its own (grey when none is asked for): on a white console page a themed button
     # can draw as bare text and read as a link (operator screenshots 2026-10-23); a coloured one draws its edges everywhere.
+    # The colour is the meaning, the same on every console: blue asks the servers (read-only), red changes them, coral
+    # removes, khaki reboots, wheat is the Trellix Agent services, steel blue stages files without installing, green saves
+    # on this PC, grey works on this PC.  The face is flat with a one-pixel edge in a darker shade of its own colour (the
+    # capability brief's look, field review 2026-11) - the colour stays functional, the raised bevel goes.
     if (-not $Colour) { $Colour = 'Gainsboro' }
     $b.BackColor = $Colour; $b.UseVisualStyleBackColor = $false
+    $b.FlatStyle = 'Flat'; $b.FlatAppearance.BorderSize = 1
+    $b.FlatAppearance.BorderColor = Get-EdgeColour -Colour $b.BackColor
+    $b.FlatAppearance.MouseOverBackColor = Get-EdgeColour -Colour $b.BackColor -Factor 0.93
+    $b.FlatAppearance.MouseDownBackColor = Get-EdgeColour -Colour $b.BackColor -Factor 0.84
     if ($Tip) { $script:Gui['Tips'].SetToolTip($b, $Tip) }
     if ($ReadOnly) { $b.Tag = 'readonly' }
     $b.Add_Click($OnClick)
     $script:Gui['Buttons'] += $b
     return $b
+}
+
+function Get-EdgeColour {
+    # A darker shade of a colour - its red, green and blue scaled by the factor: the edge of a flat button, its pressed face
+    param([System.Drawing.Color]$Colour, [double]$Factor = 0.62)
+    return [System.Drawing.Color]::FromArgb([int]($Colour.R * $Factor), [int]($Colour.G * $Factor), [int]($Colour.B * $Factor))
+}
+
+# ---------------------------------------------------------------------
+#  The window icon - drawn here, so the tool ships no picture file: a rounded square in the Fusetech blue with the
+#  logo's white lightning bolt.  The same drawing is the favicon of every HTML page the tool writes.
+# ---------------------------------------------------------------------
+function New-ToolkitIconBitmap {
+    # One size of the icon as a bitmap with a transparent background
+    param([int]$Size)
+    $bmp = New-Object System.Drawing.Bitmap($Size, $Size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    try {
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $g.Clear([System.Drawing.Color]::Transparent)
+        $s = [single]$Size
+        $d = [single](2 * [Math]::Max(2, [int]($Size * 0.22)))   # the corner diameter
+        $x0 = [single]0.5; $x1 = $s - 0.5 - $d                     # a half-pixel in from the edge, so the outline is not cut
+        $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+        $path.AddArc($x0, $x0, $d, $d, 180, 90); $path.AddArc($x1, $x0, $d, $d, 270, 90)
+        $path.AddArc($x1, $x1, $d, $d, 0, 90);   $path.AddArc($x0, $x1, $d, $d, 90, 90)
+        $path.CloseFigure()
+        $blue = [System.Drawing.Color]::FromName($script:Config.BrandColour)
+        $fill = New-Object System.Drawing.Drawing2D.LinearGradientBrush((New-Object System.Drawing.PointF(0, 0)), (New-Object System.Drawing.PointF($s, $s)), $blue, [System.Drawing.Color]::DeepSkyBlue)
+        $g.FillPath($fill, $path)
+        $edge = New-Object System.Drawing.Pen((Get-EdgeColour -Colour $blue -Factor 0.75), 1)
+        $g.DrawPath($edge, $path)
+        # the bolt: seven corners on a 32-unit drawing, scaled to the size
+        $k = $s / 32
+        $bolt = [System.Drawing.PointF[]]@(foreach ($p in @(@(14, 1), @(22, 1), @(18, 13), @(25, 13), @(10, 31), @(14, 18), @(7, 18))) { New-Object System.Drawing.PointF(([single]($p[0] * $k)), ([single]($p[1] * $k))) })
+        $g.FillPolygon([System.Drawing.Brushes]::White, $bolt)
+        $fill.Dispose(); $edge.Dispose(); $path.Dispose()
+    } finally { $g.Dispose() }
+    return $bmp
+}
+
+function Get-ToolkitIcon {
+    # The window icon, drawn once per run in the sizes Windows asks for (title bar, taskbar, Alt+Tab, each one crisp),
+    # packed as an in-memory .ico of plain 32-bit bitmaps - the one form every Windows and every System.Drawing reads
+    # (PNG entries draw in a title bar, but Icon.ToBitmap in Windows PowerShell turns them to noise).  Also keeps the
+    # 32 px drawing as a PNG for Get-ToolkitFaviconTag.
+    if ($script:ToolkitIcon) { return $script:ToolkitIcon }
+    Add-Type -AssemblyName System.Drawing
+    $sizes = @(16, 20, 24, 32, 48, 64)
+    $frames = New-Object System.Collections.Generic.List[byte[]]
+    foreach ($sz in $sizes) {
+        $bmp = New-ToolkitIconBitmap -Size $sz
+        if ($sz -eq 32) { $mem = New-Object System.IO.MemoryStream; $bmp.Save($mem, [System.Drawing.Imaging.ImageFormat]::Png); $script:ToolkitIconPng = $mem.ToArray(); $mem.Dispose() }
+        $data = $bmp.LockBits((New-Object System.Drawing.Rectangle(0, 0, $sz, $sz)), [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $stride = $data.Stride
+        $rows = New-Object byte[] ($stride * $sz)
+        [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $rows, 0, $rows.Length)
+        $bmp.UnlockBits($data); $bmp.Dispose()
+        $maskRow = [int][Math]::Ceiling($sz / 32.0) * 4   # the 1-bit AND mask, each row padded to 4 bytes; all zero, the alpha channel decides
+        $frame = New-Object System.IO.MemoryStream
+        $fw = New-Object System.IO.BinaryWriter($frame)
+        # BITMAPINFOHEADER: size, width, height (colour rows + mask rows), planes, bits, compression, image size, 4 zeros
+        $fw.Write([uint32]40); $fw.Write([int32]$sz); $fw.Write([int32](2 * $sz)); $fw.Write([uint16]1); $fw.Write([uint16]32)
+        $fw.Write([uint32]0); $fw.Write([uint32]($sz * $sz * 4 + $maskRow * $sz)); $fw.Write([int32]0); $fw.Write([int32]0); $fw.Write([uint32]0); $fw.Write([uint32]0)
+        for ($y = $sz - 1; $y -ge 0; $y--) { $fw.Write($rows, $y * $stride, $sz * 4) }   # bottom-up, BGRA as GDI+ holds it
+        $fw.Write((New-Object byte[] ($maskRow * $sz)))
+        $fw.Flush(); $frames.Add($frame.ToArray()); $frame.Dispose()
+    }
+    try {
+        $ico = New-Object System.IO.MemoryStream
+        $w = New-Object System.IO.BinaryWriter($ico)
+        $w.Write([uint16]0); $w.Write([uint16]1); $w.Write([uint16]$sizes.Count)   # ICONDIR: reserved, type 1 = icon, count
+        $offset = 6 + 16 * $sizes.Count
+        for ($i = 0; $i -lt $sizes.Count; $i++) {                                 # ICONDIRENTRY per size
+            $w.Write([byte]$sizes[$i]); $w.Write([byte]$sizes[$i]); $w.Write([byte]0); $w.Write([byte]0)
+            $w.Write([uint16]1); $w.Write([uint16]32); $w.Write([uint32]$frames[$i].Length); $w.Write([uint32]$offset)
+            $offset += $frames[$i].Length
+        }
+        foreach ($fr in $frames) { $w.Write([byte[]]$fr) }
+        $w.Flush(); $ico.Position = 0
+        $script:ToolkitIcon = New-Object System.Drawing.Icon($ico)
+    } catch {
+        # should the .ico not be read: the 32 px drawing alone, scaled by Windows
+        $one = New-ToolkitIconBitmap -Size 32
+        $script:ToolkitIcon = [System.Drawing.Icon]::FromHandle($one.GetHicon())
+    }
+    return $script:ToolkitIcon
+}
+
+function Get-ToolkitFaviconTag {
+    # The window icon as the favicon of an HTML page: a data: link, so the page stays one file.  Empty if the drawing fails.
+    try {
+        [void](Get-ToolkitIcon)
+        return '<link rel="icon" type="image/png" href="data:image/png;base64,' + [Convert]::ToBase64String($script:ToolkitIconPng) + '">'
+    } catch { return '' }
 }
 
 function Invoke-GuiAction {
@@ -329,6 +434,9 @@ function New-ConsoleBanner {
     $fore = $script:Config.ConsoleText[$Console]; if (-not $fore) { $fore = 'White' }
     $banner = New-Object System.Windows.Forms.Panel
     $banner.Dock = 'Top'; $banner.Height = 64; $banner.BackColor = $back
+    # the console keeps its own colour; the gold rule along the foot of every banner is the one accent they share
+    $rule = New-Object System.Windows.Forms.Panel; $rule.Dock = 'Bottom'; $rule.Height = 3; $rule.BackColor = 'Goldenrod'
+    $banner.Controls.Add($rule)
     $t = New-Object System.Windows.Forms.Label
     $t.Text = $Title; $t.ForeColor = $fore; $t.AutoSize = $true
     $t.Font = New-Object System.Drawing.Font('Segoe UI', 20, [System.Drawing.FontStyle]::Bold)
@@ -706,7 +814,7 @@ function Get-ToolkitStartSize {
         $chrome = 0; foreach ($c in $p.Parent.Controls) { if ([string]$c.Dock -eq 'Top') { $chrome += $c.Height } }   # banner + toolbar
         $need = [Math]::Max($need, $chrome + $bottom + $p.Padding.Bottom + 6)
     }
-    $fixed = ($Tabs.ItemSize.Height + 8) + $Outer.SplitterWidth + $Strip.Height + ($Form.Size.Height - $Form.ClientSize.Height)
+    $fixed = ($Tabs.ItemSize.Height + 8) + $Outer.SplitterWidth + $Strip.Height + $Form.Padding.Vertical + ($Form.Size.Height - $Form.ClientSize.Height)
     $log = 220
     $max = $false
     if ($need + $fixed + $log -gt $Screen.Height) {
@@ -740,15 +848,21 @@ function Show-ToolkitGui {
     $font = New-Object System.Drawing.Font('Segoe UI', 9)
 
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "$($script:Config.OperatorName)'s $($script:Config.ToolName) $($script:Config.ToolVersion) - offline, WinRM 5985 only"
+    $form.Text = "$($script:Config.OperatorName)'s $($script:Config.ToolName) $($script:Config.ToolVersion) - offline, over WinRM"
     $form.Size = New-Object System.Drawing.Size(1360, 900)
     $form.MinimumSize = New-Object System.Drawing.Size(1100, 720)
     $form.StartPosition = 'CenterScreen'
     $form.Font = $font
+    # the Fusetech frame: a 3 px line in the brand blue round the whole client area, drawn by the form itself, so every
+    # Windows version shows it the same.  A control inherits its parent's BackColor unless one is set, so the split
+    # container and the status bar below are given the usual grey by name.
+    $form.BackColor = [System.Drawing.Color]::FromName($script:Config.BrandColour); $form.Padding = New-Object System.Windows.Forms.Padding(3)
+    $form.Icon = Get-ToolkitIcon
     $script:Gui['Form'] = $form
 
     # ---- status bar (bottom) ----
     $strip = New-Object System.Windows.Forms.StatusStrip
+    $strip.BackColor = [System.Drawing.SystemColors]::Control
     $statusLabel = New-Object System.Windows.Forms.ToolStripStatusLabel
     $statusLabel.Text = 'Ready.'; $statusLabel.Spring = $true; $statusLabel.TextAlign = 'MiddleLeft'
     $progress = New-Object System.Windows.Forms.ToolStripProgressBar
@@ -763,7 +877,7 @@ function Show-ToolkitGui {
 
     # ---- tabs on top, shared log underneath ----
     $outer = New-Object System.Windows.Forms.SplitContainer
-    $outer.Dock = 'Fill'; $outer.Orientation = 'Horizontal'
+    $outer.Dock = 'Fill'; $outer.Orientation = 'Horizontal'; $outer.BackColor = [System.Drawing.SystemColors]::Control
     $outer.FixedPanel = 'Panel2'   # the log keeps its height when the window is resized or maximised; the consoles grow
     $tabs = New-Object System.Windows.Forms.TabControl
     # eight tabs of 132 px fit the narrowest window (MinimumSize 1100) without scroll arrows

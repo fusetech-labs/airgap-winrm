@@ -1,5 +1,7 @@
 # =====================================================================
 #  13-GroupPolicy.ps1  -  WHAT GROUP POLICY DOES ON A SERVER
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  One read-only collector ('Gpo') that both the Health and the Security
 #  console use:

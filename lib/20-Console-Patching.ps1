@@ -1,5 +1,7 @@
 # =====================================================================
 #  20-Console-Patching.ps1  -  THE O/S PATCHING CONSOLE (tab 1)
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  Everything the version 1 window did, in its own file:
 #    - the server grid with one column per patch file (Get-PatchVerdict)
@@ -68,10 +70,15 @@ function Update-PatchList {
     foreach ($p in $script:Patches) {
         # short and scannable: "KB5126655  Windows  584.6 MB  Server 2022"; the grid column and the details window carry the rest
         $line = '{0}  {1}  {2} MB' -f $p.KB, $p.PatchType, $p.SizeMB
-        if ($p.TargetBuild -gt 0) { $line += '  ' + $p.TargetOs }
-        elseif ($p.PSObject.Properties['OsFamily'] -and $p.OsFamily) { $line += '  .NET ' + $p.DotNetLine + ' (' + $p.OsFamily + ' line)' }
+        # a .NET rollup: ".NET 4.8  Server 2022" (the build read from inside its cab), or ".NET 4.8 (windows10.0 line)" when it was not
+        if ($p.PSObject.Properties['DotNetLine'] -and $p.DotNetLine) { $line += '  .NET ' + $p.DotNetLine }
+        if ($p.TargetBuild -gt 0 -or ($p.PSObject.Properties['TargetBuilds'] -and @($p.TargetBuilds).Count -gt 0)) { $line += '  ' + $p.TargetOs }
+        elseif ($p.PSObject.Properties['OsFamily'] -and $p.OsFamily) { $line += ' (' + $p.OsFamily + ' line)' }
         elseif ($p.OsLine) { $line += '  ' + $p.OsLine + ' ?' } else { $line += '  OS unknown' }
         if ($p.Type -ne 'msu') { $line += '  (' + $p.Type + ')' }
+        # what the package is, when the manifest inside said: the install order goes by it (servicing stack, cumulative, other)
+        if ($p.PSObject.Properties['Kind'] -and $p.Kind -in 'cumulative', 'servicing stack') { $line += '  ' + $p.Kind }
+        if ($p.PSObject.Properties['Kind'] -and $p.Kind -eq 'dynamic update') { $line += '  - DYNAMIC UPDATE, not for a running server' }
         if (-not $p.Installable) { $line += '  - by hand' }
         if ($p.Signature -ne 'Valid') { $line += '  - UNSIGNED / ' + $p.Signature }
         [void]$list.Items.Add($line, [bool]$keep[[string]$p.FullName]); $paths += [string]$p.FullName
@@ -149,13 +156,14 @@ function Update-ServerList {
             }
             [void]$item.SubItems.Add($s.LastHotFix)
             # green = every file that applies to this server is installed - the same rule as the report: a file for another
-            # Windows build ("Blocked: wrong OS") and a "By hand" type do not apply, and at least one file must apply
+            # Windows build ("Blocked: wrong OS"), a "By hand" type and a Dynamic Update (for no running server) do not apply,
+            # and at least one file must apply
             $anyReady = $false; $allInstalled = $true; $applicable = 0
             foreach ($p in $script:Patches) {
                 $cell = Get-PatchCellText -Status $s -Patch $p -Server $name
                 [void]$item.SubItems.Add($cell)
                 if ($cell -like 'READY*') { $anyReady = $true }
-                if ($cell -eq 'By hand' -or $cell -eq 'Blocked: wrong OS' -or $cell -eq 'Not applicable') { continue }
+                if ($cell -in 'By hand', 'Blocked: wrong OS', 'Not applicable', 'Blocked: dynamic update') { continue }
                 $applicable++
                 if ($cell -notlike 'Installed*') { $allInstalled = $false }
             }
@@ -270,9 +278,9 @@ function Get-PatchingHelpHtml {
         @{ Colour = 'lemonchiffon'; Cells = @('server-d', 'Group-2', 'OK', '2022 Std', '20348.5499', 'no', '12.0', '41.3', '', 'Running (Auto)', 'KB5127687 (2026-10-13)', 'READY', 'IIS, .NET 4.8.1', '0', '09:31:05') },
         @{ Colour = 'honeydew';     Cells = @('server-e', 'Group-3', 'OK', '2022 Std', '20348.5761', 'no (PFRO only, ignored)', '4.9', '58.4', '', 'Running (Auto)', 'KB5126655 (2026-10-14)', 'Installed', 'FS', '2', '09:31:06') })
     $rows = New-HelpTable -TrellixRows -Headers @('Row colour', 'It means', 'Next step') -Rows @(
-        @((Get-HelpSwatch 'white' 'White'), 'Not asked yet in this session - or checked, with nothing READY and not every KB installed: the KB cells say why (blocked, by hand, not applicable).', 'Not asked yet: tick it and press "Check status (ticked)", or press "Check ALL shown". Checked: read the KB cells.'),
-        @((Get-HelpSwatch 'lightgray' 'Grey'), 'WinRM gave no answer or refused the login. Hover the row for the reason; it is in the log too.', 'Press "Test WinRM port (no auth) on ticked". No answer = network, firewall or the WinRM service. Answers but "Access is denied" = set credentials with an admin account. Kerberos errors = use the FQDN in the group file.'),
-        @((Get-HelpSwatch 'mistyrose' 'Pink'), 'A reboot is pending, so every KB shows "Blocked: reboot": an install on top of a pending reboot fails with 0x800F0922.', 'Reboot the server in a change window ("Reboot ticked servers"), then check status again.'),
+        @((Get-HelpSwatch 'white' 'White'), 'Not asked yet in this session - or checked, with nothing READY and not every KB installed: the KB cells say why (blocked, by hand, not applicable).', 'Not asked yet: tick it and press "Check status (ticked)", or press "Check status (all shown)". Checked: read the KB cells.'),
+        @((Get-HelpSwatch 'lightgray' 'Grey'), 'WinRM gave no answer or refused the login. Hover the row for the reason; it is in the log too.', 'Press "Test WinRM port (ticked) on ticked". No answer = network, firewall or the WinRM service. Answers but "Access is denied" = set credentials with an admin account. Kerberos errors = use the FQDN in the group file.'),
+        @((Get-HelpSwatch 'mistyrose' 'Pink'), 'A reboot is pending, so every KB shows "Blocked: reboot": an install on top of a pending reboot fails with 0x800F0922.', 'Reboot the server in a change window ("Reboot (ticked)"), then check status again.'),
         @((Get-HelpSwatch 'lemonchiffon' 'Yellow'), 'At least one patch file is READY: not installed yet and nothing blocks it.', 'Tick the server and the file(s) in the patch list, press PATCH IT!.'),
         @((Get-HelpSwatch 'honeydew' 'Green'), 'Every file the tool can install is already on this server.', 'Nothing. The Build column confirms the level.'),
         @((Get-HelpSwatch 'lightcyan' 'Cyan'), 'An OS patch run the tool handed to this server (a SYSTEM task) is still going, or has not been read yet: the KB cell says INSTALLING with the minutes. The note survives a restart of the tool (settings\patch-runs.json).', 'Leave Auto-check ticked and wait, or come back later and press "Check status (ticked)": it reads the result from the server and records it.'),
@@ -282,12 +290,12 @@ function Get-PatchingHelpHtml {
 
     # ---- 2. the columns ----
     $sections += @{ Heading = 'The columns'; Html = (New-HelpTable -TrellixRows -Headers @('Example cell', 'What it shows') -Rows @(
-        @((Get-HelpCell 'OK'), 'WinRM: OK = the server answered on TCP 5985 as the current login or the stored credentials. FAILED = see the grey row above.'),
+        @((Get-HelpCell 'OK'), ('WinRM: OK = the server answered on TCP {0} as the current login or the stored credentials. FAILED = see the grey row above.' -f (Get-WinRMPortText))),
         @((Get-HelpCell '2022 Std'), 'OS: the Windows edition reported by the server (2016 / 2019 / 2022 / 2025, Std or DC).'),
         @((Get-HelpCell '20348.5761'), 'Build: the real patch level. 20348 = Server 2022. The number after the dot (the UBR) rises with every cumulative update and only moves after the reboot that finishes the install. The Microsoft update-history page prints it next to each KB, e.g. "KB5122882 (OS Build 20348.5622)".'),
         @((Get-HelpCell 'YES: CBS:RebootPending'), 'Pending reboot: the hard signs only - CBS:RebootPending, CBS:PackagesPending, CBS:RebootInProgress, WU:RebootRequired, WU:PostRebootReporting, UpdateExeVolatile, ComputerRename. Any of them colours the row pink.'),
-        @((Get-HelpCell 'YES: software: VMware Tools 12.5.4.24964629 (Update) (exit 3010)'), 'Pending reboot after a Software console install or removal since the last boot that ended with exit 3010 (the reboot suppressed). The row is not pink and the patches are not blocked: install them, then one reboot ("Reboot ticked servers" counts it as pending) finishes both.'),
-        @((Get-HelpCell 'advised: removed Example Scanner 3.0'), 'Not required: software was removed since the last boot (exit 0). A reboot finishes what an uninstaller leaves for the next start - a service marked for deletion, files that were in use. Nothing is blocked; "Reboot ticked servers" asks about these servers separately, with No as the default. Clears itself at the next boot.'),
+        @((Get-HelpCell 'YES: software: VMware Tools 12.5.4.24964629 (Update) (exit 3010)'), 'Pending reboot after a Software console install or removal since the last boot that ended with exit 3010 (the reboot suppressed). The row is not pink and the patches are not blocked: install them, then one reboot ("Reboot (ticked)" counts it as pending) finishes both.'),
+        @((Get-HelpCell 'advised: removed Example Scanner 3.0'), 'Not required: software was removed since the last boot (exit 0). A reboot finishes what an uninstaller leaves for the next start - a service marked for deletion, files that were in use. Nothing is blocked; "Reboot (ticked)" asks about these servers separately, with No as the default. Clears itself at the next boot.'),
         @((Get-HelpCell 'no (PFRO only, ignored)'), 'Only PendingFileRenameOperations is set. Installers and anti-virus leave that behind all the time, so it is shown but not counted (TreatPendingFileRenameAsReboot in lib\01-Config.ps1 turns it into a real block).'),
         @((Get-HelpCell '68.2'), 'Up (d): days since the last boot.'),
         @((Get-HelpCell '51.7'), 'Free C: GB: free space on the system drive. Red text = below WarnFreeGB; below MinFreeGB the install is refused ("Blocked: disk").'),
@@ -307,7 +315,7 @@ function Get-PatchingHelpHtml {
         @((Get-HelpCell 'Installed (build)' 'honeydew'), 'The server''s build is at or above the build this update brings (data\product-patches.psd1 knows it): a later cumulative update already contains it.', 'Nothing.'),
         @((Get-HelpCell 'Installed (history)' 'honeydew'), 'Get-HotFix no longer lists it (a newer cumulative update replaced it) but the Windows Update history records a successful install.', 'Nothing - the Build column shows the current level.'),
         @((Get-HelpCell 'By hand' 'whitesmoke'), 'The file sits in patches\SQL, \Exchange or \Other. The tool reports those patch types but never installs them; the current level is on the server''s details page.', 'Apply with the vendor''s own installer in a change window.'),
-        @((Get-HelpCell 'Not applicable' 'whitesmoke'), 'A .NET Framework update is for one .NET line (4.8.1, 4.8 ...), read from the file; this server runs another line (the inventory says which). Such a file carries no Windows build inside, only "Windows 10.0", so the list shows it as ".NET 4.8.1 (windows10.0 line)"; where the line matches, DISM checks the exact applicability (0x800F081E = not for this build).', 'Download the update for the .NET line the server runs, or leave it: nothing is blocked.'),
+        @((Get-HelpCell 'Not applicable' 'whitesmoke'), 'A .NET Framework update is for one .NET line (4.8.1, 4.8 ...), read from the file; this server runs another line (the inventory says which). The Windows build of such a file is read from the update.mum inside its cab (its outer files name only "Windows 10.0"), so a file for another build shows Blocked: wrong OS. DISM would not refuse it: it takes a .NET rollup for the wrong build as an empty wrapper (exit 0, nothing installed), which the install checks for afterwards.', 'Download the update for the .NET line the server runs, or leave it: nothing is blocked.'),
         @((Get-HelpCell 'Blocked: reboot' 'mistyrose'), 'A reboot is pending (pink row).', 'Reboot, then check status again.'),
         @((Get-HelpCell 'Blocked: servicing'), 'Something is servicing the server right now: TiWorker busy, or the Windows Update agent installing.', 'Wait a few minutes and check status again.'),
         @((Get-HelpCell 'Blocked: Solidcore'), 'Trellix Solidcore on the server is enforcing now or on reboot (or its mode could not be read): the update would be rolled back at the boot.', ('Run the Solidcore Update Mode task (ePO), check status again. ' + $(if (Test-TrellixInUse) { 'The Solidcore column shows what the server says; the' } else { 'The' }) + ' Settings tab can switch the guard off.')),
@@ -315,6 +323,7 @@ function Get-PatchingHelpHtml {
         @((Get-HelpCell 'Blocked: signature'), 'The file is not signed by Microsoft, or the signature could not be read.', 'Download it again from the Microsoft Update Catalog; see "Where do I get patches?".'),
         @((Get-HelpCell 'Blocked: OS unknown'), 'The target build could not be read from inside the file, so the tool will not guess.', 'Check the file (patches\_info and the log); AllowUnknownTargetBuild in lib\01-Config.ps1 overrides this, at your own risk.'),
         @((Get-HelpCell 'Blocked: wrong OS'), 'The file is built for a different Windows build than the server runs (for example a 2025 update against a 2022 server).', 'Nothing for this server; download the file for its build.'),
+        @((Get-HelpCell 'Blocked: dynamic update'), 'The file is a Dynamic Update - a Safe OS package for installation media and the recovery environment (WinRE), which the catalogue lists next to the month''s cumulative update. It is not an update for a running server: installed on one it stages, and the reboot undoes it. It blocks nothing else.', 'Delete the file or move it to patches\Other; the cumulative update carries what the server needs.'),
         @((Get-HelpCell 'INSTALLING (12 min)' 'lightcyan'), 'PATCH IT! handed this KB to the server as a one-shot SYSTEM task and the result has not been read yet (cyan row). The install carries on whatever happens to this window.', 'Wait with Auto-check ticked, or press "Check status" later - today or tomorrow.'),
         @((Get-HelpCell 'Blocked: installing' 'lightcyan'), 'Another KB is installing on this server right now (the run above).', 'Wait for the result, reboot, then this one.'),
         @((Get-HelpCell 'RUN UNKNOWN' 'thistle'), 'The run ended without a result on the server (purple row): the task is gone, the server rebooted mid-way, the script was stopped, or the launch lost its answer. A later status check that finds the run still going turns it back to INSTALLING.', 'Press "Analyse a failure (ticked)": the page says what the server''s logs hold, and the note is cleared.'),
@@ -326,29 +335,31 @@ function Get-PatchingHelpHtml {
     $sections += @{ Heading = 'The patch list (right-hand panel)'; Lines = @(
         'One line per file found under the patches folder, in the form  KB5126655  Windows  584.6 MB  Server 2022  - KB number, patch type (= sub-folder), size, the Windows build the file is for.',
         '"(cab)" = a .cab instead of an .msu; both install the same way.',
+        '"cumulative" or "servicing stack" = what the manifest inside the file says it is; with several Windows files ticked the order is a separate servicing stack update first, the cumulative update next, other Windows files after it, then .NET - never the smallest file first.',
+        '"- DYNAMIC UPDATE, not for a running server" = a Safe OS package for installation media and WinRE; the KB column shows "Blocked: dynamic update" and the file is never installed.',
         '"windows10.0 ?" or "OS unknown" = the target build could not be read from inside the file; the KB column shows "Blocked: OS unknown" until that is sorted.',
         '"- by hand" = a SQL, Exchange or Other file: listed and reported, never installed by the tool.',
         '"- UNSIGNED / <state>" = the signature check failed; the KB column shows "Blocked: signature".',
         'Tick the files to install; PATCH IT! takes the ticked files to the ticked servers, and the pre-flight repeats every verdict above before anything runs.') }
 
     # ---- 5. the buttons ----
-    $sections += @{ Heading = 'The buttons'; Note = ('Blue = asks the servers (read-only), as does "Test WinRM port (no auth)". {0} change a server; STAGE ONLY (steel blue) copies files onto the servers without installing. The others work on this PC only.' -f $(if (Test-TrellixInUse) { 'Red, khaki and the two wheat-coloured Trellix Agent buttons' } else { 'Red and khaki' })); Html = (New-HelpTable -TrellixRows -Headers @('Button', 'What it does', 'During an install') -Rows @(
+    $sections += @{ Heading = 'The buttons'; Note = ('Blue asks the servers (read-only). {0} change a server; STAGE ONLY (steel blue) copies files onto the servers without installing; green saves on this PC; grey works on this PC only.' -f $(if (Test-TrellixInUse) { 'Red, khaki and the two wheat-coloured Trellix Agent buttons' } else { 'Red and khaki' })); Html = (New-HelpTable -TrellixRows -Headers @('Button', 'What it does', 'During an install') -Rows @(
         @((Get-HelpButton 'Reload lists + patches'), 'Re-reads the group files (*.txt) and the patches folders; the columns follow.', 'locked'),
         @((Get-HelpButton 'Check status (ticked)' 'lightskyblue'), 'Asks the ticked servers over WinRM for build, reboot flags, hotfixes, free disk and servicing state, then fills their rows - and the inventory too while the box next to it is ticked.', 'works'),
-        @((Get-HelpButton 'Check ALL shown' 'lightskyblue'), 'The same for every row in the list.', 'works'),
+        @((Get-HelpButton 'Check status (all shown)' 'lightskyblue'), 'The same for every row in the list.', 'works'),
         @(('<span class="btn">&#9745; Inventory (roles + software)</span>'), 'A tick box, on by default: the two status buttons also read products, roles, features, .NET, SQL, Exchange, services and tasks, which fill the Roles and Software behind columns and the software grid underneath. Untick it for a quicker status-only check.', 'works'),
-        @(((Get-HelpButton 'Set credentials') + ' ' + (Get-HelpButton 'Clear creds')), 'Stores an admin account for this session only (never written to disk) / forgets it.', 'locked'),
-        @((Get-HelpButton 'STAGE ONLY (copy, no install)' 'lightsteelblue'), 'Before the window: copies the ticked patch files to C:\PatchStaging on the ticked servers (one at a time, in slices, SHA256 verified) and nothing else. Skips servers where the file is installed, cannot apply or would not fit; copies where only a reboot, servicing or the Solidcore mode blocks the install for now. Recorded per the Settings tab (''OS patch stage'': not recorded by default). The cells then say READY (staged).', 'locked'),
-        @((Get-HelpButton 'PATCH IT!  (ticked KBs -> ticked servers)' 'tomato'), ('Pre-flight (the verdicts above), the plan, the change record (ticket or change number, approver, window), the pre-action confirmations of the Settings tab ' + $(if (Test-TrellixInUse) { '(VMware snapshot, Trellix ...)' } else { '(VMware snapshot ...)' }) + ', then the copy to one server at a time; each server installs (DISM /Add-Package) as a SYSTEM task the moment its copy is verified, so the installs overlap.'), 'locked (one run at a time)'),
+        @(((Get-HelpButton 'Set credentials') + ' ' + (Get-HelpButton 'Clear credentials')), 'Stores an admin account for this session only (never written to disk) / forgets it.', 'locked'),
+        @((Get-HelpButton 'STAGE ONLY  (ticked)' 'lightsteelblue'), 'Before the window: copies the ticked patch files to C:\PatchStaging on the ticked servers (one at a time, in slices, SHA256 verified) and nothing else. Skips servers where the file is installed, cannot apply or would not fit; copies where only a reboot, servicing or the Solidcore mode blocks the install for now. Recorded per the Settings tab (''OS patch stage'': not recorded by default). The cells then say READY (staged).', 'locked'),
+        @((Get-HelpButton 'PATCH IT!  (ticked KBs, ticked servers)' 'tomato'), ('Pre-flight (the verdicts above), the plan, the change record (ticket or change number, approver, window), the pre-action confirmations of the Settings tab ' + $(if (Test-TrellixInUse) { '(VMware snapshot, Trellix ...)' } else { '(VMware snapshot ...)' }) + ', then the copy to one server at a time; each server installs (DISM /Add-Package) as a SYSTEM task the moment its copy is verified, so the installs overlap.'), 'locked (one run at a time)'),
         @((Get-HelpCell 'Auto-check status every 45 s'), 'The box and the seconds field above PATCH IT!. Ticked: after the launch the tool asks the installing servers at that interval (change it any time) and records each result as it lands; the status bar shows "Let the servers go" to stop watching. Unticked, now or later: the servers install on their own as SYSTEM tasks, their rows turn cyan and say INSTALLING, and "Check status" records the results whenever you come back - also after restarting the tool. Ticked again: the servers still INSTALLING are watched again (after the action running now, if one is). A failed or unknown result offers "Analyse a failure" at once.', 'works'),
         @(('<span class="btn">&#9745; Stop the Trellix Agent services first</span>'), 'A tick box above PATCH IT!, on by default (StopTrellixAgentForInstall on the Settings tab). Ticked: right after the second status check, PATCH IT! sets the two Trellix Agent services (masvc, macmnsvc) to Disabled and stops them on each server, under the install''s change record, before anything is copied - the field test (October 2026) saw the install fail and roll back with the agent running. A server where that fails is not installed (the result says why); untick the box to install with the agent running. The Trellix Agent column then shows STOPPED (Disabled) in orange until the agent is started again.', 'locked'),
         @(((Get-HelpButton 'Start Trellix Agent (ticked)' 'wheat') + ' ' + (Get-HelpButton 'Stop Trellix Agent (ticked)' 'wheat')), 'The two agent services on the ticked servers by hand: Start = Automatic and running (after the patching and the reboot - the agent reports to ePO again), Stop = Disabled and stopped. Fresh status first; servers without the agent or already in that state are skipped; one Yes/No naming the servers (No is the default); the change record of ''Trellix Agent services'' (a change record or a maintenance activity by default, Settings tab); then a fresh status. Start is refused while an OS patch run is still open on the server. Each server keeps its own record (Application event 940, C:\PatchStaging\change-log.txt).', 'locked'),
-        @((Get-HelpButton 'Reboot ticked servers' 'khaki'),('Asks, records the change, then restarts the ticked servers. Use it for pink rows and after an install that asks for it - one reboot also finishes a software update from the Software tab.' + $(if (Test-TrellixInUse) { ' A server whose Trellix Agent services are disabled is named in the log: start them when it is back.' } else { '' })), 'locked'),
-        @((Get-HelpButton 'Change log  (every install, removal and reboot, with its change record)'), 'changes\change-log.csv: one row per server per action (approved, aborted, each result) with the change reference. Each server keeps the same record in its Application log and C:\PatchStaging\change-log.txt.', 'works'),
-        @((Get-HelpButton 'Test WinRM port (no auth) on ticked'), 'A plain TCP connect to 5985 - separates network and firewall problems from login problems.', 'works'),
+        @((Get-HelpButton 'Reboot (ticked)' 'khaki'),('Asks, records the change, then restarts the ticked servers. Use it for pink rows and after an install that asks for it - one reboot also finishes a software update from the Software tab.' + $(if (Test-TrellixInUse) { ' A server whose Trellix Agent services are disabled is named in the log: start them when it is back.' } else { '' })), 'locked'),
+        @((Get-HelpButton 'Change log'), 'changes\change-log.csv: one row per server per action (approved, aborted, each result) with the change reference. Each server keeps the same record in its Application log and C:\PatchStaging\change-log.txt.', 'works'),
+        @((Get-HelpButton 'Test WinRM port (ticked)' 'lightskyblue'), ('A WinRM call to port {0} without credentials - separates network, firewall and certificate problems from login problems.' -f (Get-WinRMPortText)), 'works'),
         @((Get-HelpButton 'Analyse a failure (ticked)' 'lightskyblue'), ('After a failed or rolled-back install: reads the last {0} hours of the server''s own evidence (the tool''s result files and DISM logs, CBS.log, the Setup event log, the Windows Update history, the boot events, the Solidcore log and security-product events) and opens a page that says what the evidence points at, with a timeline. Read-only; the page is also saved in reports\.' -f $script:Config.AnalysisHoursBack), 'works'),
         @((Get-HelpButton 'Where do I get patches?'), 'The download how-to: update-history page, KB number, Microsoft Update Catalog, sub-folder.', 'works'),
-        @(((Get-HelpButton 'Open patches') + ' ' + (Get-HelpButton 'Today''s log')), 'Opens the patches folder in Explorer / today''s log in Notepad.', 'works'),
+        @(((Get-HelpButton 'Open patches folder') + ' ' + (Get-HelpButton 'Today''s log')), 'Opens the patches folder in Explorer / today''s log in Notepad.', 'works'),
         @(((Get-HelpButton 'Report (HTML + CSV)') + ' ' + (Get-HelpButton 'Open reports folder')), 'Writes reports\Patching-<date>.html and .csv for the rows shown / opens the folder.', 'works'),
         @((Get-HelpButton 'Help'), 'This page: every row colour, column, cell and button, each with an example.', 'works'))) }
 
@@ -356,7 +367,7 @@ function Get-PatchingHelpHtml {
         'Every read-only button in every console keeps working: status checks, Health checks, Security audits and reports. Details pages (double-click) open again when the run finishes.',
         'PATCH IT!, Reboot, Reload and the credential buttons stay locked until the run finishes.',
         'A pop-up that a read-only action would open is not shown while the run is watched (a line in the log says so instead), because a pop-up would pause the watch: press the button again afterwards.',
-        'While the run is watched, the servers being installed are skipped by the other checks, and their rows keep the run''s state. Reboot ticked servers never reboots a server whose row says INSTALLING.') }
+        'While the run is watched, the servers being installed are skipped by the other checks, and their rows keep the run''s state. Reboot (ticked) never reboots a server whose row says INSTALLING.') }
 
     return (New-DetailsHtml -Title 'O/S Patching console: what the rows, cells and buttons mean' -Subtitle 'every example is drawn the way the window draws it' -Console 'Patching' -Facts @(@('Patch files', $script:Patches.Count), @('Decision function', 'Get-PatchVerdict (lib\04-Patches.ps1)'), @('More', 'Code Tour part B (Patching)')) -Sections $sections)
 }
@@ -688,8 +699,8 @@ function Export-PatchingReport {
         if ($s -and -not $s.Reachable) { $state = 'unreachable: ' + $s.Error }
         elseif ($s) {
             $cells = @($script:Patches | ForEach-Object { Get-PatchCellText -Status $s -Patch $_ -Server $name })
-            $blocked = @($cells | Where-Object { $_ -like 'Blocked*' -and $_ -ne 'Blocked: wrong OS' } | Select-Object -Unique)
-            $applicable = @($cells | Where-Object { $_ -ne 'By hand' -and $_ -ne 'Blocked: wrong OS' -and $_ -ne 'Not applicable' })
+            $blocked = @($cells | Where-Object { $_ -like 'Blocked*' -and $_ -notin 'Blocked: wrong OS', 'Blocked: dynamic update' } | Select-Object -Unique)
+            $applicable = @($cells | Where-Object { $_ -notin 'By hand', 'Blocked: wrong OS', 'Not applicable', 'Blocked: dynamic update' })
             if ($s.PendingReboot) { $light = 'Amber'; $state = 'pending reboot' }
             elseif (@($cells | Where-Object { $_ -like 'READY*' }).Count -gt 0) { $light = 'Amber'; $state = 'updates ready to install' }
             elseif ($blocked.Count -gt 0) { $light = 'Red'; $state = 'blocked: ' + (($blocked | ForEach-Object { $_ -replace '^Blocked: ', '' }) -join ', ') }
@@ -797,9 +808,9 @@ function New-PatchingConsole {
     $right.Controls.Add($lblFolder)
     $script:Gui['PatchFolderLabel'] = $lblFolder
 
-    $right.Controls.Add((New-GuiButton -Text 'Open patches' -X 10 -Y 236 -W 110 -ReadOnly -Tip 'Opens the \patches folder in Explorer' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Open patches folder' -X 10 -Y 236 -W 130 -ReadOnly -Tip 'Opens the \patches folder in Explorer' -OnClick {
         Invoke-GuiAction -Name 'Open patches folder' -ReadOnly -Action { Invoke-Item -LiteralPath $script:Config.PatchFolder } }))
-    $right.Controls.Add((New-GuiButton -Text 'Today''s log' -X 125 -Y 236 -W 110 -ReadOnly -Tip 'Opens logs\Patcher-YYYYMMDD.log in Notepad' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Today''s log' -X 145 -Y 236 -W 90 -ReadOnly -Tip 'Opens logs\Patcher-YYYYMMDD.log in Notepad' -OnClick {
         Invoke-GuiAction -Name 'Open log' -ReadOnly -Action {
             if (-not (Test-Path -LiteralPath (Get-PatchLogPath))) { Write-PatchLog 'Log file created' 'INFO' }
             Start-Process notepad.exe -ArgumentList ('"{0}"' -f (Get-PatchLogPath)) } }))
@@ -832,7 +843,7 @@ function New-PatchingConsole {
     $agentBox.Font = $script:Gui['Form'].Font; $agentBox.Location = New-Object System.Drawing.Point(10, 314)
     $script:Gui['Tips'].SetToolTip($agentBox, 'Ticked (the default): PATCH IT! sets the Trellix Agent services masvc and macmnsvc to Disabled and stops them on each server before the install, under the install''s change record - the field test saw installs fail and roll back with the agent running. A server where that fails is not installed. The Trellix Agent column then shows STOPPED (Disabled) in orange: after the reboot, press "Start Trellix Agent (ticked)". Unticked: the services are left as they are.')
     $right.Controls.Add($agentBox); $script:Gui['TrellixStopBoxPatching'] = $agentBox
-    $btnPatch = New-GuiButton -Text 'PATCH IT!  (ticked KBs -> ticked servers)' -X 10 -Y 342 -W 395 -H 50 -Colour 'Tomato' -Tip 'Runs the pre-flight, shows the plan, asks for the change record, then the pre-action confirmations (Settings tab)' -OnClick {
+    $btnPatch = New-GuiButton -Text 'PATCH IT!  (ticked KBs, ticked servers)' -X 10 -Y 342 -W 395 -H 50 -Colour 'Tomato' -Tip 'Runs the pre-flight, shows the plan, asks for the change record, then the pre-action confirmations (Settings tab)' -OnClick {
         Invoke-GuiAction -Name 'Install' -Action {
             $servers = Get-CheckedServers; $patches = Get-CheckedPatches
             if ($servers.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server first.' -Icon 'Warning'; return }
@@ -845,7 +856,7 @@ function New-PatchingConsole {
     $btnPatch.Font = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
     $right.Controls.Add($btnPatch)
 
-    $right.Controls.Add((New-GuiButton -Text 'STAGE ONLY (copy, no install)' -X 10 -Y 400 -W 195 -H 34 -Colour 'LightSteelBlue' -Tip 'Copies the ticked patch files to C:\PatchStaging on the ticked servers ahead of the window and verifies them (SHA256). Nothing is installed; the cells then say READY (staged) and PATCH IT! skips the copy.' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'STAGE ONLY  (ticked)' -X 10 -Y 400 -W 195 -H 34 -Colour 'LightSteelBlue' -Tip 'Copies the ticked patch files to C:\PatchStaging on the ticked servers ahead of the window and verifies them (SHA256). Nothing is installed; the cells then say READY (staged) and PATCH IT! skips the copy.' -OnClick {
         Invoke-GuiAction -Name 'Stage patches' -Action {
             $servers = Get-CheckedServers; $patches = Get-CheckedPatches
             if ($servers.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server first.' -Icon 'Warning'; return }
@@ -853,7 +864,7 @@ function New-PatchingConsole {
             $null = Copy-PatchToServers -ComputerName $servers -Patches $patches
         }
     }))
-    $right.Controls.Add((New-GuiButton -Text 'Reboot ticked servers' -X 210 -Y 400 -W 195 -H 34 -Colour 'Khaki' -Tip 'Fresh status first; only servers PENDING a reboot by default; refused while DISM is running.' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Reboot (ticked)' -X 210 -Y 400 -W 195 -H 34 -Colour 'Khaki' -Tip 'Fresh status first; only servers PENDING a reboot by default; refused while DISM is running.' -OnClick {
         Invoke-GuiAction -Name 'Reboot' -Action {
             $servers = Get-CheckedServers
             if ($servers.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server first.' -Icon 'Warning'; return }
@@ -874,7 +885,7 @@ function New-PatchingConsole {
             $null = Set-TrellixAgentOnServers -ComputerName $servers -Mode stop
         }
     }))
-    $right.Controls.Add((New-GuiButton -Text 'Test WinRM port (no auth)' -X 10 -Y 476 -W 195 -H 30 -ReadOnly -Tip 'Test-WSMan on the ticked servers: is 5985 open and answering? Needs no credentials. Works during an install.' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Test WinRM port (ticked)' -X 10 -Y 476 -W 195 -H 30 -Colour 'LightSkyBlue' -ReadOnly -Tip ('Test-WSMan on the ticked servers: is {0} open and answering? Needs no credentials. Works during an install.' -f (Get-WinRMPortText)) -OnClick {
         Invoke-GuiAction -Name 'WinRM test' -ReadOnly -Action {
             $servers = Get-CheckedServers
             if ($servers.Count -eq 0) { Show-GuiNotice 'Tick at least one server first.'; return }
@@ -893,9 +904,9 @@ function New-PatchingConsole {
     }))
     $right.Controls.Add((New-GuiButton -Text 'Open reports folder' -X 210 -Y 512 -W 195 -H 30 -ReadOnly -OnClick { Invoke-GuiAction -Name 'Open reports folder' -ReadOnly -Action { Open-ReportFolder } }))
 
-    $right.Controls.Add((New-GuiButton -Text 'Change log  (every install, removal and reboot, with its change record)' -X 10 -Y 548 -W 395 -H 30 -ReadOnly -Tip 'changes\change-log.csv: one row per server per action, newest first' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Change log' -X 10 -Y 548 -W 195 -H 30 -ReadOnly -Tip 'Every install, removal and reboot with its change record (changes\change-log.csv), newest first' -OnClick {
         Invoke-GuiAction -Name 'Change log' -ReadOnly -Action { Show-ChangeLogWindow } }))
-    $right.Controls.Add((New-GuiButton -Text 'Help' -X 10 -Y 584 -W 395 -H 30 -ReadOnly -Tip 'A page with an example of every row colour, column, KB cell and button' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Help' -X 210 -Y 548 -W 195 -H 30 -ReadOnly -Tip 'A page with an example of every row colour, column, KB cell and button' -OnClick {
         Invoke-GuiAction -Name 'Patching help' -ReadOnly -Action { Show-ConsoleHelp -Console 'Patching' -Html (Get-PatchingHelpHtml) } }))
 
     # no colour key on the panel: the Help page has every colour with an example, the tool tips the rest
@@ -917,13 +928,13 @@ function New-PatchingConsole {
     $toolbar.Controls.Add((New-GuiButton -Text 'Check status (ticked)' -X 390 -Y 8 -W 150 -Colour 'LightSkyBlue' -ReadOnly -Tip 'WinRM status check of the ticked servers. Works during an install.' -OnClick {
         Invoke-GuiAction -Name 'Status check' -ReadOnly -Action {
             $servers = Get-CheckedServers
-            if ($servers.Count -eq 0) { Show-GuiNotice 'Tick at least one server first (or use "Check ALL shown").'; return }
+            if ($servers.Count -eq 0) { Show-GuiNotice 'Tick at least one server first (or use "Check status (all shown)").'; return }
             Get-ServerStatus -ComputerName $servers | Out-Null
             if ($script:Gui['PatchInventoryBox'].Checked) { Get-ServerInventory -ComputerName $servers | Out-Null }
             Show-TrellixAgentWarning -Servers $servers   # the agent services off on a server: the warning the scan owes
         }
     }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Check ALL shown' -X 545 -Y 8 -W 120 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Works during an install.' -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'Check status (all shown)' -X 545 -Y 8 -W 150 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Works during an install.' -OnClick {
         Invoke-GuiAction -Name 'Status check' -ReadOnly -Action {
             $all = @(Get-GridAllKeys -Grid $script:Gui['ServerList'])
             if ($all.Count -eq 0) { Show-GuiNotice 'No servers in the list. Add names to a PatchGroup-*.txt file and reload.'; return }
@@ -935,13 +946,13 @@ function New-PatchingConsole {
     # Inventory rides along with the status checks while this box is ticked (the default): one press checks everything.
     $invBox = New-Object System.Windows.Forms.CheckBox
     $invBox.Text = 'Inventory (roles + software)'; $invBox.Checked = $true; $invBox.AutoSize = $true
-    $invBox.Font = New-Object System.Drawing.Font('Segoe UI', 10); $invBox.Location = New-Object System.Drawing.Point(672, 15)
-    $script:Gui['Tips'].SetToolTip($invBox, 'Ticked: "Check status (ticked)" and "Check ALL shown" also read products, roles, .NET, SQL, Exchange, services and tasks - the Roles and Software behind columns and the software grid. Untick for a quicker status-only check.')
+    $invBox.Font = New-Object System.Drawing.Font('Segoe UI', 10); $invBox.Location = New-Object System.Drawing.Point(702, 15)
+    $script:Gui['Tips'].SetToolTip($invBox, 'Ticked: "Check status (ticked)" and "Check status (all shown)" also read products, roles, .NET, SQL, Exchange, services and tasks - the Roles and Software behind columns and the software grid. Untick for a quicker status-only check.')
     $toolbar.Controls.Add($invBox); $script:Gui['PatchInventoryBox'] = $invBox
-    $toolbar.Controls.Add((New-GuiButton -Text 'Tick all' -X 900 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['ServerList'] -Checked $true }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Untick' -X 975 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['ServerList'] -Checked $false }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Set credentials' -X 1050 -Y 8 -W 110 -Tip 'Foreground Get-Credential prompt. Only needed if your login is refused.' -OnClick { Invoke-GuiAction -Name 'Set credentials' -Action { Get-PatcherCredential -Reason 'alternate account for WinRM' | Out-Null } }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Clear creds' -X 1165 -Y 8 -W 85 -OnClick { Invoke-GuiAction -Name 'Clear credentials' -Action { Clear-PatcherCredential } }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Tick all' -X 915 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['ServerList'] -Checked $true }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Untick all' -X 990 -Y 8 -W 80 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['ServerList'] -Checked $false }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Set credentials' -X 1075 -Y 8 -W 110 -Tip 'Foreground Get-Credential prompt. Only needed if your login is refused.' -OnClick { Invoke-GuiAction -Name 'Set credentials' -Action { Get-PatcherCredential -Reason 'alternate account for WinRM' | Out-Null } }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Clear credentials' -X 1190 -Y 8 -W 115 -OnClick { Invoke-GuiAction -Name 'Clear credentials' -Action { Clear-PatcherCredential } }))
     # the row count sits above the grid (see the Panel1 block): on the toolbar it was clipped at the default window width
 
     # ---- banner ----

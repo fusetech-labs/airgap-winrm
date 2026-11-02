@@ -1,5 +1,7 @@
 ﻿# =====================================================================
 #  09-Reports.ps1  -  HTML + CSV REPORTS FOR EVERY CONSOLE
+#  Airgap WinRM Toolkit  -  Copyright Fusetech
+#  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
 #  Export-ConsoleReport writes two things from the same rows:
 #    reports\<Console>-<yyyyMMdd-HHmmss>.html  summary at the top, data below,
@@ -172,7 +174,7 @@ function New-DetailsHtml {
     $colour = $script:Config.ConsoleColours[$Console]; if (-not $colour) { $colour = 'MidnightBlue' }
     $text = $script:Config.ConsoleText[$Console]; if (-not $text) { $text = 'White' }
     $html = New-Object System.Text.StringBuilder
-    [void]$html.AppendLine('<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><title>' + (ConvertTo-HtmlSafe $Title) + '</title>')
+    [void]$html.AppendLine('<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><title>' + (ConvertTo-HtmlSafe $Title) + '</title>' + (Get-ToolkitFaviconTag))
     [void]$html.AppendLine((Get-ReportCss -Colour $colour -Text $text) + '</head><body>')
     [void]$html.AppendLine('<div class="banner"><h1>' + (ConvertTo-HtmlSafe $Title) + '</h1><p>' + (ConvertTo-HtmlSafe $Subtitle) + '</p></div>')
     # The facts bar shows the page's own time (Checked / Collected / Audited); the footer carries the generated stamp.
@@ -357,7 +359,7 @@ function Export-ConsoleReport {
     $operator = Get-OperatorIdentity
 
     $html = New-Object System.Text.StringBuilder
-    [void]$html.AppendLine('<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + (ConvertTo-HtmlSafe $Title) + '</title>')
+    [void]$html.AppendLine('<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + (ConvertTo-HtmlSafe $Title) + '</title>' + (Get-ToolkitFaviconTag))
     [void]$html.AppendLine((Get-ReportCss -Colour $colour -Text $text) + '</head><body>')
     [void]$html.AppendLine('<div class="banner"><h1>' + (ConvertTo-HtmlSafe $Title) + '</h1><p>' + (ConvertTo-HtmlSafe "$($script:Config.ToolName) $($script:Config.ToolVersion) - $(Get-ConsoleName $Console) console") + '</p></div>')
     [void]$html.AppendLine('<div class="meta"><span>Generated: ' + (ConvertTo-HtmlSafe $when) + '</span><span>By: ' + (ConvertTo-HtmlSafe $operator) + '</span><span>Tool folder: ' + (ConvertTo-HtmlSafe $script:RootFolder) + '</span></div>')
