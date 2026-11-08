@@ -625,9 +625,12 @@ function Invoke-ServerCommand {
     $record = ($null -ne $Change)
     $changeText = ''; if ($record) { $changeText = Format-ChangeText $Change }
     $what = 'read-only'; if ($record) { $what = 'MAY CHANGE - recorded on the servers' }
-    Write-PatchLog ('Command on {0} server(s) ({1}): {2}' -f @($Servers).Count, $what, $Text) 'CMD'
-    # the last answer of these servers goes, so a server skipped this time shows no old answer
+    # a server marked "winrm: no" gets no command (its row says "not run"); the last answer of the others goes, so a server
+    # skipped this time shows no old answer
+    $run = @(Remove-RemoteDisabledServers -Names @($Servers) -Action 'Command')
+    Write-PatchLog ('Command on {0} server(s) ({1}): {2}' -f $run.Count, $what, $Text) 'CMD'
     if ($script:Results.ContainsKey('Command')) { foreach ($s in @($Servers)) { $script:Results['Command'].Remove($s) } }
+    if ($run.Count -eq 0) { return @(foreach ($s in @($Servers)) { [pscustomobject]@{ Server = $s; Result = $null } }) }
     $summary = {
         param($r)
         $s = '{0} line(s) in {1} s' -f $r.Lines, $r.Seconds
@@ -638,7 +641,7 @@ function Invoke-ServerCommand {
     $argList = @($Text, $record, (Get-OperatorIdentity), $changeText, $script:Config.RemoteStaging, [int]$script:Config.CommandMaxOutputKB, 250)
     # a command that may change a server is never cut short by "Stop waiting" or by being slower than the others (-NoStop): only
     # the time limit ends it - and a server it ended on is marked, because the command may have run there (partly or wholly)
-    $null = Invoke-Collector -Name 'Command' -ScriptBlock $script:RemoteCommandScript -ComputerName $Servers -ArgumentList $argList -TimeoutSec ([int]$script:Config.CommandTimeoutSec) -Summary $summary -NoStop:([bool]$record)
+    $null = Invoke-Collector -Name 'Command' -ScriptBlock $script:RemoteCommandScript -ComputerName $run -ArgumentList $argList -TimeoutSec ([int]$script:Config.CommandTimeoutSec) -Summary $summary -NoStop:([bool]$record)
     $rows = @(foreach ($s in @($Servers)) { [pscustomobject]@{ Server = $s; Result = (Get-CollectorResult -Name 'Command' -Server $s) } })
     if ($record) { foreach ($row in $rows) { $r = $row.Result; if ($r -and -not $r.Reachable -and $r.PSObject.Properties['TimedOut'] -and $r.TimedOut) { $r | Add-Member -NotePropertyName MayHaveRun -NotePropertyValue $true -Force } } }
     return $rows

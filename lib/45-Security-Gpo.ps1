@@ -418,7 +418,7 @@ function Get-GpoGapRowsFresh {
         $now = Get-GuidedNow -Entry $e -Row $r -Values $values -Def $defs[[string]$e.Check] -Source $src -CleanPolicy $clean
         $note = ''
         # a value the audit could not read is not a known gap: no GPO is recommended for it until it is read
-        $unread = ($r.Verdict -eq 'Error' -or ($r.Verdict -eq 'Warn' -and (Test-UnreadEvidence -Evidence $r.Evidence)))   # the one test the compliance figures use too
+        $unread = ($r.Verdict -in 'Error', 'NotCollected' -or ($r.Verdict -eq 'Warn' -and (Test-UnreadEvidence -Evidence $r.Evidence)))   # the one test the compliance figures use too
         if ($unread) {
             $status = 'Not read'; $note = $why
             $impact = [pscustomobject]@{ Light = 'Grey'; Impact = 'Not read'; Text = 'the audit could not read this value here (an administrator is needed for auditpol, secedit and some logs)'; Found = 'the audit could not read it here' }
@@ -460,43 +460,53 @@ function Get-GpoGapSummaryRows {
     # in the order of the recommended GPOs, so they can be worked through one GPO at a time.
     param([string[]]$Servers, [switch]$All, [object[]]$GapRows = $null)
     $perServer = $GapRows; if ($null -eq $perServer) { $perServer = @(foreach ($s in $Servers) { Get-GpoGapRows -Server $s }) }
+    # the rows indexed by check once: 90 settings x a pipeline over every server's rows was a second of every repaint and
+    # of every keystroke in Find
+    $byId = @{}
+    foreach ($r in @($perServer)) { $id = [string]$r.Id; if (-not $byId.ContainsKey($id)) { $byId[$id] = New-Object System.Collections.Generic.List[object] }; $byId[$id].Add($r) }
     $guide = Get-GpoGuidance
     $order = @{}; $i = 0; foreach ($gp in @($guide.Gpos)) { $order[[string]$gp.Name] = $i; $i++ }
     $out = @()
     $n = 0
     foreach ($e in @($guide.Settings)) {
         $n++
-        $mine = @($perServer | Where-Object { $_.Id -eq $e.Check })
+        $mine = @(); if ($byId.ContainsKey([string]$e.Check)) { $mine = $byId[[string]$e.Check].ToArray() }
         if ($mine.Count -eq 0) { continue }
-        $gaps = @($mine | Where-Object { $_.Gap })
-        $unreadHere = @($mine | Where-Object { $_.Status -eq 'Not read' })   # shown and counted, but no gap: no GPO on a guess (R6-E-M1)
+        # one pass over the rows answers every count (a pipeline per question, 15 of them for 90 settings, was most of the page)
+        $gaps = @(); $unreadHere = @(); $statusCount = @{}; $anyEnforced = $false
+        foreach ($m in $mine) {
+            if ($m.Gap) { $gaps += $m }
+            $st = [string]$m.Status
+            if ($st -eq 'Not read') { $unreadHere += $m }   # shown and counted, but no gap: no GPO on a guess (R6-E-M1)
+            if ($st -eq 'Enforced') { $anyEnforced = $true }
+            if ($statusCount.ContainsKey($st)) { $statusCount[$st]++ } else { $statusCount[$st] = 1 }
+        }
         if ($gaps.Count -eq 0 -and $unreadHere.Count -eq 0 -and -not $All) { continue }
-        $count = { param($st) @($mine | Where-Object { $_.Status -eq $st }).Count }
         $parts = @()
-        foreach ($pair in @(@('Missing from GPO', 'missing on {0}'), @('Weaker in GPO', 'weaker in a GPO on {0}'), @('Not compliant', 'not compliant on {0}'), @('Not enforced', 'not enforced on {0}'), @('Not read', 'not read on {0}'))) { $c = & $count $pair[0]; if ($c -gt 0) { $parts += ($pair[1] -f $c) } }
+        foreach ($pair in @(@('Missing from GPO', 'missing on {0}'), @('Weaker in GPO', 'weaker in a GPO on {0}'), @('Not compliant', 'not compliant on {0}'), @('Not enforced', 'not enforced on {0}'), @('Not read', 'not read on {0}'))) { $c = 0; if ($statusCount.ContainsKey($pair[0])) { $c = [int]$statusCount[$pair[0]] }; if ($c -gt 0) { $parts += ($pair[1] -f $c) } }
         # no gap anywhere: "Enforced" only when a GPO sets it somewhere; a setting Group Policy cannot see (a feature, firmware)
         # that is simply right everywhere is "Compliant"
-        $anyEnforced = @($mine | Where-Object { $_.Status -eq 'Enforced' }).Count -gt 0
         if ($parts.Count -eq 0) { $parts += $(if ($anyEnforced) { 'enforced on all {0}' -f $mine.Count } else { 'compliant on all {0}' -f $mine.Count }) }
-        $serversOf = { param([string[]]$Lights) @($gaps | Where-Object { $_.Light -in $Lights } | ForEach-Object { $_.Server }) }
-        $light = 'Green'; if ($gaps.Count -gt 0) { $light = Get-WorstImpactLight -Lights @($gaps | ForEach-Object { $_.Light }) }
-        $decisive = @($gaps | Where-Object { $_.Light -eq $light })
+        $serversOf = { param([string[]]$Lights) @(foreach ($g in $gaps) { if ($Lights -contains $g.Light) { $g.Server } }) }
+        $light = 'Green'; if ($gaps.Count -gt 0) { $light = Get-WorstImpactLight -Lights @(foreach ($g in $gaps) { $g.Light }) }
+        $decisive = @(foreach ($g in $gaps) { if ($g.Light -eq $light) { $g } })
         $word = 'Enforced'; $details = 'enforced by Group Policy on every server shown'
         if (-not $anyEnforced) { $word = 'Compliant'; $details = 'compliant on every server shown (not a Group Policy setting, or not visible in its results)' }
         # no known gap, but not read on every server: grey, never green on a guess - the unread servers decide the row
         if ($light -eq 'Green' -and $unreadHere.Count -gt 0) { $light = 'Grey'; $decisive = $unreadHere }
         switch ($light) {
-            'Red' { $word = 'Impact found'; $details = Join-Limited -Items @($decisive | ForEach-Object { '{0}: {1}' -f $_.Server, $_.Found }) }
+            'Red' { $word = 'Impact found'; $details = Join-Limited -Items @(foreach ($d in $decisive) { '{0}: {1}' -f $d.Server, $d.Found }) }
             'Amber' { $word = 'Check first'; $details = Join-Limited -Items @($decisive | Group-Object Found | ForEach-Object { '{0} ({1})' -f $_.Name, (@($_.Group | ForEach-Object { $_.Server }) -join ', ') }) -Max 2 }
             'Grey' {
-                if (@($decisive | Where-Object { $_.Impact -eq 'Not checked' }).Count -gt 0) { $word = 'Not checked'; $details = ('impact not checked on {0} server(s) - press Check impact' -f @($decisive | Where-Object { $_.Impact -eq 'Not checked' }).Count) }
+                $notChecked = @(foreach ($d in $decisive) { if ($d.Impact -eq 'Not checked') { $d } }).Count
+                if ($notChecked -gt 0) { $word = 'Not checked'; $details = ('impact not checked on {0} server(s) - press Check impact' -f $notChecked) }
                 else { $word = 'Not read'; $details = ('the audit could not read the value on {0} server(s) - an administrator is needed' -f $decisive.Count) }
             }
             'Blue' {
                 $word = 'No impact found'
-                $expected = @($decisive | Where-Object { $_.Impact -eq 'No impact expected' })
-                $found = @($decisive | Where-Object { $_.Impact -eq 'No impact found' -and -not $_.Compliant })
-                $already = @($decisive | Where-Object { $_.Compliant })
+                $expected = @(foreach ($d in $decisive) { if ($d.Impact -eq 'No impact expected') { $d } })
+                $found = @(foreach ($d in $decisive) { if ($d.Impact -eq 'No impact found' -and -not $d.Compliant) { $d } })
+                $already = @(foreach ($d in $decisive) { if ($d.Compliant) { $d } })
                 if ($expected.Count -eq $decisive.Count) { $word = 'No impact expected'; $details = [string]$decisive[0].Found }
                 else {
                     $bits = @()

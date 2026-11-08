@@ -102,6 +102,7 @@ function Update-ServerList {
     $lv.Columns.Clear()
     [void]$lv.Columns.Add('Server', 170)
     [void]$lv.Columns.Add('Group', 110)
+    [void]$lv.Columns.Add('Last checked', 105)   # the date and time of the status this row paints; the cell coloured by its age (14-State.ps1)
     [void]$lv.Columns.Add('WinRM', 75)
     [void]$lv.Columns.Add('OS', 70)
     [void]$lv.Columns.Add('Build', 95)
@@ -118,32 +119,39 @@ function Update-ServerList {
     foreach ($p in $script:Patches) { [void]$lv.Columns.Add($p.KB, 125) }
     $rolesColumn = $lv.Columns.Add('Roles', 160); $rolesColumn.Tag = 'fill:160'   # takes the spare width on a wide window
     [void]$lv.Columns.Add('Software behind', 110)
-    [void]$lv.Columns.Add('Checked at', 80)
 
     foreach ($gr in $groupRows) {
         $name = $gr.Server
         $s = $script:ServerStatus[$name]
         $flag = Get-InstallFlag -Server $name   # an OS patch run handed to the server and not recorded yet: cyan row, INSTALLING cells (purple = ended without a result)
         $inv = Get-CollectorResult -Name 'Inventory' -Server $name
+        $offline = Test-RemoteDisabled -Name $name   # "winrm: no" in the group file: never called; what shows came from the server's own self-check
         $item = New-Object System.Windows.Forms.ListViewItem($name)
         [void]$item.SubItems.Add($gr.Group)
         if (-not $s) {
-            foreach ($i in 1..$blankStatus) { [void]$item.SubItems.Add('') }
+            [void]$item.SubItems.Add('')
+            [void]$item.SubItems.Add($(if ($offline) { 'self-check' } else { '' }))
+            foreach ($i in 2..$blankStatus) { [void]$item.SubItems.Add('') }
             foreach ($p in $script:Patches) { [void]$item.SubItems.Add((Get-PatchCellText -Status $null -Patch $p -Server $name)) }
-            [void]$item.SubItems.Add(''); [void]$item.SubItems.Add(''); [void]$item.SubItems.Add('')
+            [void]$item.SubItems.Add(''); [void]$item.SubItems.Add('')
             $item.BackColor = 'White'
             if ($flag) { $item.BackColor = $(if ([string]$flag.State -eq 'unknown') { 'Thistle' } else { 'LightCyan' }) }
+            if ($offline) { $item.ToolTipText = "marked 'winrm: no' in the group file: never called over WinRM. Run the copy of the toolkit on the server (Copy for a server) and press Import results." }
         } elseif (-not $s.Reachable) {
+            [void]$item.SubItems.Add((Format-LastChecked $s.Checked))
             [void]$item.SubItems.Add('FAILED')
             foreach ($i in 1..($blankStatus - 1)) { [void]$item.SubItems.Add('') }
             foreach ($p in $script:Patches) { [void]$item.SubItems.Add((Get-PatchCellText -Status $s -Patch $p -Server $name)) }
             [void]$item.SubItems.Add(''); [void]$item.SubItems.Add('')
-            [void]$item.SubItems.Add($s.Checked.ToString('HH:mm:ss'))
             $item.BackColor = 'LightGray'
             if ($flag) { $item.BackColor = $(if ([string]$flag.State -eq 'unknown') { 'Thistle' } else { 'LightCyan' }) }
+            Set-GridItemCellColour -Item $item -Index 2 -Colour (Get-ResultAgeColour $s.Checked)
             $item.ToolTipText = $s.Error
         } else {
-            [void]$item.SubItems.Add('OK')
+            # the latest check failed: the row paints the last good status, the WinRM cell says FAILED in grey, the tip says when
+            $failedNow = Get-ResultFailure $s
+            [void]$item.SubItems.Add((Format-LastChecked $s.Checked))
+            [void]$item.SubItems.Add($(if ($failedNow) { 'FAILED' } elseif ($offline) { 'self-check' } else { 'OK' }))
             [void]$item.SubItems.Add((Get-ShortOsName $s.Caption))
             [void]$item.SubItems.Add($s.Build)
             [void]$item.SubItems.Add((Get-PendingRebootText -Status $s))
@@ -175,20 +183,22 @@ function Update-ServerList {
             }
             [void]$item.SubItems.Add($roles)
             [void]$item.SubItems.Add($behind)
-            [void]$item.SubItems.Add($s.Checked.ToString('HH:mm:ss'))
             if ($flag) { $item.BackColor = $(if ([string]$flag.State -eq 'unknown') { 'Thistle' } else { 'LightCyan' }) }
             elseif ($s.PendingReboot) { $item.BackColor = 'MistyRose' }
             elseif ($anyReady)    { $item.BackColor = 'LemonChiffon' }
             elseif ($allInstalled) { $item.BackColor = 'Honeydew' }
             else { $item.BackColor = 'White' }
+            # per-cell style (Set-GridItemCellColour keeps the row colour in every other cell): the Last checked cell by its age,
+            # the WinRM cell grey when the latest check failed, orange for the agent services off, red text for a full disk
+            Set-GridItemCellColour -Item $item -Index 2 -Colour (Get-ResultAgeColour $s.Checked)
+            if ($failedNow) { Set-GridItemCellColour -Item $item -Index 3 -Colour 'LightGray' }
             $agentWarn = ($trellix -and $agent.State -in 'stopped', 'mixed', 'unknown')
-            if ($s.FreeGB -lt $script:Config.WarnFreeGB -or $agentWarn) {
-                $item.UseItemStyleForSubItems = $false; foreach ($si in $item.SubItems) { $si.BackColor = $item.BackColor }   # per-cell style: keep the row colour in every cell
-                if ($s.FreeGB -lt $script:Config.WarnFreeGB) { $item.SubItems[7].ForeColor = 'Red' }
-                if ($agentWarn) { $item.SubItems[9].BackColor = 'NavajoWhite' }   # orange = a warning: the agent services are off, ePO hears nothing from this server
-            }
+            if ($s.FreeGB -lt $script:Config.WarnFreeGB) { Set-GridItemCellColour -Item $item -Index 8 -Colour $item.BackColor.Name; $item.SubItems[8].ForeColor = 'Red' }
+            if ($agentWarn) { Set-GridItemCellColour -Item $item -Index 10 -Colour 'NavajoWhite' }   # orange = a warning: the agent services are off, ePO hears nothing from this server
+            $item.ToolTipText = Get-LastCheckedTip -Result $s -Server $name
         }
         if ($wasChecked -contains $name) { $item.Checked = $true }
+        if ($offline) { Set-GridItemCellColour -Item $item -Index 0 -Colour 'LightGray' }   # never called over WinRM (winrm: no): the name cell grey, in every console
         [void]$lv.Items.Add($item)
     }
     } finally { $lv.EndUpdate(); $script:GridProgrammatic = $false; $script:Gui['PatchRebuilding'] = $false }
@@ -217,8 +227,10 @@ function Get-ServerDetailsHtml {
     # The double-click page for one server: status, every patch file's verdict, both update lists, inventory.
     param([string]$Name)
     $s = $script:ServerStatus[$Name]
-    $facts = @(, @('Checked', $s.Checked.ToString('yyyy-MM-dd HH:mm:ss')))   # the comma keeps the pair as ONE element (@(@(a, b)) would flatten it)
+    $facts = @(, @('Last checked', ($s.Checked.ToString('yyyy-MM-dd HH:mm:ss') + ' (' + (Get-ResultAgeText $s.Checked) + ' ago)')))   # the comma keeps the pair as ONE element (@(@(a, b)) would flatten it)
     if (-not $s.Reachable) { return (New-DetailsHtml -Title "Server: $Name" -Console 'Patching' -Subtitle ('unreachable: ' + $s.Error) -Facts $facts) }
+    if (Get-ResultFailure $s) { $facts += , @('Latest attempt', ((Format-LastChecked $s.LastAttempt) + ' FAILED: ' + (Get-ResultFailure $s) + ' - this page shows the result of the check above')) }
+    if (Test-RemoteDisabled -Name $Name) { $facts += , @('Source', "the server's own self-check (marked 'winrm: no' in the group file: never called over WinRM)") }
     $facts += @(
         @('OS', [string]$s.Caption), @('Build', [string]$s.Build), @('Last boot', [string]$s.LastBoot), @('Up', "$($s.UptimeDays) d"), @('Free on C', "$($s.FreeGB) GB"),
         @('Pending reboot', (Get-PendingRebootText -Status $s)),
@@ -257,10 +269,134 @@ function Get-ServerDetailsHtml {
             ('Roles and features: ' + (Get-RoleSummary -Inventory $inv -Full))) }
         $sections += @{ Heading = 'Software'; Rows = $software; Columns = @('Light', 'Verdict', 'Product', 'Version', 'Publisher', 'Installed', 'Reason'); Note = ('Verdicts against data\known-apps.psd1 and the rest of the fleet: Current; Behind (a newer version is known or runs elsewhere); Stale (nothing newer and older than the release cadence, or a product the catalogue does not know installed over {0} months ago - updates are likely waiting); Ageing (an unknown product installed over {1} months ago - updates probably waiting, or no longer maintained: a cessation risk); End of life; Unknown (not in the catalogue, installed less than {0} months ago).' -f $script:Config.UnknownStaleMonths, $script:Config.UnknownAgeingMonths) }
     } else {
-        $sections += @{ Heading = 'Inventory'; Lines = @(); Note = 'not collected yet - tick "Inventory (roles + software)" on the toolbar and check status' }
+        $sections += @{ Heading = 'Inventory'; Lines = @(); Note = 'not collected yet - check status (the inventory rides along)' }
     }
     $sections += Get-ChangeLogSection -Server $Name
     return (New-DetailsHtml -Title "Server: $Name" -Subtitle 'status, patch verdicts, both update lists, the inventory and the change log' -Console 'Patching' -Facts $facts -Sections $sections)
+}
+
+function Import-ResultsFilesDialog {
+    # The Import results button: pick one or more results files (a self-check carried over from a server the hub cannot
+    # reach), lay them over every console's table (14-State.ps1), say what was taken per file.
+    if (-not (Test-GuiDialogAllowed -What 'Import results')) { return }
+    $dlg = New-Object System.Windows.Forms.OpenFileDialog
+    $dlg.Title = 'Import results - the results file(s) written by a self-check (state\servers\<computer>.xml on the server)'
+    $dlg.Filter = 'Results files (*.xml)|*.xml|All files (*.*)|*.*'; $dlg.Multiselect = $true; $dlg.CheckFileExists = $true
+    $start = Get-StateFolder; if (Test-Path -LiteralPath $start) { $dlg.InitialDirectory = $start }
+    $answer = $dlg.ShowDialog($script:Gui['Form'])
+    $paths = @($dlg.FileNames); $dlg.Dispose()
+    if ($answer -ne 'OK' -or $paths.Count -eq 0) { Write-PatchLog 'Import results: no file chosen' 'INFO'; return }
+    $rows = @(Import-ResultsFile -Path $paths)
+    Invoke-ConsoleRefresh -All   # every console paints the imported results, not only the one on screen
+    $lines = @(foreach ($r in $rows) { ('{0}  ->  {1}: {2}{3}{4}' -f $r.File, $(if ($r.Server) { $r.Server } else { '?' }), $(if ($r.Loaded) { 'loaded ' + $r.Loaded } else { 'nothing loaded' }), $(if ($r.Skipped) { '; skipped ' + $r.Skipped } else { '' }), $(if ($r.Note) { ' (' + $r.Note + ')' } else { '' })) })
+    $null = Show-PatcherMessage -Title 'Import results' -Text (("{0} file(s) read. Every console now shows what was taken; the Last checked cell says how old it is.`n`n" -f $rows.Count) + ($lines -join "`n")) -Wrap
+}
+
+function New-ServerCopyDialog {
+    # The "Copy for a server" button: the hub folder and the results folder as the server will see them (this toolkit's
+    # folders through this PC's administrative share, \\<this PC>\<drive>$\..., offered as the answers; a share of the
+    # operator's own instead when the server may not reach this PC), the self-check script in or out, then New-ServerCopy
+    # makes one folder per server, state\server-copies\<server>-local-winrm\, afresh (New-ServerCopies) and Explorer opens on
+    # the parent.  The paths are not checked here: they are the server's.
+    if (-not (Test-GuiDialogAllowed -What 'Copy for a server')) { return }
+    # the ticked servers among those marked "winrm: no"; nothing ticked = every marked server (owner's ask, 2026-11-06)
+    $ticked = @(Get-CheckedServers)
+    $servers = @(Get-RemoteDisabledServers)
+    if ($ticked.Count -gt 0) {
+        $servers = @(Get-RemoteDisabledServers -Names $ticked)
+        if ($servers.Count -eq 0) { $null = Show-PatcherMessage -Text ("None of the {0} ticked server(s) is marked 'winrm: no'. Mark them first (Mark winrm: no, ticked), or untick everything for a copy per marked server." -f $ticked.Count) -Icon 'Warning'; return }
+    }
+    $forList = 'a server marked winrm: no (none is marked yet: Mark winrm: no, ticked)'; if ($servers.Count -gt 0) { $forList = ($servers -join ', ') }
+    $d = New-ToolkitDialogForm
+    $d.Text = 'Copy for a server'
+    $d.ClientSize = New-Object System.Drawing.Size(740, 262); $d.FormBorderStyle = 'FixedDialog'; $d.StartPosition = 'CenterParent'; $d.MaximizeBox = $false; $d.MinimizeBox = $false
+    $d.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+    $wide = New-Object System.Drawing.Size(716, 0)   # an AutoSize label wraps at this width and measures its own height (display scaling)
+    $intro = New-Object System.Windows.Forms.Label; $intro.AutoSize = $true; $intro.MaximumSize = $wide
+    $intro.Text = ('One copy of this toolkit per server, for {0}, each in state\server-copies\<server>-local-winrm: no patches, installers, server lists or results. On the server, Start-WinRMToolkit.ps1 starts as the spoke by itself (the window for that computer); Run-SelfCheck.ps1 is the scheduled check.' -f $forList)
+    $l1 = New-Object System.Windows.Forms.Label; $l1.AutoSize = $true; $l1.MaximumSize = $wide; $l1.Text = 'Hub folder, as the server sees it (this toolkit''s patches\ and software\):'
+    $hubBox = New-Object System.Windows.Forms.TextBox; $hubBox.Size = New-Object System.Drawing.Size(716, 24); $hubBox.Text = (Get-ToolkitUncPath -Path $script:RootFolder)
+    $l2 = New-Object System.Windows.Forms.Label; $l2.AutoSize = $true; $l2.MaximumSize = $wide; $l2.Text = 'Results folder, as the server sees it (empty = kept in the copy, carried back by hand):'
+    $resBox = New-Object System.Windows.Forms.TextBox; $resBox.Size = New-Object System.Drawing.Size(716, 24); $resBox.Text = (Get-ToolkitUncPath -Path (Get-StateFolder))
+    $chk = New-Object System.Windows.Forms.CheckBox; $chk.AutoSize = $true; $chk.Checked = $true; $chk.Text = 'Include Run-SelfCheck.ps1'
+    $d.Controls.AddRange([System.Windows.Forms.Control[]]@($intro, $l1, $hubBox, $l2, $resBox, $chk))
+    # top to bottom from the measured heights, then the dialog takes the height it needs plus the button bar
+    $y = 12
+    $intro.Location = New-Object System.Drawing.Point(12, $y); $y = $intro.Bottom + 12
+    $l1.Location = New-Object System.Drawing.Point(12, $y); $y = $l1.Bottom + 4
+    $hubBox.Location = New-Object System.Drawing.Point(12, $y); $y = $hubBox.Bottom + 12
+    $l2.Location = New-Object System.Drawing.Point(12, $y); $y = $l2.Bottom + 4
+    $resBox.Location = New-Object System.Drawing.Point(12, $y); $y = $resBox.Bottom + 12
+    $chk.Location = New-Object System.Drawing.Point(12, $y); $y = $chk.Bottom + 12
+    $d.ClientSize = New-Object System.Drawing.Size(740, ($y + 44))
+    $bar = New-DialogButtonBar -Dialog $d -Buttons @(@{ Text = 'Write the copy'; Result = 'OK'; Width = 120 }, @{ Text = 'Cancel'; Result = 'Cancel' })
+    $d.AcceptButton = $bar.Buttons[0]; $d.CancelButton = $bar.Buttons[1]
+    $answer = $d.ShowDialog($script:Gui['Form'])
+    $hub = $hubBox.Text.Trim(); $res = $resBox.Text.Trim(); $withScript = $chk.Checked
+    $d.Dispose()
+    if ($answer -ne 'OK') { Write-PatchLog 'Copy for a server: cancelled' 'INFO'; return }
+    $set = New-ServerCopies -HubFolder $hub -ResultsFolder $res -IncludeSelfCheck:$withScript -Servers $servers
+    $folders = @(foreach ($c in @($set.Copies)) { ('  {0}  ({1} files, {2:n1} MB)' -f (Split-Path -Path $c.Folder -Leaf), $c.Files, ($c.Bytes / 1MB)) })
+    $lines = @(
+        ('Written under {0}:' -f $set.Folder)
+    ) + $folders + @(
+        '',
+        'Carry each folder, whole, to its server and keep it together on a local disk there.',
+        '',
+        'On the server (INSTRUCTIONS.txt in the folder has the steps):',
+        '  Start-WinRMToolkit.ps1 - the window for that computer; it starts as the spoke by itself and offers',
+        ('    hub folder: {0}' -f $hub),
+        ('    results folder: {0}' -f $(if ($res) { $res } else { "the copy's own state\servers, carried back by hand" })),
+        ('  Run-SelfCheck.ps1 - {0}' -f $(if ($withScript) { 'every check without a window, one results file (a scheduled-task line is in the instructions)' } else { 'not included (tick the box to add it)' })),
+        '',
+        'The copy must read the hub folder and write to the results folder. If the server cannot reach this PC, copy',
+        'patches\ and software\ into the folder and carry the results file back (Import results).'
+    )
+    $text = ($lines -join "`r`n")
+    $null = Show-PatcherMessage -Title 'Copy for a server' -Text $text -Wrap
+    try { Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f $set.Folder) } catch { }
+}
+
+function Set-RemoteDisabledMarkDialog {
+    # The "Mark winrm: no (ticked)" button: "; winrm: no" goes on the line of every ticked server in its group file, and
+    # from then on no console or action calls it over WinRM (Invoke-Collector skips it, every action takes it out) - its
+    # results come from its own self-check.  When every ticked server already carries the mark, the button offers the
+    # reverse.  One question with the names, then Set-RemoteDisabledMark writes the files and reads them again.
+    if (-not (Test-GuiDialogAllowed -What 'Mark winrm: no')) { return }
+    $servers = @(Get-CheckedServers)
+    if ($servers.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server first.' -Icon 'Warning'; return }
+    $marked = @($servers | Where-Object { Test-RemoteDisabled -Name $_ })
+    $clear = ($marked.Count -eq $servers.Count)
+    if ($clear) {
+        $text = "Take the 'winrm: no' mark off {0} server(s) in their group file? The toolkit calls them over WinRM again from the next check.`n`n{1}" -f $servers.Count, ($servers -join "`n")
+    } else {
+        $todo = @($servers | Where-Object { $marked -notcontains $_ })
+        $text = "Write '; winrm: no' on the line of {0} server(s) in their group file?`n`nNo console or action calls them over WinRM from then on: every check skips them, and their results come from the copy of the toolkit run on the server itself (Copy for a server, then Import results).`n`n{1}" -f $todo.Count, ($todo -join "`n")
+        if ($marked.Count -gt 0) { $text += "`n`nAlready marked, left as they are: " + ($marked -join ', ') }
+    }
+    $a = Show-PatcherMessage -Title 'Mark winrm: no' -Buttons 'YesNo' -Icon 'Question' -Default 'Button2' -Text $text
+    if ($a -ne 'Yes') { Write-PatchLog 'Mark winrm: no: nothing written' 'INFO'; return }
+    $r = Set-RemoteDisabledMark -Servers $servers -Clear:$clear
+    Invoke-ConsoleRefresh -All   # every console shows the mark: the WinRM cell, "not checked - marked 'winrm: no'"
+    $lines = @()
+    if (@($r.Changed).Count -gt 0) { $lines += ('{0}: {1}' -f $(if ($clear) { 'Mark taken off' } else { "Marked 'winrm: no'" }), (@($r.Changed) -join ', ')) }
+    if (@($r.Skipped).Count -gt 0) { $lines += ('Left as they were: ' + (@($r.Skipped) -join ', ')) }
+    if (@($r.Errors).Count -gt 0) { $lines += ('Not written: ' + (@($r.Errors) -join '; ')) }
+    if (-not $clear -and @($r.Changed).Count -gt 0) { $lines += ''; $lines += 'Next: Copy for a server writes the copy of the toolkit those servers run themselves; Import results takes their results file in (or let the copy write into this toolkit''s state\servers share and press Reload).' }
+    $null = Show-PatcherMessage -Title 'Mark winrm: no' -Text ($lines -join "`n") -Icon $(if (@($r.Errors).Count -gt 0) { 'Warning' } else { 'Information' }) -Wrap
+}
+
+function Clear-ServerResultsDialog {
+    # The "Clear saved data (ticked)" button: one question, then Remove-ServerResults (14-State.ps1) forgets every collector's
+    # result for the ticked servers and deletes their results files; every console repaints them as not checked.
+    if (-not (Test-GuiDialogAllowed -What 'Clear saved data')) { return }
+    $servers = @(Get-CheckedServers)
+    if ($servers.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server first.' -Icon 'Warning'; return }
+    $a = Show-PatcherMessage -Title 'Clear saved data' -Buttons 'YesNo' -Icon 'Question' -Default 'Button2' -Text ("Forget everything held on this PC for {0} server(s): every console's results and the state\servers file? The servers are not touched; the next check fills the rows again.`n`n{1}" -f $servers.Count, ($servers -join "`n"))
+    if ($a -ne 'Yes') { Write-PatchLog 'Clear saved data: nothing cleared' 'INFO'; return }
+    $r = Remove-ServerResults -Servers $servers
+    Invoke-ConsoleRefresh -All
+    $null = Show-PatcherMessage -Title 'Clear saved data' -Text ("Cleared for {0} server(s); {1} results file(s) deleted. The rows say not checked until the next check." -f @($r.Servers).Count, $r.Files)
 }
 
 function Get-PatchingHelpHtml {
@@ -271,12 +407,12 @@ function Get-PatchingHelpHtml {
     $sections = @()
 
     # ---- 1. the grid, one example row per colour ----
-    $mock = New-MockGrid -TrellixColumns -Headers @('Server', 'Group', 'WinRM', 'OS', 'Build', 'Pending reboot', 'Up (d)', 'Free C: GB', 'Solidcore', 'Trellix Agent', 'Newest hotfixes (same day)', $kb, 'Roles', 'Software behind', 'Checked at') -Rows @(
-        @{ Colour = 'white';        Cells = @('server-a', 'Group-1', '', '', '', '', '', '', '', '', '', 'not checked', '', '', '') },
-        @{ Colour = 'lightgray';    Cells = @('server-b', 'Group-1', 'FAILED', '', '', '', '', '', '', '', '', '?', '', '', '09:31:02') },
-        @{ Colour = 'mistyrose';    CellColours = @{ 9 = 'navajowhite' }; Cells = @('server-c', 'Group-2', 'OK', '2022 Std', '20348.5499', 'YES: CBS:RebootPending', '68.2', '51.7', 'Update now, Update on reboot', 'STOPPED (Disabled)', 'KB5127687 (2026-10-13)', 'Blocked: reboot', 'SQL, .NET 4.8.1', '1', '09:31:05') },
-        @{ Colour = 'lemonchiffon'; Cells = @('server-d', 'Group-2', 'OK', '2022 Std', '20348.5499', 'no', '12.0', '41.3', '', 'Running (Auto)', 'KB5127687 (2026-10-13)', 'READY', 'IIS, .NET 4.8.1', '0', '09:31:05') },
-        @{ Colour = 'honeydew';     Cells = @('server-e', 'Group-3', 'OK', '2022 Std', '20348.5761', 'no (PFRO only, ignored)', '4.9', '58.4', '', 'Running (Auto)', 'KB5126655 (2026-10-14)', 'Installed', 'FS', '2', '09:31:06') })
+    $mock = New-MockGrid -TrellixColumns -Headers @('Server', 'Group', 'Last checked', 'WinRM', 'OS', 'Build', 'Pending reboot', 'Up (d)', 'Free C: GB', 'Solidcore', 'Trellix Agent', 'Newest hotfixes (same day)', $kb, 'Roles', 'Software behind') -Rows @(
+        @{ Colour = 'white';        Cells = @('server-a', 'Group-1', '', '', '', '', '', '', '', '', '', '', 'not checked', '', '') },
+        @{ Colour = 'lightgray';    CellColours = @{ 2 = 'palegreen' }; Cells = @('server-b', 'Group-1', '2026-11-05 09:31', 'FAILED', '', '', '', '', '', '', '', '', '?', '', '') },
+        @{ Colour = 'mistyrose';    CellColours = @{ 2 = 'palegreen'; 10 = 'navajowhite' }; Cells = @('server-c', 'Group-2', '2026-11-05 09:31', 'OK', '2022 Std', '20348.5499', 'YES: CBS:RebootPending', '68.2', '51.7', 'Update now, Update on reboot', 'STOPPED (Disabled)', 'KB5127687 (2026-10-13)', 'Blocked: reboot', 'SQL, .NET 4.8.1', '1') },
+        @{ Colour = 'lemonchiffon'; CellColours = @{ 2 = 'khaki'; 3 = 'lightgray' }; Cells = @('server-d', 'Group-2', '2026-11-03 17:02', 'FAILED', '2022 Std', '20348.5499', 'no', '12.0', '41.3', '', 'Running (Auto)', 'KB5127687 (2026-10-13)', 'READY', 'IIS, .NET 4.8.1', '0') },
+        @{ Colour = 'honeydew';     CellColours = @{ 2 = 'lightcoral' }; Cells = @('server-e', 'Group-3', '2026-10-29 08:10', 'self-check', '2022 Std', '20348.5761', 'no (PFRO only, ignored)', '4.9', '58.4', '', 'Running (Auto)', 'KB5126655 (2026-10-14)', 'Installed', 'FS', '2') })
     $rows = New-HelpTable -TrellixRows -Headers @('Row colour', 'It means', 'Next step') -Rows @(
         @((Get-HelpSwatch 'white' 'White'), 'Not asked yet in this session - or checked, with nothing READY and not every KB installed: the KB cells say why (blocked, by hand, not applicable).', 'Not asked yet: tick it and press "Check status (ticked)", or press "Check status (all shown)". Checked: read the KB cells.'),
         @((Get-HelpSwatch 'lightgray' 'Grey'), 'WinRM gave no answer or refused the login. Hover the row for the reason; it is in the log too.', 'Press "Test WinRM port (ticked) on ticked". No answer = network, firewall or the WinRM service. Answers but "Access is denied" = set credentials with an admin account. Kerberos errors = use the FQDN in the group file.'),
@@ -290,7 +426,8 @@ function Get-PatchingHelpHtml {
 
     # ---- 2. the columns ----
     $sections += @{ Heading = 'The columns'; Html = (New-HelpTable -TrellixRows -Headers @('Example cell', 'What it shows') -Rows @(
-        @((Get-HelpCell 'OK'), ('WinRM: OK = the server answered on TCP {0} as the current login or the stored credentials. FAILED = see the grey row above.' -f (Get-WinRMPortText))),
+        @((Get-HelpCell '2026-11-05 09:31' 'palegreen'), ('Last checked: the date and time of the status this row paints, kept in state\servers\ and shown again at the next start. The cell is green up to {0} day(s) old, amber up to {1}, red beyond (Settings tab). Hover the row for the age and, when the latest check failed, the error.' -f $script:Config.ResultFreshDays, $script:Config.ResultStaleDays)),
+        @((Get-HelpCell 'OK'), ('WinRM: OK = the server answered on TCP {0} as the current login or the stored credentials. FAILED on a grey row = no answer and nothing known (see above). FAILED in a grey cell on a coloured row = the latest check failed, the row paints the last good status (its date in Last checked) and nothing is acted on until a check succeeds. self-check = the server is marked "winrm: no" in its group file: never called over WinRM; its results come from the copy of the toolkit it runs itself (Copy for a server, Import results).' -f (Get-WinRMPortText))),
         @((Get-HelpCell '2022 Std'), 'OS: the Windows edition reported by the server (2016 / 2019 / 2022 / 2025, Std or DC).'),
         @((Get-HelpCell '20348.5761'), 'Build: the real patch level. 20348 = Server 2022. The number after the dot (the UBR) rises with every cumulative update and only moves after the reboot that finishes the install. The Microsoft update-history page prints it next to each KB, e.g. "KB5122882 (OS Build 20348.5622)".'),
         @((Get-HelpCell 'YES: CBS:RebootPending'), 'Pending reboot: the hard signs only - CBS:RebootPending, CBS:PackagesPending, CBS:RebootInProgress, WU:RebootRequired, WU:PostRebootReporting, UpdateExeVolatile, ComputerRename. Any of them colours the row pink.'),
@@ -303,9 +440,8 @@ function Get-PatchingHelpHtml {
         @((Get-HelpCell 'STOPPED (Disabled)' 'navajowhite'), 'Trellix Agent: the two ePO agent services, masvc "Trellix Agent Service" and macmnsvc "Trellix Agent Common Services". "Running (Auto)" is the normal state. "STOPPED (Disabled)" in orange is what the tool sets before an install (the box above PATCH IT!, ticked by default - the field test saw installs fail and roll back with the agent running) and what a scan warns about: ePO hears nothing from the server until "Start Trellix Agent (ticked)" sets them to Automatic and starts them again. "MIXED: ..." names each service and its state. Empty = not on the server.'),
         @((Get-HelpCell 'KB5126655 + KB5126654 (2026-10-14)'), 'Newest hotfixes (same day): every Get-HotFix entry from the most recent install date. The cumulative update and the .NET cumulative update usually land on the same day, so two KBs here is normal.'),
         @((Get-HelpCell 'READY' 'lemonchiffon'), ('One column per file in the patches folder (here {0}): the verdict for that file on that server - every value is in the next table.' -f $kb)),
-        @((Get-HelpCell 'IIS, SQL, .NET 4.8.1'), 'Roles: filled by a status check while "Inventory (roles + software)" is ticked on the toolbar (the default) - the roles and features that matter for patching plus the .NET Framework line.'),
-        @((Get-HelpCell '2'), ('Software behind: how many products on this server are Behind, Stale, Ageing or End of life in the software grid underneath (also needs Inventory). A product the catalogue does not know counts as Stale after {0} months and Ageing after {1}.' -f $script:Config.UnknownStaleMonths, $script:Config.UnknownAgeingMonths)),
-        @((Get-HelpCell '09:31:06'), 'Checked at: when this row was last refreshed from the server.'))) }
+        @((Get-HelpCell 'IIS, SQL, .NET 4.8.1'), 'Roles: filled by every status check (the inventory rides along) - the roles and features that matter for patching plus the .NET Framework line.'),
+        @((Get-HelpCell '2'), ('Software behind: how many products on this server are Behind, Stale, Ageing or End of life in the software grid underneath (also needs Inventory). A product the catalogue does not know counts as Stale after {0} months and Ageing after {1}.' -f $script:Config.UnknownStaleMonths, $script:Config.UnknownAgeingMonths)))) }
 
     # ---- 3. every KB cell value, in the order Get-PatchVerdict decides them ----
     $sections += @{ Heading = ('KB columns: every cell value (one column per patch file, here {0})' -f $kb); Note = 'The grid cell and the PATCH IT! pre-flight come from the same function (Get-PatchVerdict in lib\04-Patches.ps1), so the grid never promises what the install refuses.'; Html = (New-HelpTable -Headers @('Cell', 'It means', 'Next step') -Rows @(
@@ -347,12 +483,12 @@ function Get-PatchingHelpHtml {
         @((Get-HelpButton 'Reload lists + patches'), 'Re-reads the group files (*.txt) and the patches folders; the columns follow.', 'locked'),
         @((Get-HelpButton 'Check status (ticked)' 'lightskyblue'), 'Asks the ticked servers over WinRM for build, reboot flags, hotfixes, free disk and servicing state, then fills their rows - and the inventory too while the box next to it is ticked.', 'works'),
         @((Get-HelpButton 'Check status (all shown)' 'lightskyblue'), 'The same for every row in the list.', 'works'),
-        @(('<span class="btn">&#9745; Inventory (roles + software)</span>'), 'A tick box, on by default: the two status buttons also read products, roles, features, .NET, SQL, Exchange, services and tasks, which fill the Roles and Software behind columns and the software grid underneath. Untick it for a quicker status-only check.', 'works'),
+        @((Get-HelpButton 'Clear saved data (ticked)'), 'Forgets everything held on this PC for the ticked servers: every console''s results and the state\servers\<server>.xml file. The servers themselves are not touched; the next check fills the rows again. (Every status check also reads products, roles, features, .NET, SQL, Exchange, services and tasks: the Roles and Software behind columns and the software grid underneath.)', 'locked'),
         @(((Get-HelpButton 'Set credentials') + ' ' + (Get-HelpButton 'Clear credentials')), 'Stores an admin account for this session only (never written to disk) / forgets it.', 'locked'),
         @((Get-HelpButton 'STAGE ONLY  (ticked)' 'lightsteelblue'), 'Before the window: copies the ticked patch files to C:\PatchStaging on the ticked servers (one at a time, in slices, SHA256 verified) and nothing else. Skips servers where the file is installed, cannot apply or would not fit; copies where only a reboot, servicing or the Solidcore mode blocks the install for now. Recorded per the Settings tab (''OS patch stage'': not recorded by default). The cells then say READY (staged).', 'locked'),
         @((Get-HelpButton 'PATCH IT!  (ticked KBs, ticked servers)' 'tomato'), ('Pre-flight (the verdicts above), the plan, the change record (ticket or change number, approver, window), the pre-action confirmations of the Settings tab ' + $(if (Test-TrellixInUse) { '(VMware snapshot, Trellix ...)' } else { '(VMware snapshot ...)' }) + ', then the copy to one server at a time; each server installs (DISM /Add-Package) as a SYSTEM task the moment its copy is verified, so the installs overlap.'), 'locked (one run at a time)'),
         @((Get-HelpCell 'Auto-check status every 45 s'), 'The box and the seconds field above PATCH IT!. Ticked: after the launch the tool asks the installing servers at that interval (change it any time) and records each result as it lands; the status bar shows "Let the servers go" to stop watching. Unticked, now or later: the servers install on their own as SYSTEM tasks, their rows turn cyan and say INSTALLING, and "Check status" records the results whenever you come back - also after restarting the tool. Ticked again: the servers still INSTALLING are watched again (after the action running now, if one is). A failed or unknown result offers "Analyse a failure" at once.', 'works'),
-        @(('<span class="btn">&#9745; Stop the Trellix Agent services first</span>'), 'A tick box above PATCH IT!, on by default (StopTrellixAgentForInstall on the Settings tab). Ticked: right after the second status check, PATCH IT! sets the two Trellix Agent services (masvc, macmnsvc) to Disabled and stops them on each server, under the install''s change record, before anything is copied - the field test (October 2026) saw the install fail and roll back with the agent running. A server where that fails is not installed (the result says why); untick the box to install with the agent running. The Trellix Agent column then shows STOPPED (Disabled) in orange until the agent is started again.', 'locked'),
+        @(('<span class="btn">&#9745; Stop the Trellix Agent services first</span>'), 'A tick box above PATCH IT!, off by default (StopTrellixAgentForInstall on the Settings tab; tick it where the agent blocks installs). Ticked: right after the second status check, PATCH IT! sets the two Trellix Agent services (masvc, macmnsvc) to Disabled and stops them on each server, under the install''s change record, before anything is copied - the field test (October 2026) saw the install fail and roll back with the agent running. A server where that fails is not installed (the result says why); untick the box to install with the agent running. The Trellix Agent column then shows STOPPED (Disabled) in orange until the agent is started again.', 'locked'),
         @(((Get-HelpButton 'Start Trellix Agent (ticked)' 'wheat') + ' ' + (Get-HelpButton 'Stop Trellix Agent (ticked)' 'wheat')), 'The two agent services on the ticked servers by hand: Start = Automatic and running (after the patching and the reboot - the agent reports to ePO again), Stop = Disabled and stopped. Fresh status first; servers without the agent or already in that state are skipped; one Yes/No naming the servers (No is the default); the change record of ''Trellix Agent services'' (a change record or a maintenance activity by default, Settings tab); then a fresh status. Start is refused while an OS patch run is still open on the server. Each server keeps its own record (Application event 940, C:\PatchStaging\change-log.txt).', 'locked'),
         @((Get-HelpButton 'Reboot (ticked)' 'khaki'),('Asks, records the change, then restarts the ticked servers. Use it for pink rows and after an install that asks for it - one reboot also finishes a software update from the Software tab.' + $(if (Test-TrellixInUse) { ' A server whose Trellix Agent services are disabled is named in the log: start them when it is back.' } else { '' })), 'locked'),
         @((Get-HelpButton 'Change log'), 'changes\change-log.csv: one row per server per action (approved, aborted, each result) with the change reference. Each server keeps the same record in its Application log and C:\PatchStaging\change-log.txt.', 'works'),
@@ -361,6 +497,8 @@ function Get-PatchingHelpHtml {
         @((Get-HelpButton 'Where do I get patches?'), 'The download how-to: update-history page, KB number, Microsoft Update Catalog, sub-folder.', 'works'),
         @(((Get-HelpButton 'Open patches folder') + ' ' + (Get-HelpButton 'Today''s log')), 'Opens the patches folder in Explorer / today''s log in Notepad.', 'works'),
         @(((Get-HelpButton 'Report (HTML + CSV)') + ' ' + (Get-HelpButton 'Open reports folder')), 'Writes reports\Patching-<date>.html and .csv for the rows shown / opens the folder.', 'works'),
+        @((Get-HelpButton 'Mark winrm: no (ticked)' 'lightgreen'), 'The small green block at the right end of the toolbar is for servers the toolkit cannot reach over WinRM (a hardened server that refuses remote PowerShell while RDP works). This one writes "; winrm: no" on the ticked servers'' lines in their group files, so every check and action skips them from then on; the WinRM cell says self-check. Ticked servers that all carry the mark already: the mark is taken off.', 'locked'),
+        @(((Get-HelpButton 'Copy for a server' 'lightgreen') + ' ' + (Get-HelpButton 'Import results' 'lightgreen')), 'Copy for a server writes one ready-to-carry copy of this toolkit per ticked server marked "winrm: no" (nothing ticked: every marked server), each in state\server-copies\<server>-local-winrm\ (scripts, catalogues, standards, settings; no patches, installers, server lists or results) with the hub folder and the results folder filled in as the server sees them (this PC''s folders through its administrative share), INSTRUCTIONS.txt and, when asked, Run-SelfCheck.ps1 for a scheduled check. On the server, Start-WinRMToolkit.ps1 starts as the spoke by itself: the window for that computer alone. Import results takes the results file such a copy wrote: every console shows it, Last checked says how old it is.', 'locked'),
         @((Get-HelpButton 'Help'), 'This page: every row colour, column, cell and button, each with an example.', 'works'))) }
 
     $sections += @{ Heading = 'While an install runs'; Lines = @(
@@ -681,7 +819,7 @@ function Update-SoftwareGrid {
     if ($cap -gt 0 -and $rows.Count -gt $cap) { $rows = @($rows[0..($cap - 1)]); $capped = $true }
     $colour = { param($row) switch ($row.Verdict) { 'Behind' { 'LemonChiffon' } 'Stale' { 'LemonChiffon' } 'Ageing' { 'NavajoWhite' } 'End of life' { 'MistyRose' } 'Current' { 'Honeydew' } default { 'White' } } }
     Set-GridRows -Grid $grid -Rows $rows -RowColour $colour -ToolTipProperty 'Reason' -NoKeepChecks
-    if ($all.Count -eq 0) { $script:Gui['SoftwareLabel'].Text = 'nothing collected yet - with "Inventory (roles + software)" ticked on the toolbar, a status check lists every product and its currency'; return }
+    if ($all.Count -eq 0) { $script:Gui['SoftwareLabel'].Text = 'nothing collected yet - a status check lists every product and its currency'; return }
     $summary = ('{0} behind, {1} end of life, {2} stale, {3} ageing, {4} current, {5} unknown' -f [int]$counts['Behind'], [int]$counts['End of life'], [int]$counts['Stale'], [int]$counts['Ageing'], [int]$counts['Current'], [int]$counts['Unknown'])
     $label = ('{0} of {1} products on {2} ({3}): {4}.  Known-apps table as of {5}.' -f $rows.Count, $all.Count, $scope, $(if ($showAll) { 'all verdicts' } else { 'needing attention; "Show all verdicts" for the rest' }), $summary, (Get-KnownApps).AsOf)
     if ($capped) { $label = ('first {0} rows only - tick fewer servers, or open a server''s page for its full list.  ' -f $cap) + $label }
@@ -769,7 +907,7 @@ function New-PatchingConsole {
 
     # software grid underneath the server grid
     $softPanel = New-Object System.Windows.Forms.Panel; $softPanel.Dock = 'Fill'
-    $softHead = New-GridHeader -Heading 'SOFTWARE ON THE SERVERS SHOWN' -Detail 'nothing collected yet - with "Inventory (roles + software)" ticked, a status check lists every product and its currency' -Tip ('Verdicts against data\known-apps.psd1 and the rest of the fleet: Current / Behind / Stale / Ageing / End of life / Unknown. A product the table does not know counts as Stale after {0} months and Ageing after {1} (updates waiting, or unmaintained). Tick servers above to narrow the list; hover a row for the reason; the server''s page (double-click above) has its full list.' -f $script:Config.UnknownStaleMonths, $script:Config.UnknownAgeingMonths)
+    $softHead = New-GridHeader -Heading 'SOFTWARE ON THE SERVERS SHOWN' -Detail 'nothing collected yet - a status check lists every product and its currency' -Tip ('Verdicts against data\known-apps.psd1 and the rest of the fleet: Current / Behind / Stale / Ageing / End of life / Unknown. A product the table does not know counts as Stale after {0} months and Ageing after {1} (updates waiting, or unmaintained). Tick servers above to narrow the list; hover a row for the reason; the server''s page (double-click above) has its full list.' -f $script:Config.UnknownStaleMonths, $script:Config.UnknownAgeingMonths)
     # placed while the strip is still 200 px wide and anchored Right, so it keeps that distance from the right edge as the strip grows
     $showAll = New-Object System.Windows.Forms.CheckBox; $showAll.Text = 'Show all verdicts'; $showAll.AutoSize = $true; $showAll.Location = New-Object System.Drawing.Point(10, 4); $showAll.Anchor = 'Top, Right'
     $script:Gui['Tips'].SetToolTip($showAll, 'Unticked: only products needing attention (Behind, Stale, Ageing, End of life). Ticked: Current and Unknown rows too.')
@@ -930,7 +1068,7 @@ function New-PatchingConsole {
             $servers = Get-CheckedServers
             if ($servers.Count -eq 0) { Show-GuiNotice 'Tick at least one server first (or use "Check status (all shown)").'; return }
             Get-ServerStatus -ComputerName $servers | Out-Null
-            if ($script:Gui['PatchInventoryBox'].Checked) { Get-ServerInventory -ComputerName $servers | Out-Null }
+            Get-ServerInventory -ComputerName $servers | Out-Null   # the inventory always rides along (roles, software, .NET, SQL, Exchange): no tick box since 2026-11-06
             Show-TrellixAgentWarning -Servers $servers   # the agent services off on a server: the warning the scan owes
         }
     }))
@@ -939,20 +1077,26 @@ function New-PatchingConsole {
             $all = @(Get-GridAllKeys -Grid $script:Gui['ServerList'])
             if ($all.Count -eq 0) { Show-GuiNotice 'No servers in the list. Add names to a PatchGroup-*.txt file and reload.'; return }
             Get-ServerStatus -ComputerName $all | Out-Null
-            if ($script:Gui['PatchInventoryBox'].Checked) { Get-ServerInventory -ComputerName $all | Out-Null }
+            Get-ServerInventory -ComputerName $all | Out-Null
             Show-TrellixAgentWarning -Servers $all
         }
     }))
-    # Inventory rides along with the status checks while this box is ticked (the default): one press checks everything.
-    $invBox = New-Object System.Windows.Forms.CheckBox
-    $invBox.Text = 'Inventory (roles + software)'; $invBox.Checked = $true; $invBox.AutoSize = $true
-    $invBox.Font = New-Object System.Drawing.Font('Segoe UI', 10); $invBox.Location = New-Object System.Drawing.Point(702, 15)
-    $script:Gui['Tips'].SetToolTip($invBox, 'Ticked: "Check status (ticked)" and "Check status (all shown)" also read products, roles, .NET, SQL, Exchange, services and tasks - the Roles and Software behind columns and the software grid. Untick for a quicker status-only check.')
-    $toolbar.Controls.Add($invBox); $script:Gui['PatchInventoryBox'] = $invBox
-    $toolbar.Controls.Add((New-GuiButton -Text 'Tick all' -X 915 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['ServerList'] -Checked $true }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Untick all' -X 990 -Y 8 -W 80 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['ServerList'] -Checked $false }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Set credentials' -X 1075 -Y 8 -W 110 -Tip 'Foreground Get-Credential prompt. Only needed if your login is refused.' -OnClick { Invoke-GuiAction -Name 'Set credentials' -Action { Get-PatcherCredential -Reason 'alternate account for WinRM' | Out-Null } }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Clear credentials' -X 1190 -Y 8 -W 115 -OnClick { Invoke-GuiAction -Name 'Clear credentials' -Action { Clear-PatcherCredential } }))
+    # the saved data of the ticked servers, wiped (Remove-ServerResults): every collector's result and the results file - the
+    # consoles show them as not checked until the next check
+    $toolbar.Controls.Add((New-GuiButton -Text 'Clear saved data (ticked)' -X 702 -Y 13 -W 170 -H 30 -Tip 'Forgets everything held here for the ticked servers (every result and the state file); the servers are not touched.' -OnClick {
+        Invoke-GuiAction -Name 'Clear saved data' -Action { Clear-ServerResultsDialog } }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Tick all' -X 900 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['ServerList'] -Checked $true }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Untick all' -X 975 -Y 8 -W 75 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['ServerList'] -Checked $false }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Set credentials' -X 1055 -Y 8 -W 105 -Tip 'Foreground Get-Credential prompt. Only needed if your login is refused.' -OnClick { Invoke-GuiAction -Name 'Set credentials' -Action { Get-PatcherCredential -Reason 'alternate account for WinRM' | Out-Null } }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Clear credentials' -X 1165 -Y 8 -W 115 -OnClick { Invoke-GuiAction -Name 'Clear credentials' -Action { Clear-PatcherCredential } }))
+    # servers the hub cannot reach over WinRM (winrm: no): a small block of their own at the end of the row, in the order
+    # of the work - mark them, write the copy they run themselves, take their results in (fits the 1600 px window)
+    $toolbar.Controls.Add((New-GuiButton -Text 'Mark winrm: no (ticked)' -X 1290 -Y 5 -W 255 -H 22 -Colour 'LightGreen' -Tip 'Writes "; winrm: no" on the ticked servers'' lines: never called over WinRM again. All ticked already marked: the mark comes off.' -OnClick {
+        Invoke-GuiAction -Name 'Mark winrm: no' -Action { Set-RemoteDisabledMarkDialog } }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Copy for a server' -X 1290 -Y 31 -W 150 -H 22 -Colour 'LightGreen' -Tip 'One ready-to-carry copy of this toolkit per ticked server marked "winrm: no" (nothing ticked = every marked server), in state\server-copies\<server>-local-winrm; it starts as the spoke by itself.' -OnClick {
+        Invoke-GuiAction -Name 'Copy for a server' -Action { New-ServerCopyDialog } }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Import results' -X 1445 -Y 31 -W 100 -H 22 -Colour 'LightGreen' -Tip 'Takes results files written by such copies (state\servers\<computer>.xml) into every console.' -OnClick {
+        Invoke-GuiAction -Name 'Import results' -Action { Import-ResultsFilesDialog } }))
     # the row count sits above the grid (see the Panel1 block): on the toolbar it was clipped at the default window width
 
     # ---- banner ----

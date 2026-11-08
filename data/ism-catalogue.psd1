@@ -4,6 +4,7 @@
     # licensed under Creative Commons Attribution 4.0 (https://www.cyber.gov.au/ism).  Regenerate after each ISM release.
     # Changes made to the source text: transliterated to ASCII (typographic quotes, dashes and ellipses replaced).
     Source = 'ACSC ISM, sheet ''Controls - September 2026'' of System security plan annex template (September 2026).xlsx'
+    Release = 'September 2026'
     Generated = '2026-10-19'
     Count = 1143
     Controls = @(

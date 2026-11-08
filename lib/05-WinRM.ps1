@@ -545,6 +545,14 @@ function Invoke-Collector {
     }
     $names = @($names | Where-Object { Test-LooksLikeHostname $_ })
     if ($names.Count -eq 0) { return $early }
+    # a server marked "winrm: no" in its group file is never called: its results come from its own self-check (14-State.ps1)
+    # and stay in the table as they are
+    $offline = @($names | Where-Object { Test-RemoteDisabled -Name $_ })
+    if ($offline.Count -gt 0) {
+        Write-PatchLog ("{0}: {1} not called - marked 'winrm: no' in the group file; the results shown come from its own self-check (Import results)" -f $Name, ($offline -join ', ')) 'WHY'
+        $names = @($names | Where-Object { $offline -notcontains $_ })
+        if ($names.Count -eq 0) { return $early }
+    }
 
     $who  = 'current login'
     if ($script:Credential) { $who = $script:Credential.UserName }
@@ -612,6 +620,7 @@ function Invoke-Collector {
     if ($localJob) { $child = $localJob.ChildJobs[0]; $errs = @(); $o = Receive-Job -Job $child -ErrorAction SilentlyContinue -ErrorVariable errs; foreach ($alias in $localNames) { $answers += [pscustomobject]@{ Child = $child; Server = $alias; Out = $o; Errors = @($errs) } } }
     $results = @($early)
     $denied  = @()
+    $keep = $null   # what goes into the table for a server: its fresh result, or the good result it had when this attempt failed
     try {   # whatever a summary or unreachable block throws, the jobs are removed and every answer read so far is kept
         foreach ($answer in $answers) {
             $child = $answer.Child; $server = $answer.Server; $out = $answer.Out; $jobErrors = @($answer.Errors)
@@ -639,12 +648,28 @@ function Invoke-Collector {
                 if ($child.State -eq 'Stopped' -and -not $script:Gui['WaitStopped']) { $result | Add-Member -NotePropertyName TimedOut -NotePropertyValue $true -Force }
                 if ($reason -match 'Access is denied') { $denied += $server }
                 Write-PatchLog "$server FAILED ($Name): $reason" 'ERROR'
+                # the table keeps the last good result, marked with this failed attempt (14-State.ps1: the grids paint what the
+                # server last said, with its age, and say the latest attempt failed); this run's own answer stays the failure
+                $prev = $store[$server]
+                if ($prev -and $prev.Reachable) {
+                    Set-ResultFailure -Result $prev -Reason $reason
+                    Write-PatchLog ("{0}: the {1} result of {2} stays in the window until a check succeeds" -f $server, $Name, (Format-LastChecked $prev.Checked)) 'WHY'
+                    $keep = $prev
+                }
             }
-            $store[$server] = $result
+            if ($null -eq $keep) { $keep = $result }
+            $store[$server] = $keep
             $results += $result
+            $keep = $null
         }
     } finally { foreach ($j in @($job, $localJob)) { if ($j) { Remove-Job -Job $j -Force -ErrorAction SilentlyContinue } } }
     Clear-CheckRowCache -Servers @($store.Keys | Where-Object { $asked -contains $_ })   # only these servers' rows are stale now
+    # the results of this run go to state\servers\ (14-State.ps1): the window's timer writes them a few files at a time; with
+    # no window they are written now
+    if ($Name -ne 'Command') {
+        Set-StateDirty -Server @($store.Keys | Where-Object { $asked -contains $_ })
+        if (-not $script:Gui['StateTimer']) { $null = Save-DirtyStates -All }
+    }
 
     # Access denied with the current login?  Ask once (foreground) and retry just those servers - but never
     # from a read-only action running alongside an install: the install's remaining sessions would silently

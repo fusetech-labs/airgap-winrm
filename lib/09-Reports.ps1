@@ -69,17 +69,54 @@ function ConvertTo-EvidenceHtml {
     return (ConvertTo-HtmlSafe $Text)
 }
 
+# Where a path or host name may wrap (a <wbr> goes after the match): after each \ and /, and after a dot only when another
+# dot follows in the same word (the parts of a host name, never a file's extension - a search for "name.ps1" in the page
+# still hits); never after a leading \ (a task's "\Name" would leave the \ alone on a line)
+$script:ReportSoftBreakPattern = '(?<!^)([\\/]|\.(?=[^\s;,\\/]*\.))(?=.)'
+
+function ConvertTo-FilterLinkHtml {
+    # "a.bat; b.ps1" (the script files a cell lists) -> each one a link that puts its file name into the page's filter box
+    # (the click handler is in Get-ReportPageScript), so the script's own row shows without copying the name by hand.
+    # A trailing "(not found)" stays in the text and out of the file name.
+    param([string]$Text, [switch]$Soft)
+    $parts = @(($Text -split ';\s*') | Where-Object { $_ })
+    $out = foreach ($p in $parts) {
+        $leaf = (($p -replace '\s*\(not found\)\s*$', '') -replace '^.*[\\/]', '').Trim()
+        $enc = [System.Net.WebUtility]::HtmlEncode($p); if ($Soft) { $enc = $enc -replace $script:ReportSoftBreakPattern, '$1<wbr>' }
+        if (-not $leaf) { $enc; continue }
+        $q = [System.Net.WebUtility]::HtmlEncode($leaf)
+        '<a href="#" class="q" data-q="' + $q + '" title="Filter: ' + $q + '">' + $enc + '</a>'
+    }
+    return ($out -join '; ')
+}
+
 function ConvertTo-ReportTable {
-    # Rows -> one HTML table.  $Columns picks and orders the properties; the Light column (if any) colours the row.
+    # Rows -> one HTML table.  $Columns picks and orders the properties; the Light column (if any) colours the row and
+    # is never a column of the page (the colour says it; the CSV beside a report keeps it for filtering).
     # Written for thousands of rows: the encoder is called directly (a function call per cell costs a second per
     # thousand rows in PowerShell 5.1) and only the Evidence column goes through ConvertTo-EvidenceHtml.
     # $NoWrap: columns of short values that must not break ("25% (3 of 12)", a date) when a long column squeezes the table.
-    param([object[]]$Rows, [string[]]$Columns, [string]$LightColumn = 'Light', [string[]]$NoWrap = @())
+    # $Widths: column -> CSS width ('112px', '12%'). Given, the table is laid out with fixed column widths - a wide table
+    #          of long paths next to short dates stays readable: a path wraps inside its cell, a date never breaks, and
+    #          a column not named shares what is left.
+    # $SoftBreak: columns of paths and host names; a break is allowed after each \ / and the inner dots of a host name, so
+    #          they wrap at a natural point (never at a file's extension: the page can still be searched for "name.ps1").
+    # $FilterLinks: columns that list script files ("a.bat; b.ps1"); each becomes a link that puts its file name into the
+    #          page's filter box (reports only - a details page has no filter box), so the script's own row is one click away.
+    param([object[]]$Rows, [string[]]$Columns, [string]$LightColumn = 'Light', [string[]]$NoWrap = @(), [hashtable]$Widths = $null, [string[]]$SoftBreak = @(), [string[]]$FilterLinks = @())
     if (-not $Rows -or $Rows.Count -eq 0) { return '<p class="empty">(no rows)</p>' }
     if (-not $Columns -or $Columns.Count -eq 0) { $Columns = @($Rows[0].PSObject.Properties | ForEach-Object { $_.Name }) }
+    if ($LightColumn) { $Columns = @($Columns | Where-Object { $_ -ne $LightColumn }) }
+    if ($Columns.Count -eq 0) { return '<p class="empty">(no columns)</p>' }
     $open = @{}; foreach ($col in $Columns) { $open[$col] = $(if (@($NoWrap) -contains $col) { '<td class="nw">' } else { '<td>' }) }
+    $soft = @{}; foreach ($col in @($SoftBreak)) { if ($col) { $soft[$col] = $true } }
+    $links = @{}; foreach ($col in @($FilterLinks)) { if ($col) { $links[$col] = $true } }
     $sb = New-Object System.Text.StringBuilder
-    [void]$sb.Append('<table><thead><tr>')
+    if ($Widths -and $Widths.Count -gt 0) {
+        [void]$sb.Append('<table class="fx"><colgroup>')
+        foreach ($col in $Columns) { $w = [string]$Widths[$col]; if ($w) { [void]$sb.Append('<col style="width:' + [System.Net.WebUtility]::HtmlEncode($w) + '">') } else { [void]$sb.Append('<col>') } }
+        [void]$sb.Append('</colgroup><thead><tr>')
+    } else { [void]$sb.Append('<table><thead><tr>') }
     foreach ($col in $Columns) { [void]$sb.Append('<th>' + [System.Net.WebUtility]::HtmlEncode((ConvertTo-PageText $col)) + '</th>') }
     [void]$sb.Append('</tr></thead><tbody>')
     $hasLight = ($LightColumn -and $Rows[0].PSObject.Properties[$LightColumn])
@@ -91,7 +128,10 @@ function ConvertTo-ReportTable {
             if ($col -eq 'Evidence') { [void]$sb.Append('<td>').Append((ConvertTo-EvidenceHtml -Row $r -Text ([string]$v))).Append('</td>'); continue }
             if ($v -is [array]) { $v = ($v -join ', ') }
             $s = [string]$v; if ($rx.IsMatch($s)) { $s = ConvertTo-PageText $s }   # the fold only when needed - a call per cell would cost
-            [void]$sb.Append($open[$col]).Append([System.Net.WebUtility]::HtmlEncode($s)).Append('</td>')
+            if ($links.ContainsKey($col) -and $s) { [void]$sb.Append($open[$col]).Append((ConvertTo-FilterLinkHtml -Text $s -Soft:($soft.ContainsKey($col)))).Append('</td>'); continue }
+            $enc = [System.Net.WebUtility]::HtmlEncode($s)
+            if ($soft.ContainsKey($col)) { $enc = $enc -replace $script:ReportSoftBreakPattern, '$1<wbr>' }
+            [void]$sb.Append($open[$col]).Append($enc).Append('</td>')
         }
         [void]$sb.Append('</tr>')
     }
@@ -107,12 +147,12 @@ function Get-ReportCss {
 body{font-family:Segoe UI,Arial,sans-serif;font-size:13px;margin:0;color:#222;background:#fff}
 .banner{background:$Colour;color:$Text;padding:14px 24px}.banner h1{margin:0;font-size:22px}.banner p{margin:4px 0 0 0;opacity:.9}
 .meta{padding:10px 24px;background:#f4f4f4;border-bottom:1px solid #ddd}.meta span{margin-right:24px;display:inline-block}
-section{padding:12px 24px}h2{font-size:16px;margin:18px 0 6px 0;border-bottom:2px solid #ccc}
+section{padding:12px 24px}h2{font-size:16px;margin:18px 0 6px 0;border-bottom:2px solid #ccc}h3{font-size:13px;margin:12px 0 2px 0;color:#333}
 table{border-collapse:collapse;width:100%;margin-bottom:12px}th{background:#333;color:#fff;text-align:left;padding:5px 8px;position:sticky;top:0}
 td{padding:4px 8px;border-bottom:1px solid #e3e3e3;vertical-align:top;font-size:12px}tr:hover td{background:#f0f6ff}
 tr.Red td{background:#f8d7da}tr.Amber td{background:#fff3cd}tr.Green td{background:#d4edda}tr.Blue td{background:#dbeafa}tr.Grey td{background:#e9ecef;color:#555}
 .notes{font-size:12px;color:#444}.empty{color:#777;font-style:italic}.foot{padding:10px 24px;color:#777;font-size:11px}
-input#filter{margin:8px 0;padding:4px 8px;width:320px}
+input#filter{margin:8px 0;padding:4px 8px;width:440px}
 pre{font-family:Consolas,monospace;font-size:12px;background:#f7f7f7;padding:8px;white-space:pre-wrap;word-wrap:break-word}
 ul{margin:4px 0 8px 18px}
 ul.ev{margin:2px 0 0 16px;padding:0}ul.ev li{margin:0 0 1px 0}
@@ -130,6 +170,9 @@ pre.src{background:#f6f8fa;border:1px solid #d8dee4;padding:10px;font-size:12px;
 table.mini{width:auto;margin:4px 0 0 0}table.mini td{border:0;padding:0 8px 0 0;width:140px;text-align:center;vertical-align:top;font-size:11px}table.mini .cap{margin-top:2px;color:#333}
 table.mini tr:hover td{background:transparent}.hint{background:#fff8dc;border:1px solid #e6d9a8;padding:6px 10px;font-size:12px;margin:4px 0}
 img{max-width:100%}td.nw{white-space:nowrap}
+table.fx{table-layout:fixed}table.fx td,table.fx th{padding-left:6px;padding-right:6px;overflow-wrap:break-word;word-wrap:break-word}table.fx td.nw{overflow:hidden;text-overflow:ellipsis}
+thead th{cursor:pointer}table.mock th{cursor:default}th[data-s="a"]:after{content:" \2191"}th[data-s="d"]:after{content:" \2193"}
+a.q{color:inherit;text-decoration:none;border-bottom:1px dotted #999}a.q:hover{color:#0a58ca;border-bottom-color:#0a58ca}
 /* Printing (Print > Save as PDF): keep the colours, never leave a heading at the foot of a page (the empty block after
    each h2 must fit below it, or the heading moves to the next page), never split a chart, a card or a table row across
    pages, repeat the table header on every page, three group cards to a row, and narrow the margins to the paper */
@@ -137,7 +180,7 @@ img{max-width:100%}td.nw{white-space:nowrap}
 @media print{
 *{-webkit-print-color-adjust:exact;print-color-adjust:exact;color-adjust:exact}
 body{font-size:11px}.banner{padding:8px 12px}.banner h1{font-size:19px}.meta{padding:6px 12px}section{padding:4px 12px}.foot{padding:6px 12px}
-h2{font-size:14px;margin:10px 0 4px 0;break-after:avoid;page-break-after:avoid;break-inside:avoid;page-break-inside:avoid}
+h2{font-size:14px;margin:10px 0 4px 0;break-after:avoid;page-break-after:avoid;break-inside:avoid;page-break-inside:avoid}h3{font-size:12px;margin:8px 0 2px 0;break-after:avoid;page-break-after:avoid}
 h2::after{content:"";display:block;height:150px;margin-bottom:-150px}section.cardsec h2::after{height:250px;margin-bottom:-250px}
 section.keep,.card,img,tr,.pic{break-inside:avoid;page-break-inside:avoid}
 thead{display:table-header-group}th{position:static;font-size:10px;padding:3px 5px}td{font-size:10px;padding:2px 5px;word-break:break-word}
@@ -147,6 +190,14 @@ tr:hover td{background:inherit}input#filter,.noprint{display:none}
 }
 </style>
 "@
+}
+
+function Get-ReportPageScript {
+    # The page's own script, plain and offline: (1) a click on a column heading sorts its table by that column, a second
+    # click the other way round - numbers as numbers, the rest as text, empty cells last either way; (2) a click on a
+    # filter link (ConvertTo-FilterLinkHtml) puts its file name into the filter box and filters every table by it.
+    return '<script>document.addEventListener("click",function(e){var th=e.target;while(th&&th.nodeName!=="TH"){th=th.parentNode;}if(!th||!th.parentNode||th.parentNode.parentNode.nodeName!=="THEAD"){return;}var t=th.parentNode.parentNode.parentNode,b=t.tBodies[0];if(!b||b.rows.length<2){return;}var i=th.cellIndex,up=th.getAttribute("data-s")!=="a",hs=th.parentNode.cells,k;for(k=0;k<hs.length;k++){hs[k].removeAttribute("data-s");}th.setAttribute("data-s",up?"a":"d");var num=/^\s*-?[\d.,]+\s*(%|KB|MB|GB|s)?\s*$/;function v(r){var c=r.cells[i];return c?(c.textContent||"").replace(/^\s+|\s+$/g,""):"";}var rs=[];for(k=0;k<b.rows.length;k++){rs.push(b.rows[k]);}rs.sort(function(x,y){var p=v(x),q=v(y),c;if(p===q){return 0;}if(p===""){return 1;}if(q===""){return -1;}if(num.test(p)&&num.test(q)){c=parseFloat(p.replace(/,/g,""))-parseFloat(q.replace(/,/g,""));}else{c=p.localeCompare(q,undefined,{numeric:true,sensitivity:"base"});}return up?c:-c;});for(k=0;k<rs.length;k++){b.appendChild(rs[k]);}});' +
+           'document.addEventListener("click",function(e){var a=e.target;while(a&&a.nodeName!=="A"){a=a.parentNode;}if(!a||!a.getAttribute||!a.getAttribute("data-q")){return;}e.preventDefault();var i=document.getElementById("filter");if(!i){return;}i.value=a.getAttribute("data-q");if(typeof f==="function"){f(i.value);}i.scrollIntoView();i.focus();});</script>'
 }
 
 function ConvertFrom-PipeLines {
@@ -169,7 +220,9 @@ function New-DetailsHtml {
     #   $Sections : @{ Heading; Rows; Columns; [LightColumn]; [Note] } (a table, rows coloured by their Light)
     #               [Keep = $true] on any section: printing keeps it on one page (charts, cards)
     #               [Class = 'name'] on any section: a style hook (section.cardsec); [NoWrap = columns] on a table
+    #               [PageColumns], [Widths], [SoftBreak] on a table: the page's own columns and their layout (ConvertTo-ReportTable)
     #               @{ Heading; Lines; [Note] } (a list)      @{ Heading; Text } (preformatted text)
+    #               @{ Heading; Groups = @(@{ Heading; Lines }) } (headed bullet lists: the licensing counting rules)
     param([string]$Title, [string]$Subtitle = '', [string]$Console = 'Patching', [object[]]$Facts = @(), [object[]]$Sections = @())
     $colour = $script:Config.ConsoleColours[$Console]; if (-not $colour) { $colour = 'MidnightBlue' }
     $text = $script:Config.ConsoleText[$Console]; if (-not $text) { $text = 'White' }
@@ -200,10 +253,15 @@ function New-DetailsHtml {
         if ($sec.ContainsKey('Rows')) {
             $lc = 'Light'; if ($sec.ContainsKey('LightColumn')) { $lc = [string]$sec.LightColumn }
             $nw = @(); if ($sec.ContainsKey('NoWrap')) { $nw = @($sec.NoWrap) }
-            [void]$html.AppendLine((ConvertTo-ReportTable -Rows @($sec.Rows) -Columns @($sec.Columns) -LightColumn $lc -NoWrap $nw))
+            $pageCols = @($sec.Columns); if ($sec.ContainsKey('PageColumns') -and @($sec.PageColumns).Count -gt 0) { $pageCols = @($sec.PageColumns) }
+            $widths = $null; if ($sec.ContainsKey('Widths')) { $widths = $sec.Widths }
+            $soft = @(); if ($sec.ContainsKey('SoftBreak')) { $soft = @($sec.SoftBreak) }
+            [void]$html.AppendLine((ConvertTo-ReportTable -Rows @($sec.Rows) -Columns $pageCols -LightColumn $lc -NoWrap $nw -Widths $widths -SoftBreak $soft))
         } elseif ($sec.ContainsKey('Lines')) {
             if (@($sec.Lines).Count -eq 0) { [void]$html.AppendLine('<p class="empty">(none)</p>') }
             else { [void]$html.AppendLine('<ul>' + ((@($sec.Lines) | ForEach-Object { '<li>' + (ConvertTo-HtmlSafe ([string]$_)) + '</li>' }) -join '') + '</ul>') }
+        } elseif ($sec.ContainsKey('Groups')) {
+            [void]$html.AppendLine((ConvertTo-GroupListHtml -Groups @($sec.Groups)))
         } elseif ($sec.ContainsKey('Text')) {
             [void]$html.AppendLine('<pre>' + (ConvertTo-HtmlSafe ([string]$sec.Text)) + '</pre>')
         } elseif ($sec.ContainsKey('Html')) {
@@ -212,7 +270,7 @@ function New-DetailsHtml {
         [void]$html.AppendLine('</section>')
     }
     [void]$html.AppendLine('<div class="foot">' + (ConvertTo-HtmlSafe ('Generated {0} by {1} with {2} {3}. Pages contain host names and findings - treat as internal.' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), (Get-OperatorIdentity), $script:Config.ToolName, $script:Config.ToolVersion)) + '</div>')
-    [void]$html.AppendLine('</body></html>')
+    [void]$html.AppendLine((Get-ReportPageScript) + '</body></html>')
     return $html.ToString()
 }
 
@@ -338,8 +396,25 @@ function ConvertTo-NotesInline {
     return $safe
 }
 
+function ConvertTo-GroupListHtml {
+    # Headed bullet lists -> HTML: @(@{ Heading = 'Windows Server'; Lines = @('per core: ...', ...) }, ...), one h3 and
+    # one list per group, so a set of rules reads point by point instead of as a paragraph.  Everything is escaped; a
+    # web address in a line is shown in code style (ConvertTo-NotesInline).
+    param([object[]]$Groups)
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($g in @($Groups)) {
+        if ([string]$g.Heading) { [void]$sb.Append('<h3>' + (ConvertTo-HtmlSafe ([string]$g.Heading)) + '</h3>') }
+        $lines = @($g.Lines)
+        if ($lines.Count -gt 0) { [void]$sb.AppendLine('<ul>' + (($lines | ForEach-Object { '<li>' + (ConvertTo-NotesInline ([string]$_)) + '</li>' }) -join '') + '</ul>') }
+    }
+    return $sb.ToString()
+}
+
 function Export-ConsoleReport {
-    # $Sections: array of hashtables @{ Name = 'Checks'; Rows = <objects>; Columns = @('Server', ...) }
+    # $Sections: array of hashtables @{ Name = 'Checks'; Rows = <objects>; Columns = @('Server', ...) } (a table, with a
+    #            CSV beside the page) or @{ Name; Groups = @(@{ Heading; Lines }) } (headed bullet lists, page only).
+    #            A table may add [PageColumns] (the page shows these, the CSV keeps every column - a path the page splits
+    #            into name and folder), [NoWrap], [Widths], [SoftBreak] and [FilterLinks] (its layout; ConvertTo-ReportTable).
     # $Summary : rows for the summary table at the top (any objects); $Notes: lines under the header.
     param(
         [Parameter(Mandatory = $true)][string]$Console,
@@ -347,11 +422,13 @@ function Export-ConsoleReport {
         [object[]]$Summary = @(),
         [string[]]$SummaryColumns = @(),
         [Parameter(Mandatory = $true)][object[]]$Sections,
-        [string[]]$Notes = @()
+        [string[]]$Notes = @(),
+        [string]$Prefix = ''          # the file name's first word when it is not the console's (Scripts-<date> from the Health console)
     )
     if (-not (Test-Path -LiteralPath $script:Config.ReportFolder)) { New-Item -ItemType Directory -Path $script:Config.ReportFolder -Force | Out-Null }
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'   # seconds, so two reports in one minute never overwrite each other
-    $base = Join-Path $script:Config.ReportFolder ("{0}-{1}" -f $Console, $stamp)
+    if (-not $Prefix) { $Prefix = $Console }
+    $base = Join-Path $script:Config.ReportFolder ("{0}-{1}" -f $Prefix, $stamp)
     $colour = $script:Config.ConsoleColours[$Console]; if (-not $colour) { $colour = 'MidnightBlue' }
     $text = $script:Config.ConsoleText[$Console]; if (-not $text) { $text = 'White' }
     if (-not $Title) { $Title = "$Console report" }
@@ -371,19 +448,29 @@ function Export-ConsoleReport {
     [void]$html.AppendLine('<section><h2>Summary</h2>')
     [void]$html.AppendLine((ConvertTo-ReportTable -Rows $Summary -Columns $SummaryColumns))
     [void]$html.AppendLine('</section>')
-    # a tiny filter box - the only script in the page; works offline
-    [void]$html.AppendLine('<section><input id="filter" placeholder="filter rows (type to search all tables)" onkeyup="f(this.value)"><script>function f(q){q=q.toLowerCase();var rs=document.querySelectorAll("tbody tr");for(var i=0;i<rs.length;i++){rs[i].style.display=rs[i].innerText.toLowerCase().indexOf(q)>=0?"":"none";}}</script></section>')
+    # a tiny filter box, the heading-click sort and the filter links - the only scripts in the page; all work offline
+    [void]$html.AppendLine('<section><input id="filter" placeholder="filter rows (type to search all tables; click a column heading to sort)" onkeyup="f(this.value)"><script>function f(q){q=q.toLowerCase();var rs=document.querySelectorAll("tbody tr");for(var i=0;i<rs.length;i++){rs[i].style.display=rs[i].innerText.toLowerCase().indexOf(q)>=0?"":"none";}}</script>' + (Get-ReportPageScript) + '</section>')
 
     $csvPaths = @()
     foreach ($sec in $Sections) {
         $name = [string]$sec.Name
+        if ($sec.ContainsKey('Groups')) {
+            # headed bullet lists (the licensing counting rules): a section of the page, no CSV
+            [void]$html.AppendLine('<section><h2>' + (ConvertTo-HtmlSafe $name) + '</h2>' + (ConvertTo-GroupListHtml -Groups @($sec.Groups)) + '</section>')
+            continue
+        }
         $rows = @($sec.Rows)
         $cols = @($sec.Columns)
+        $pageCols = $cols; if ($sec.ContainsKey('PageColumns') -and @($sec.PageColumns).Count -gt 0) { $pageCols = @($sec.PageColumns) }
+        $nw = @(); if ($sec.ContainsKey('NoWrap')) { $nw = @($sec.NoWrap) }
+        $widths = $null; if ($sec.ContainsKey('Widths')) { $widths = $sec.Widths }
+        $soft = @(); if ($sec.ContainsKey('SoftBreak')) { $soft = @($sec.SoftBreak) }
+        $fl = @(); if ($sec.ContainsKey('FilterLinks')) { $fl = @($sec.FilterLinks) }
         [void]$html.AppendLine('<section><h2>' + (ConvertTo-HtmlSafe $name) + ' (' + $rows.Count + ')</h2>')
         # a browser copes with a few thousand table rows, not a hundred thousand: the page is cut, the CSV is complete
         $cap = [int]$script:Config.MaxReportRowsPerSection; $shownRows = $rows
         if ($cap -gt 0 -and $rows.Count -gt $cap) { $shownRows = @($rows[0..($cap - 1)]); [void]$html.AppendLine('<p class="notes">' + (ConvertTo-HtmlSafe ('This page shows the first {0} of {1} rows so it stays readable in a browser; the CSV beside it has every row.' -f $cap, $rows.Count)) + '</p>') }
-        [void]$html.AppendLine((ConvertTo-ReportTable -Rows $shownRows -Columns $cols))
+        [void]$html.AppendLine((ConvertTo-ReportTable -Rows $shownRows -Columns $pageCols -NoWrap $nw -Widths $widths -SoftBreak $soft -FilterLinks $fl))
         [void]$html.AppendLine('</section>')
         $csvPath = $base + '.csv'
         if ($Sections.Count -gt 1) { $csvPath = $base + '-' + ($name -replace '[^A-Za-z0-9]', '') + '.csv' }

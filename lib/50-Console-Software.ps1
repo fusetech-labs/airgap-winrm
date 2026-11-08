@@ -302,7 +302,7 @@ function Get-SoftwarePackageFiles {
     $infoDir = Join-Path $root '_info'
     if (-not $script:SoftwareFileCache) { $script:SoftwareFileCache = Read-SoftwareVettingCache }
     $script:SoftwareVerdictCache = @{}   # the files may have changed: every verdict is worked out again
-    $vetted = 0; $seenKeys = New-Object System.Collections.Generic.List[string]
+    $vetted = 0; $migrated = 0; $seenKeys = New-Object System.Collections.Generic.List[string]
     $found = New-Object System.Collections.Generic.List[object]
     $notOffered = New-Object System.Collections.Generic.List[string]
     $claimed = @{}
@@ -317,14 +317,22 @@ function Get-SoftwarePackageFiles {
         $why = Test-SoftwareFolderName $rel
         if ($why) { $notOffered.Add(("package {0}: its folder '{1}' cannot be used - {2}" -f $id, $rel, $why)); continue }
         $folder = $root; if ($rel) { $folder = Join-Path $root $rel }
-        if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
+        # a missing package folder is made here, never on a spoke: the hub's share is read, not written (review 2026-11-08)
+        if (-not $script:SpokeMode -and -not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
         foreach ($f in @(Get-ChildItem -LiteralPath $folder -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like [string]$pkg.FilePattern })) {
             $claimed[$f.FullName.ToLower()] = $id
-            $key = '{0}|{1}|{2}' -f $f.FullName.ToLower(), $f.Length, $f.LastWriteTimeUtc.Ticks
+            # keyed by the path under software\, not the full path: the hub's cache then serves a spoke that reads the same
+            # folder through a share (2026-11-06); an entry under the older full-path key is taken over once
+            $key = '{0}|{1}|{2}' -f $f.FullName.Substring($root.Length).TrimStart('\').ToLower(), $f.Length, $f.LastWriteTimeUtc.Ticks
             $seenKeys.Add($key)
             # the version depends on the package's VersionFrom / VersionRegex too: an edited package reads it again
             $spec = '{0}|{1}' -f $pkg.VersionFrom, $pkg.VersionRegex
             $info = $script:SoftwareFileCache[$key]
+            if (-not $info) {
+                $legacyKey = '{0}|{1}|{2}' -f $f.FullName.ToLower(), $f.Length, $f.LastWriteTimeUtc.Ticks
+                $info = $script:SoftwareFileCache[$legacyKey]
+                if ($info) { $script:SoftwareFileCache[$key] = $info; $script:SoftwareFileCache.Remove($legacyKey); $migrated++ }
+            }
             $fresh = $false
             if (-not $info) {
                 Set-GuiStatus "Vetting $($f.Name) (SHA256, signature) ..."
@@ -373,33 +381,50 @@ function Get-SoftwarePackageFiles {
     # the cache keeps the files still there; it is rewritten only when something was vetted or has gone
     $stale = @($script:SoftwareFileCache.Keys | Where-Object { -not $seenKeys.Contains($_) })
     foreach ($k in $stale) { $script:SoftwareFileCache.Remove($k) }
-    if ($vetted -gt 0 -or $stale.Count -gt 0) { Save-SoftwareVettingCache }
+    if ($vetted -gt 0 -or $stale.Count -gt 0 -or $migrated -gt 0) { Save-SoftwareVettingCache }
     $packages = @($list | ForEach-Object { $_.Id } | Select-Object -Unique).Count
     Write-PatchLog ("Software library: {0} installer(s) of {1} package(s){2}{3}{4}" -f $list.Count, $packages, $(if ($vetted -gt 0) { ", $vetted vetted now (SHA256, signature)" } else { '' }), $(if (@($list | Where-Object { $_.Blocked }).Count -gt 0) { ', ' + @($list | Where-Object { $_.Blocked }).Count + ' blocked' } else { '' }), $(if ($detected.Count -gt 0) { ', ' + $detected.Count + ' NEW to register' } else { '' })) 'INFO'
     return $list
 }
 
 function Get-SoftwareVettingCachePath {
+    # software\_info\vetting-cache.json beside the files: on a spoke that is the hub's, read and trusted
     return (Join-Path (Join-Path $script:Config.SoftwareFolder '_info') 'vetting-cache.json')
 }
 
-function Read-SoftwareVettingCache {
-    # The vetting of earlier sessions - SHA256, signature, signer and version per file (path, size, time): a big
-    # software\ folder is read in full once, not at every start.  Only a speed-up: before anything runs, the copy is
-    # checked against the SHA256 and the server checks the SHA256 and the signature of the staged file itself.
+function Get-SoftwareVettingCacheWritePath {
+    # Where this copy writes its vetting: beside the files - on a spoke under its own root instead (SoftwareInfoFolder), so
+    # the hub's folder is never written over a share (2026-11-06)
+    if ($script:SpokeMode) { return (Join-Path $script:Config.SoftwareInfoFolder 'vetting-cache.json') }
+    return (Get-SoftwareVettingCachePath)
+}
+
+function Read-SoftwareVettingCacheFile {
+    # One cache file as a map, empty when there is none or it cannot be read
+    param([string]$Path)
     $map = @{}
-    $p = Get-SoftwareVettingCachePath
-    if (-not (Test-Path -LiteralPath $p)) { return $map }
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $map }
     try {
-        foreach ($e in @(([System.IO.File]::ReadAllText($p) | ConvertFrom-Json).Files)) {
+        foreach ($e in @(([System.IO.File]::ReadAllText($Path) | ConvertFrom-Json).Files)) {
             if ($e -and $e.Key -and $e.Hash) { $map[[string]$e.Key] = @{ Hash = [string]$e.Hash; Signature = [string]$e.Signature; Signer = [string]$e.Signer; Version = [string]$e.Version; Spec = [string]$e.Spec } }
         }
-    } catch { Write-PatchLog "Software vetting cache unreadable ($(Get-ShortError $_)) - every installer is vetted again" 'WARN' }
+    } catch { Write-PatchLog "Software vetting cache unreadable ($Path - $(Get-ShortError $_)) - every installer is vetted again" 'WARN' }
+    return $map
+}
+
+function Read-SoftwareVettingCache {
+    # The vetting of earlier sessions - SHA256, signature, signer and version per file (path under software\, size, time):
+    # a big software\ folder is read in full once, not at every start.  A spoke reads the hub's file first and lays its own
+    # (what it vetted itself) over it.  Only a speed-up: before anything runs, the copy is checked against the SHA256 and
+    # the server checks the SHA256 and the signature of the staged file itself.
+    $map = Read-SoftwareVettingCacheFile -Path (Get-SoftwareVettingCachePath)
+    $own = Get-SoftwareVettingCacheWritePath
+    if ($own -ine (Get-SoftwareVettingCachePath)) { foreach ($e in (Read-SoftwareVettingCacheFile -Path $own).GetEnumerator()) { if (-not $map.ContainsKey($e.Key)) { $map[$e.Key] = $e.Value } } }
     return $map
 }
 
 function Save-SoftwareVettingCache {
-    $p = Get-SoftwareVettingCachePath
+    $p = Get-SoftwareVettingCacheWritePath
     $files = @(foreach ($k in @($script:SoftwareFileCache.Keys | Sort-Object)) {
         $e = $script:SoftwareFileCache[$k]
         [pscustomobject]@{ Key = $k; Hash = $e.Hash; Signature = $e.Signature; Signer = $e.Signer; Version = $e.Version; Spec = $e.Spec }
@@ -550,7 +575,7 @@ function Test-SoftwarePackageDraft {
 }
 
 # the server grid's own columns: a package Id with one of these names would overwrite that cell (Server is the row's key)
-$script:SoftwareFixedColumns = @('Server', 'Group', 'WinRM', 'All packages', 'Hardware', 'Pending reboot', 'Trellix Agent', 'Staged', 'Toolkit task', 'Products', 'Checked at', 'Colour', 'Tip', 'Cells')
+$script:SoftwareFixedColumns = @('Server', 'Group', 'WinRM', 'Last checked', 'All packages', 'Hardware', 'Pending reboot', 'Trellix Agent', 'Staged', 'Toolkit task', 'Products', 'Colour', 'Tip', 'Cells')
 
 # the package fields the Register / Edit form shows; any other field in an entry is carried along unchanged
 $script:SoftwarePackageFields = @('Id', 'Name', 'Folder', 'Match', 'FilePattern', 'VersionFrom', 'VersionRegex', 'Installer', 'Arguments', 'InstallArguments', 'UpdateArguments', 'Modes', 'Requires', 'Signers', 'AllowUnsigned', 'Note')
@@ -817,7 +842,7 @@ function Show-SoftwareRegisterDialog {
     param($Detected, $Facts, $Draft, [string]$OriginalId = '', [string]$Notice = '')
     $kind = [string]$Draft.Installer
     $editing = [bool]$OriginalId
-    $dlg = New-Object System.Windows.Forms.Form
+    $dlg = New-ToolkitDialogForm
     $dlg.Text = $(if ($editing) { 'Edit software package - ' + $OriginalId } else { 'Register software - ' + $Detected.File })
     $dlg.Size = New-Object System.Drawing.Size(780, 820); $dlg.StartPosition = 'CenterParent'; $dlg.FormBorderStyle = 'FixedDialog'; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
     $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
@@ -1036,6 +1061,7 @@ function Update-SoftwareFacts {
     if (-not $NoStatus) { Get-ServerStatus -ComputerName $ComputerName | Out-Null }
     Get-ServerInventory -ComputerName $ComputerName | Out-Null
     Get-ServerSoftwareState -ComputerName $ComputerName | Out-Null
+    Get-ServerLicensing -ComputerName $ComputerName | Out-Null   # the licensing models, activation, KMS, RD CALs: the report's licensing sections (47-Licensing.ps1)
 }
 
 function Get-ServerManufacturer {
@@ -1062,12 +1088,14 @@ function Get-SoftwareVerdict {
     # THE decision "what would INSTALL / UPDATE do with this installer file on this server?" (the Software twin of
     # Get-PatchVerdict).  Returns Cell, Go, Mode ('Install' / 'Update' / ''), Reason, Light, Installed, Staged.
     # -Products: the server's rows of Get-SoftwareRows when the caller already has them (a grid of hundreds of servers)
-    param([string]$Server, $PackageFile, [object[]]$Products = $null)
+    # -ForAction: the plan of an install or a stage reads through Get-ActionResult, so a server whose latest check failed is
+    # unreachable here however good the result the grid still shows (the O/S patch plan does the same; review 2026-11-08)
+    param([string]$Server, $PackageFile, [object[]]$Products = $null, [switch]$ForAction)
     $pkg = $PackageFile.Package
     $modes = @($pkg.Modes)
     $cell = 'not checked'; $go = $false; $mode = ''; $reason = 'not checked yet - press Check'; $light = 'Grey'; $have = ''; $staged = $false
-    $inv = Get-CollectorResult -Name 'Inventory' -Server $Server
-    $st = Get-CollectorResult -Name 'SoftwareState' -Server $Server
+    if ($ForAction) { $inv = Get-ActionResult -Name 'Inventory' -Server $Server; $st = Get-ActionResult -Name 'SoftwareState' -Server $Server }
+    else { $inv = Get-CollectorResult -Name 'Inventory' -Server $Server; $st = Get-CollectorResult -Name 'SoftwareState' -Server $Server }
     if ($inv -and -not $inv.Reachable) { $cell = '?'; $reason = 'unreachable: ' + $inv.Error }
     elseif ($inv) {
         $best = $null
@@ -1274,7 +1302,7 @@ function Show-SoftwareLibrary {
     $script:Gui['LibMax'] = $max
     $script:Gui['LibRows'] = $rows
     $script:Gui['LibTicks'] = @{}; foreach ($r in $rows) { if ($r.Shown) { $script:Gui['LibTicks'][$r.Package] = $true } }
-    $dlg = New-Object System.Windows.Forms.Form
+    $dlg = New-ToolkitDialogForm
     $dlg.Text = ('Software library - {0} package(s) in the catalogue, {1} with an installer file ({2} file(s))' -f $rows.Count, @(Get-SoftwarePackageIds).Count, @($script:SoftwareFiles).Count)   # the button counts the ones with a file
     $dlg.Size = New-Object System.Drawing.Size(1100, 640); $dlg.StartPosition = 'CenterParent'; $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9); $dlg.MinimizeBox = $false
     $top = New-Object System.Windows.Forms.Panel; $top.Dock = 'Top'; $top.Height = 86
@@ -2017,7 +2045,7 @@ function New-SoftwarePlan {
     $plan = New-Object System.Collections.Generic.List[object]   # 500 servers x 20 files: never += in a loop
     foreach ($c in $ComputerName) {
         foreach ($f in $Files) {
-            $v = Get-SoftwareVerdict -Server $c -PackageFile $f
+            $v = Get-SoftwareVerdict -Server $c -PackageFile $f -ForAction
             $plan.Add([pscustomobject]@{ Computer = $c; Id = $f.Id; Name = $f.Name; Version = $f.Version; From = $v.Installed; File = $f; Mode = $v.Mode; Go = $v.Go; Staged = $v.Staged; Reason = $v.Reason; Cell = $v.Cell })
         }
     }
@@ -2038,7 +2066,8 @@ function Install-SoftwareOnServers {
     # the pre-action confirmations, a re-check; then per server the locked staging folder, the verified copy and the run.
     param([Parameter(Mandatory = $true)][string[]]$ComputerName, [Parameter(Mandatory = $true)][object[]]$Files, [switch]$StageOnly)
     $action = 'Software install'; if ($StageOnly) { $action = 'Software stage' }
-    $targets = @(Get-UniqueNames $ComputerName)
+    $targets = @(Remove-RemoteDisabledServers -Names @(Get-UniqueNames $ComputerName) -Action $action)
+    if ($targets.Count -eq 0) { $null = Show-PatcherMessage -Text "Every ticked server is marked 'winrm: no' in its group file: nothing is sent to such a server. Install from its own console (Start-WinRMToolkit.ps1 -Spoke on the server)." -Icon 'Warning'; return @() }
     $twice = @($Files | Group-Object Id | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
     if ($twice.Count -gt 0) { $null = Show-PatcherMessage -Text ("Tick one version per package - more than one is ticked for: {0}" -f ($twice -join ', ')) -Icon 'Warning'; return @() }
     $blocked = @($Files | Where-Object { $_.Blocked })
@@ -2167,8 +2196,9 @@ function Get-UninstallPlan {
     param([object[]]$Rows)
     $plan = @()
     foreach ($row in $Rows) {
-        # no fresh inventory (the server did not answer the pre-flight) is not "gone": said as such
-        $invRow = Get-CollectorResult -Name 'Inventory' -Server $row.Server
+        # no fresh inventory (the server did not answer the pre-flight) is not "gone": said as such - an inventory whose latest
+        # read failed counts as not read here, whatever the grid still shows of it
+        $invRow = Get-ActionResult -Name 'Inventory' -Server $row.Server
         if (-not $invRow -or -not $invRow.Reachable) { $plan += [pscustomobject]@{ Server = $row.Server; Product = $row.Product; Version = $row.Version; KeyName = $row.KeyName; Hive = [string]$row.Hive; Go = $false; Method = ''; Use = ''; Reason = ('inventory not read: ' + $(if ($invRow) { [string]$invRow.Error } else { 'not checked' })); MayRestart = $false; Location = '' }; continue }
         $fresh = @(Get-SoftwareRows -Servers @($row.Server) | Where-Object { $_.Product -eq $row.Product -and [string]$_.KeyName -eq [string]$row.KeyName -and (-not [string]$row.Hive -or [string]$_.Hive -eq [string]$row.Hive) })[0]
         if (-not $fresh) { $plan += [pscustomobject]@{ Server = $row.Server; Product = $row.Product; Version = $row.Version; KeyName = $row.KeyName; Hive = [string]$row.Hive; Go = $false; Method = ''; Use = ''; Reason = 'no longer installed (fresh inventory)'; MayRestart = $false; Location = '' }; continue }
@@ -2183,7 +2213,9 @@ function Uninstall-SoftwareOnServers {
     # confirmation for the removal itself, a re-check, then the run (no copy - the server uninstalls from its own registry).
     param([Parameter(Mandatory = $true)][object[]]$Rows)
     $action = 'Software removal'
-    $servers = @(Get-UniqueNames ($Rows | ForEach-Object { $_.Server }))
+    $servers = @(Remove-RemoteDisabledServers -Names @(Get-UniqueNames ($Rows | ForEach-Object { $_.Server })) -Action $action)
+    if ($servers.Count -eq 0) { $null = Show-PatcherMessage -Text "Every ticked product is on a server marked 'winrm: no' in its group file: nothing is sent to such a server. Remove it from the server's own console (Start-WinRMToolkit.ps1 -Spoke)." -Icon 'Warning'; return @() }
+    $Rows = @($Rows | Where-Object { $servers -contains $_.Server })
     $who = Get-OperatorIdentity
     Write-PatchLog ("=== SOFTWARE REMOVAL REQUESTED by {0}: {1} product(s) on {2} ===" -f $who, $Rows.Count, ($servers -join ', ')) 'INFO'
     Update-SoftwareFacts -ComputerName $servers
@@ -2427,12 +2459,11 @@ function Update-SoftwareServerGrid {
     $summaryCol = ($libFiles.Count -gt $colFiles.Count)
     # All packages, then the package columns, right after WinRM: they are the point of the tab and must be visible at the
     # default width - All packages first, so six wide package columns never push it out of view
-    $columns = @(@{ Name = 'Server'; Width = 170 }, @{ Name = 'Group'; Width = 100 }, @{ Name = 'WinRM'; Width = 60 })
+    $columns = @(@{ Name = 'Server'; Width = 170 }, @{ Name = 'Group'; Width = 100 }, @{ Name = 'WinRM'; Width = 60 }, @{ Name = 'Last checked'; Width = 105 })
     if ($summaryCol) { $columns += @{ Name = 'All packages'; Width = 190 } }
     foreach ($f in $colFiles) { $columns += @{ Name = $f.Id; Width = 210 } }
-    $columns += @(@{ Name = 'Hardware'; Width = 150 }, @{ Name = 'Pending reboot'; Width = 140 }, @{ Name = 'Trellix Agent'; Width = 130 }, @{ Name = 'Staged'; Width = 60 }, @{ Name = 'Toolkit task'; Width = 160 }, @{ Name = 'Products'; Width = 70 })
+    $columns += @(@{ Name = 'Hardware'; Width = 150 }, @{ Name = 'Pending reboot'; Width = 140 }, @{ Name = 'Trellix Agent'; Width = 130 }, @{ Name = 'Staged'; Width = 60 }, @{ Name = 'Toolkit task'; Width = 160 }, @{ Name = 'Products'; Width = 70; Fill = $true })
     if (-not (Test-TrellixInUse)) { $columns = @($columns | Where-Object { $_.Name -ne 'Trellix Agent' }) }   # Settings tab: Trellix not used here
-    $columns += @{ Name = 'Checked at'; Width = 80; Fill = $true }
     $sig = (($columns | ForEach-Object { $_.Name }) -join '|')
     if ($script:Gui['SoftwareGridColumns'] -ne $sig) { Set-GridColumns -Grid $lv -Columns $columns; $script:Gui['SoftwareGridColumns'] = $sig }
     # every server's product rows in one call (Get-SoftwareRows keeps them indexed by server), not one call per cell
@@ -2444,14 +2475,26 @@ function Update-SoftwareServerGrid {
         $s = $script:ServerStatus[$name]
         $inv = Get-CollectorResult -Name 'Inventory' -Server $name
         $st = Get-CollectorResult -Name 'SoftwareState' -Server $name
-        $o = [ordered]@{ Server = $name; Group = $gr.Group; WinRM = ''; Hardware = ''; 'Pending reboot' = ''; 'Trellix Agent' = ''; Staged = ''; 'Toolkit task' = ''; Products = ''; 'Checked at' = ''; Colour = 'White'; Tip = ''; Cells = @{} }
+        $o = [ordered]@{ Server = $name; Group = $gr.Group; WinRM = ''; 'Last checked' = ''; Hardware = ''; 'Pending reboot' = ''; 'Trellix Agent' = ''; Staged = ''; 'Toolkit task' = ''; Products = ''; Colour = 'White'; Tip = ''; Cells = @{} }
         $anyGo = $false; $allCurrent = ($libFiles.Count -gt 0); $anyCurrent = $false   # green needs a package really in place, not "N/A (hardware)" alone
         $unreachable = (($s -and -not $s.Reachable) -or ($inv -and -not $inv.Reachable))
+        # the OLDEST of the three results this row paints (never fresher than its weakest input): its date in Last checked, the
+        # cell by its age; a row short of one of the three is PARTIAL (Get-ConsoleCoverage, 14-State.ps1)
+        $cov = Get-ConsoleCoverage -Console 'Software' -Server $name
+        $when = [datetime]::MinValue; if ($cov.Checked -is [datetime]) { $when = $cov.Checked }
+        if ($when -gt [datetime]::MinValue) { $o.'Last checked' = Format-LastChecked $when }
+        $offline = Test-RemoteDisabled -Name $name
+        if ($offline -and -not ($s -or $inv -or $st)) { $o.WinRM = 'self-check'; $o.Tip = "marked 'winrm: no' in the group file: never called over WinRM - run the self-check on the server and press Import results (O/S Patching tab)" }
         if ($unreachable) {
             $o.WinRM = 'FAILED'; $o.Colour = 'LightGray'
             $o.Tip = $(if ($s -and -not $s.Reachable) { $s.Error } else { $inv.Error })
         } elseif ($s -or $inv -or $st) {
             $o.WinRM = 'OK'
+            # the latest status or inventory read failed: the row paints the last good ones, the WinRM cell says FAILED in grey
+            $failedNow = Get-ResultFailure $s; if (-not $failedNow) { $failedNow = Get-ResultFailure $inv }
+            if ($failedNow) { $o.WinRM = 'FAILED'; $o.Cells['WinRM'] = 'LightGray'; $o.Tip = 'LATEST CHECK FAILED: ' + $failedNow + ' - the row shows the results of ' + $o.'Last checked' } elseif ($offline) { $o.WinRM = 'self-check' }
+            # another console's check brought the status and the inventory, never the software state: the row says so
+            if (-not $cov.Complete -and -not $failedNow) { $o.WinRM = 'partial'; $o.Cells['WinRM'] = 'LightGray'; $o.Tip = Get-PartialRowText -Coverage $cov -Button 'Check software' }
             $make = Get-ServerManufacturer -Server $name
             if ($make -like 'VMware*') { $o.Hardware = 'VMware VM' } elseif ($make) { $o.Hardware = ($make + ' ' + $(if ($st) { $st.Model } else { '' })).Trim() }
             if ($s -and $s.Reachable) {
@@ -2467,9 +2510,6 @@ function Update-SoftwareServerGrid {
                 if ($tr.Count -gt 0) { $o.'Toolkit task' = (($tr | ForEach-Object { '{0} {1}' -f $_.State, $_.Item }) -join '; ') }
             }
             if ($inv -and $inv.Reachable) { $o.Products = [string]@($inv.Products).Count }
-            $when = [datetime]::MinValue
-            foreach ($x in $s, $inv, $st) { if ($x -and $x.Checked -and $x.Checked -gt $when) { $when = $x.Checked } }
-            if ($when -gt [datetime]::MinValue) { $o.'Checked at' = $when.ToString('HH:mm:ss') }
         }
         $mineRows = @(); $list = $byServer[$name.ToLower()]; if ($list) { $mineRows = $list.ToArray() }
         # every package's verdict (cached until the server is checked again); the columns show the ones chosen
@@ -2488,13 +2528,15 @@ function Update-SoftwareServerGrid {
             $sum = Get-SoftwareSummary -Verdicts $all
             $o['All packages'] = $sum.Text
             if ($sum.Colour) { $o.Cells['All packages'] = $sum.Colour }
-            if ($sum.Todo.Count -gt 0 -and -not $unreachable) { $o.Tip = ('To do: ' + (@($sum.Todo | Select-Object -First 10) -join '; ') + $(if ($sum.Todo.Count -gt 10) { ('; +{0} more' -f ($sum.Todo.Count - 10)) } else { '' })) }
+            if ($sum.Todo.Count -gt 0 -and -not $unreachable) { $o.Tip = (('To do: ' + (@($sum.Todo | Select-Object -First 10) -join '; ') + $(if ($sum.Todo.Count -gt 10) { ('; +{0} more' -f ($sum.Todo.Count - 10)) } else { '' })) + $(if ($o.WinRM -eq 'FAILED') { ' (LATEST CHECK FAILED - the row shows the results of ' + $o.'Last checked' + ')' } elseif ($o.WinRM -eq 'partial') { ' (' + $o.Tip + ')' } else { '' })) }
         }
         if (-not $unreachable) {
             if ($o.'Toolkit task' -like '*Running*') { $o.Colour = 'LightCyan' }
             elseif ($anyGo) { $o.Colour = 'LemonChiffon' }
             elseif ($inv -and $allCurrent -and $anyCurrent) { $o.Colour = 'Honeydew' }
         } else { $o.Cells = @{} }   # a grey row stays grey
+        if ($when -gt [datetime]::MinValue) { $o.Cells['Last checked'] = Get-ResultAgeColour $when }   # on a grey row too: the age is the point
+        if ($offline) { $o.Cells['Server'] = 'LightGray' }   # never called over WinRM (winrm: no): the name cell grey, in every console
         $rows.Add([pscustomobject]$o)
     }
     $script:Gui['SoftwareRebuilding'] = $true
@@ -2518,8 +2560,9 @@ function Get-SoftwareInvKey {
 }
 
 function Update-SoftwareInventoryGrid {
-    # The products of the ticked servers (else every server shown).  By default only what needs attention (Behind,
-    # Stale, Ageing, End of life, dormant); "Show all products" lists everything.  Capped at MaxSoftwareGridRows.
+    # The products of the ticked servers (else every server shown).  Every product while "Show all products" is ticked
+    # (it is at start); unticked, only what needs attention (Behind, Stale, Ageing, End of life, dormant).  Capped at
+    # MaxSoftwareGridRows.
     $grid = $script:Gui['SoftwareInvGrid']
     if (-not $grid) { return }
     $servers = @(Get-GridChecked -Grid $script:Gui['SoftwareServerGrid']); $scope = ('{0} ticked server(s)' -f $servers.Count)
@@ -2619,16 +2662,17 @@ function Show-SoftwareDetails {
 
 function Get-SoftwareHelpHtml {
     $sections = @()
-    $mock = New-MockGrid -TrellixColumns -Headers @('Server', 'Group', 'WinRM', 'All packages', 'VMwareTools', 'Google Chrome', 'Hardware', 'Pending reboot', 'Trellix Agent', 'Staged', 'Toolkit task', 'Products', 'Checked at') -Rows @(
-        @{ Colour = 'white'; Cells = @('server-a', 'Group-1', '', 'not checked', 'not checked', 'not checked', '', '', '', '', '', '', '') },
-        @{ Colour = 'lightgray'; Cells = @('server-b', 'Group-1', 'FAILED', '?', '?', '?', '', '', '', '', '', '', '') },
-        @{ Colour = 'lemonchiffon'; CellColours = @{ 5 = 'palegreen' }; Cells = @('server-c', 'Group-2', 'OK', '2 to do (1 UPDATE, 1 INSTALL)', 'UPDATE -> 12.5.0.24276846 (staged)', 'Installed 156.0.8078.48', 'VMware VM', 'YES: CBS:RebootPending', 'Running (Auto)', '1', '', '84', '10:02:11') },
-        @{ Colour = 'lightcyan'; CellColours = @{ 5 = 'palegreen'; 8 = 'navajowhite' }; Cells = @('server-d', 'Group-2', 'OK', '1 to do (1 UPDATE)', 'Task running', 'Installed 156.0.8078.48', 'VMware VM', 'no', 'STOPPED (Disabled)', '1', 'Running VMware Tools 12.5.0.24276846 (Update)', '79', '10:02:12') },
-        @{ Colour = 'honeydew'; CellColours = @{ 3 = 'palegreen'; 4 = 'palegreen'; 5 = 'palegreen'; 8 = 'navajowhite' }; Cells = @('server-e', 'Group-3', 'OK', '12 of 12 current', 'Installed 12.5.0.24276846', 'Newer 157.0.1.2', 'VMware VM', 'YES: software: VMware Tools 12.5.0.24276846 (Update) (exit 3010)', 'STOPPED (Disabled)', '0', '', '91', '10:02:12') },
-        @{ Colour = 'lemonchiffon'; CellColours = @{ 5 = 'palegreen' }; Cells = @('server-f', 'Group-3', 'OK', '1 to do (1 INSTALL)', 'N/A (hardware)', 'Installed 156.0.8078.48', 'HPE ProLiant DL380 Gen10', 'no', 'Running (Auto)', '0', '', '120', '10:02:13') })
+    $mock = New-MockGrid -TrellixColumns -Headers @('Server', 'Group', 'WinRM', 'Last checked', 'All packages', 'VMwareTools', 'Google Chrome', 'Hardware', 'Pending reboot', 'Trellix Agent', 'Staged', 'Toolkit task', 'Products') -Rows @(
+        @{ Colour = 'white'; Cells = @('server-a', 'Group-1', '', '', 'not checked', 'not checked', 'not checked', '', '', '', '', '', '') },
+        @{ Colour = 'lightgray'; CellColours = @{ 3 = 'palegreen' }; Cells = @('server-b', 'Group-1', 'FAILED', '2026-11-05 10:02', '?', '?', '?', '', '', '', '', '', '') },
+        @{ Colour = 'lemonchiffon'; CellColours = @{ 3 = 'palegreen'; 6 = 'palegreen' }; Cells = @('server-c', 'Group-2', 'OK', '2026-11-05 10:02', '2 to do (1 UPDATE, 1 INSTALL)', 'UPDATE -> 12.5.0.24276846 (staged)', 'Installed 156.0.8078.48', 'VMware VM', 'YES: CBS:RebootPending', 'Running (Auto)', '1', '', '84') },
+        @{ Colour = 'lightcyan'; CellColours = @{ 3 = 'palegreen'; 6 = 'palegreen'; 9 = 'navajowhite' }; Cells = @('server-d', 'Group-2', 'OK', '2026-11-05 10:02', '1 to do (1 UPDATE)', 'Task running', 'Installed 156.0.8078.48', 'VMware VM', 'no', 'STOPPED (Disabled)', '1', 'Running VMware Tools 12.5.0.24276846 (Update)', '79') },
+        @{ Colour = 'honeydew'; CellColours = @{ 2 = 'lightgray'; 3 = 'khaki'; 4 = 'palegreen'; 5 = 'palegreen'; 6 = 'palegreen'; 9 = 'navajowhite' }; Cells = @('server-e', 'Group-3', 'FAILED', '2026-11-03 16:40', '12 of 12 current', 'Installed 12.5.0.24276846', 'Newer 157.0.1.2', 'VMware VM', 'YES: software: VMware Tools 12.5.0.24276846 (Update) (exit 3010)', 'STOPPED (Disabled)', '0', '', '91') },
+        @{ Colour = 'lemonchiffon'; CellColours = @{ 3 = 'lightcoral'; 6 = 'palegreen' }; Cells = @('server-f', 'Group-3', 'self-check', '2026-10-28 06:00', '1 to do (1 INSTALL)', 'N/A (hardware)', 'Installed 156.0.8078.48', 'HPE ProLiant DL380 Gen10', 'no', 'Running (Auto)', '0', '', '120') })
     $rows = New-HelpTable -TrellixRows -Headers @('Row colour', 'It means') -Rows @(
         @((Get-HelpSwatch 'white' 'White'), 'Not checked yet, or nothing to do and not everything current.'),
         @((Get-HelpSwatch 'lightgray' 'Grey'), 'WinRM gave no answer or refused the login (hover for the reason).'),
+        @((Get-HelpCell 'partial' 'lightgray'), 'The WinRM cell only: another console''s check brought the status and the inventory, never the software state. The row shows what it has and claims nothing more - press Check software.'),
         @((Get-HelpSwatch 'lemonchiffon' 'Yellow'), 'At least one package - shown as a column or not - would INSTALL or UPDATE (hover the row for the list).'),
         @((Get-HelpSwatch 'lightcyan' 'Light blue'), 'A toolkit task is running on the server right now.'),
         @((Get-HelpSwatch 'honeydew' 'Green'), 'Every package that applies is at or above the file''s version.'),
@@ -2662,7 +2706,7 @@ function Get-SoftwareHelpHtml {
         @((Get-HelpCell 'SOE' 'gainsboro'), 'Removal: never - the server''s SOE standard requires it (a required software or agent item).'))) }
     $sections += @{ Heading = 'The buttons'; Note = ('Blue asks the servers (read-only). {0} change a server; STAGE ONLY (steel blue) copies files onto the servers without installing; green saves on this PC; grey works on this PC only.' -f $(if (Test-TrellixInUse) { 'Red, coral, khaki and the two wheat-coloured Trellix Agent buttons' } else { 'Red, coral and khaki' })); Html = (New-HelpTable -TrellixRows -Headers @('Button', 'What it does', 'Warnings before anything changes') -Rows @(
         @(((Get-HelpButton 'Check software (ticked)' 'lightskyblue') + ' ' + (Get-HelpButton 'Check software (all shown)' 'lightskyblue')), 'Status, inventory and the software state (hardware, staged files, toolkit tasks, the server''s change record). A server whose Trellix Agent services are stopped is named in a warning.', 'none - read-only, works during an install'),
-        @(('<span class="btn">&#9745; Stop the Trellix Agent services first</span>'), 'A tick box above STAGE ONLY, on by default (StopTrellixAgentForInstall on the Settings tab). Ticked: right after the re-check, INSTALL / UPDATE sets the two Trellix Agent services (masvc, macmnsvc) to Disabled and stops them on each server, under the install''s change record, before anything is copied - the field test (October 2026) saw installs fail and roll back with the agent running. A server where that fails is not installed; untick the box to install with the agent running. STAGE ONLY and UNINSTALL never touch the services.', 'part of INSTALL / UPDATE'),
+        @(('<span class="btn">&#9745; Stop the Trellix Agent services first</span>'), 'A tick box above STAGE ONLY, off by default (StopTrellixAgentForInstall on the Settings tab; tick it where the agent blocks installs). Ticked: right after the re-check, INSTALL / UPDATE sets the two Trellix Agent services (masvc, macmnsvc) to Disabled and stops them on each server, under the install''s change record, before anything is copied - the field test (October 2026) saw installs fail and roll back with the agent running. A server where that fails is not installed; untick the box to install with the agent running. STAGE ONLY and UNINSTALL never touch the services.', 'part of INSTALL / UPDATE'),
         @((Get-HelpButton 'STAGE ONLY  (ticked installers, ticked servers)' 'lightsteelblue'), 'Copies the ticked installers to C:\PatchStaging\software on the ticked servers and verifies them. Nothing is installed.', 'the plan'),
         @((Get-HelpButton 'INSTALL / UPDATE  (ticked installers, ticked servers)' 'tomato'), 'Fresh check, then the ticked installers on the ticked servers, the reboot suppressed.', 'the plan, the change record, the pre-action confirmations (Settings tab), a re-check'),
         @((Get-HelpButton 'UNINSTALL (ticked products)' 'lightcoral'), 'Removes the products ticked in the inventory list.', 'the plan, the change record, the pre-action confirmations (Settings tab), a last confirmation naming every product, a re-check'),
@@ -2673,7 +2717,8 @@ function Get-SoftwareHelpHtml {
         @((Get-HelpButton 'Edit...'), 'Next to each installer in the installer list: its package in the same form, filled from the entry. Save changes rewrites only that entry in data\software-packages.psd1 (its comments and any field the form does not show are kept).', 'none - nothing touches a server'),
         @((Get-HelpButton 'Change log'), 'Every install, removal and reboot this tool made, with its change record (changes\change-log.csv).', 'none'),
         @((Get-HelpButton 'Where do I get software?'), 'Download and silent-install notes, VMware Tools first.', 'none'),
-        @((Get-HelpButton 'Report (HTML + CSV)'), 'reports\Software-<date>.html and .csv: package verdicts, removal candidates, the change log.', 'none'))) }
+        @((Get-HelpButton 'Report (HTML + CSV)'), 'reports\Software-<date>.html and .csv: package verdicts, removal candidates, every installed product, the server inventory, the licensing models, totals and servers, the change log. The HTML prints to PDF from the browser.', 'none'),
+        @((Get-HelpButton 'Licensing (shown)'), 'The licensing of the servers shown as a page: the models (Windows Server per core or per processor, Standard''s two VMs per core set, the per-VM option, SQL Server per core or Server + CAL, Exchange, RDS CALs, Office), the totals, one row per server. Check software collects it.', 'works'))) }
     $sections += @{ Heading = 'What happens on the server'; Lines = @(
         'The run script checks, once: no toolkit task running, nothing servicing (dism, busy TiWorker, Windows Update), Windows Installer idle, enough free disk.',
         'Then per item: the staged file''s SHA256 and signer again, the hardware again, the installed version again - then the command line is built from software-packages.psd1 and queued as a one-shot SYSTEM task in \WinRMToolkit\.',
@@ -2687,6 +2732,7 @@ function Export-SoftwareReport {
     $servers = @(Get-GridAllKeys -Grid $script:Gui['SoftwareServerGrid'])
     # lists, not +=: 500 servers x 20 packages plus their removal candidates is tens of thousands of rows
     $summary = New-Object System.Collections.Generic.List[object]; $verdicts = New-Object System.Collections.Generic.List[object]; $removal = New-Object System.Collections.Generic.List[object]
+    $inventory = New-Object System.Collections.Generic.List[object]; $facts = New-Object System.Collections.Generic.List[object]
     # every package of the library, not only the ones shown as columns: the report is the record
     $files = @(Get-SoftwareLibraryFiles)
     $null = Get-SoftwareRows -Servers $servers
@@ -2707,6 +2753,10 @@ function Export-SoftwareReport {
         if ($st -and -not $st.Reachable) { $light = 'Grey'; $state = 'unreachable: ' + $st.Error }
         $sum = Get-SoftwareSummary -Verdicts $mine
         $summary.Add([pscustomobject]@{ Server = $name; Light = $light; State = $state; Hardware = (Get-ServerManufacturer -Server $name); Staged = $(if ($st -and $st.Reachable) { @($st.Staged).Count } else { '' }); Packages = $sum.Text; 'To do' = ($sum.Todo -join '; ') })
+        # every product of the server - the report is the inventory too (owner's ask 2026-11-06) - and the server's facts
+        $sv = $script:ServerStatus[$name]; $inv = Get-CollectorResult -Name 'Inventory' -Server $name
+        foreach ($r in $mineRows) { $inventory.Add([pscustomobject]@{ Server = $name; Product = $r.Product; Version = $r.Version; Publisher = $r.Publisher; Installed = $r.Installed; Verdict = $r.Verdict; Use = (Get-ProductUse -Row $r); Reason = $r.Reason; Light = $r.Light }) }
+        $facts.Add([pscustomobject]@{ Server = $name; OS = $(if ($sv -and $sv.Reachable) { Get-ShortOsName $sv.Caption } else { '' }); Build = $(if ($sv -and $sv.Reachable) { [string]$sv.Build } else { '' }); '.NET' = $(if ($inv -and $inv.Reachable) { [string]$inv.NetFramework } else { '' }); 'SQL Server' = $(if ($inv -and $inv.Reachable) { @($inv.SqlInstances) -join '; ' } else { '' }); Exchange = $(if ($inv -and $inv.Reachable) { [string]$inv.Exchange } else { '' }); 'Roles and features' = $(if ($inv -and $inv.Reachable) { Get-RoleSummary -Inventory $inv -Full } else { '' }); Products = $mineRows.Count })
         foreach ($r in $mineRows) {
             $use = Get-ProductUse -Row $r
             if ($use -ne 'dormant' -and $r.Verdict -notin 'Ageing', 'End of life') { continue }
@@ -2714,12 +2764,19 @@ function Export-SoftwareReport {
             $removal.Add([pscustomobject]@{ Server = $name; Product = $r.Product; Version = $r.Version; Installed = $r.Installed; Verdict = $r.Verdict; Use = $use; Removal = $rv.Cell; Reason = $rv.Reason; Light = $r.Light })
         }
     }
-    $summary = @($summary.ToArray()); $verdicts = @($verdicts.ToArray()); $removal = @($removal.ToArray())
+    $summary = @($summary.ToArray()); $verdicts = @($verdicts.ToArray()); $removal = @($removal.ToArray()); $inventory = @($inventory.ToArray()); $facts = @($facts.ToArray())
     $log = @(Get-ChangeLogRows | Where-Object { $label = ([string]$_.Server -split '\.')[0]; @($servers | Where-Object { ($_ -split '\.')[0] -ieq $label }).Count -gt 0 })
     $notes = @(('Installer files: ' + ((@($script:SoftwareFiles) | ForEach-Object { "$($_.Id) $($_.Version)$(if ($_.Blocked) { ' [blocked]' })" }) -join ', ')), ('Catalogue: data\software-packages.psd1 as of ' + (Get-SoftwareCatalogue).AsOf))
     return (Export-ConsoleReport -Console 'Software' -Title 'Software report' -Summary $summary -SummaryColumns @('Server', 'Light', 'State', 'Hardware', 'Staged', 'Packages', 'To do') -Notes $notes -Sections @(
         @{ Name = 'Package verdicts'; Rows = $verdicts; Columns = @('Server', 'Package', 'Version', 'Installed', 'Verdict', 'Reason', 'File', 'Light') },
         @{ Name = 'Removal candidates (dormant, ageing, end of life)'; Rows = $removal; Columns = @('Server', 'Product', 'Version', 'Installed', 'Verdict', 'Use', 'Removal', 'Reason', 'Light') },
+        @{ Name = 'Installed software (every product)'; Rows = $inventory; Columns = @('Server', 'Product', 'Version', 'Publisher', 'Installed', 'Verdict', 'Use', 'Reason', 'Light') },
+        @{ Name = 'Server inventory'; Rows = $facts; Columns = @('Server', 'OS', 'Build', '.NET', 'SQL Server', 'Exchange', 'Roles and features', 'Products') },
+        @{ Name = 'Licensing models'; Rows = @(Get-LicensingModelRows -Servers $servers); Columns = $script:LicensingModelColumns },
+        @{ Name = 'Licensing totals'; Rows = @(Get-LicensingTotals -Servers $servers); Columns = @('Item', 'Count', 'Detail') },
+        @{ Name = 'Licensing by server'; Rows = @(Get-LicensingRows -Servers $servers); Columns = $script:LicensingColumns },
+        @{ Name = $script:LicensingRulesHeading; Groups = $script:LicensingRules },
+        @{ Name = 'Licensing references (Microsoft)'; Rows = @($script:LicensingReferences | ForEach-Object { $f = [string]$_ -split ': https', 2; [pscustomobject]@{ Document = $f[0]; Link = $(if ($f.Count -gt 1) { 'https' + $f[1] } else { [string]$_ }) } }); Columns = @('Document', 'Link') },
         @{ Name = 'Change log'; Rows = $log; Columns = $script:ChangeLogColumns }))
 }
 
@@ -2754,7 +2811,8 @@ function New-SoftwareConsole {
     $script:Gui['Tips'].SetToolTip($filter, 'Part of a product, publisher or server name (plain text)')
     $filter.Add_TextChanged({ Start-SoftwareInventoryRefresh })
     $invAll = New-Object System.Windows.Forms.CheckBox; $invAll.Text = 'Show all products'; $invAll.AutoSize = $true; $invAll.Location = New-Object System.Drawing.Point(285, 6)
-    $script:Gui['Tips'].SetToolTip($invAll, 'Unticked: only products needing attention (Behind, Stale, Ageing, End of life) or dormant. Ticked: every product.')
+    $invAll.Checked = $true   # every product at start (owner's ask 2026-11-06); untick for only the products needing attention
+    $script:Gui['Tips'].SetToolTip($invAll, 'Ticked (at start): every product. Unticked: only products needing attention (Behind, Stale, Ageing, End of life) or dormant.')
     $invAll.Add_CheckedChanged({ Update-SoftwareInventoryGrid })
     $strip.Controls.AddRange(@($fl, $filter, $invAll))   # no colour key on the panel: the heading's tool tip and the Help page carry it
     $invGrid = New-ConsoleGrid -Columns @(@{ Name = 'Server'; Width = 150 }, @{ Name = 'Product'; Width = 280 }, @{ Name = 'Version'; Width = 105 }, @{ Name = 'Publisher'; Width = 150 }, @{ Name = 'Installed'; Width = 80 }, @{ Name = 'Verdict'; Width = 80 }, @{ Name = 'Use'; Width = 150 }, @{ Name = 'Removal'; Width = 85 }, @{ Name = 'Reason'; Width = 380; Fill = $true })
@@ -2882,6 +2940,11 @@ function New-SoftwareConsole {
         Invoke-GuiAction -Name 'Open log' -ReadOnly -Action {
             if (-not (Test-Path -LiteralPath (Get-PatchLogPath))) { Write-PatchLog 'Log file created' 'INFO' }
             Start-Process notepad.exe -ArgumentList ('"{0}"' -f (Get-PatchLogPath)) } }))
+    $right.Controls.Add((New-GuiButton -Text 'Licensing (shown)' -X 10 -Y 484 -W 195 -H 30 -ReadOnly -Tip 'The licensing models, activation, KMS, RD Licensing CALs and RD Session Hosts of the servers shown, with the totals, as a page (Check software collects it).' -OnClick {
+        Invoke-GuiAction -Name 'Licensing' -ReadOnly -Action {
+            if (-not (Test-GuiDialogAllowed -What 'Licensing')) { return }
+            Show-DetailsWindow -Title 'Licensing' -Html (Get-LicensingReportHtml -Servers @(Get-GridAllKeys -Grid $script:Gui['SoftwareServerGrid']))
+        } }))
     $right.Controls.Add((New-GuiButton -Text 'Help' -X 210 -Y 484 -W 195 -H 30 -ReadOnly -Tip 'A page with an example of every row colour, cell and button' -OnClick {
         Invoke-GuiAction -Name 'Software help' -ReadOnly -Action { Show-ConsoleHelp -Console 'Software' -Html (Get-SoftwareHelpHtml) } }))
     # no explainer text on the panel: the Help page has every colour and step with an example, the tool tips the rest

@@ -58,6 +58,7 @@ function Get-ComplianceClass {
         'NotApplicable' { return 'Excluded' }
         'NotAssessable' { return 'Excluded' }
         'Error' { return 'NotRead' }
+        'NotCollected' { return 'NotRead' }   # the collector was never asked on this server: not a gap, not compliant
         'Warn' { if (Test-UnreadEvidence -Evidence $Row.Evidence) { return 'NotRead' }; return 'NonCompliant' }
         'Fail' { return 'NonCompliant' }
     }
@@ -303,7 +304,7 @@ function Get-ComplianceExecutiveHtml {
     }
     $facts = @(@('Scope', $Scope), @('Servers audited', ('{0} of {1}' -f $audited.Count, $Servers.Count)))
     if ($groupRows.Count -gt 0) { $facts += , @('Groups', [string]$groupRows.Count) }
-    $facts += @(@('Network classification', [string]$prof.classification), @('Essential Eight target', ('Maturity Level {0}' -f $f.Target)), @('Audited', $when), @('Prepared by', (Get-OperatorIdentity)))
+    $facts += @(@('Network classification', [string]$prof.classification), @('Essential Eight target', ('Maturity Level {0}' -f $f.Target)), @('ISM release', (Get-IsmRelease)), @('Audited', $when), @('Prepared by', (Get-OperatorIdentity)))
     # on screen only: how to make the PDF (the hint is not printed)
     $sections = @(@{ Heading = ''; Html = '<style>@page{size:A4 portrait}</style><div class="hint noprint">To keep or send this report as a PDF: Print (Ctrl+P) and choose Save as PDF or Microsoft Print to PDF - the pages are laid out for A4 portrait. The charts and colours are part of the page; if they do not print, tick "Background graphics" in the print settings.</div>' })
     # ---- 1. at a glance: the two charts and the headline in words ----

@@ -71,12 +71,14 @@ function NotAssessable { param([string]$Evidence = '', [string[]]$Items = @()) r
 
 function Get-LightForVerdict {
     # Default light mapping (the Security console overrides it with the profile and tailoring):
-    #   Fail = Red, Warn = Amber, Pass = Green, Error = Amber (a broken check must stay visible), else Grey
+    #   Fail = Red, Warn = Amber, Pass = Green, Error = Amber (a broken check must stay visible), NotCollected = Grey (the
+    #   collector was never asked on this server), else Grey
     param([string]$Verdict)
     switch ($Verdict) {
         'Fail' { return 'Red' }
         'Warn' { return 'Amber' }
         'Error' { return 'Amber' }
+        'NotCollected' { return 'Grey' }
         'Pass' { return 'Green' }
         default { return 'Grey' }
     }
@@ -105,8 +107,8 @@ function Invoke-Checks {
     # Check = the check being run (so a data-driven test can read its own definition from $c.Check.Data).
     # Tests are plain script blocks on purpose: a closure (GetNewClosure) runs in its own module scope and
     # cannot see the toolkit's functions, so a check must get what it needs through $c instead.
-    $c = [pscustomobject]@{ Server = $Server; Status = $null; Inventory = $null; Health = $null; Agents = $null; Settings = $null; SecurityPolicy = $null; Gpo = $null; Impact = $null; S = @{}; Check = $null }
-    foreach ($name in 'Status', 'Inventory', 'Health', 'Agents', 'Settings', 'SecurityPolicy', 'Gpo', 'Impact') {
+    $c = [pscustomobject]@{ Server = $Server; Status = $null; Inventory = $null; Health = $null; Agents = $null; Settings = $null; SecurityPolicy = $null; Gpo = $null; Impact = $null; Licensing = $null; S = @{}; Check = $null }
+    foreach ($name in 'Status', 'Inventory', 'Health', 'Agents', 'Settings', 'SecurityPolicy', 'Gpo', 'Impact', 'Licensing') {
         $c.$name = Get-CollectorResult -Name $name -Server $Server
     }
     $sets = @()
@@ -126,9 +128,16 @@ function Invoke-Checks {
         $c.Check = $chk
         $missing = @($chk.Needs | Where-Object { $r = $c.$_; (-not $r) -or (-not $r.Reachable) })
         if ($missing.Count -gt 0) {
-            $evidence = "collector not available: " + ($missing -join ', ')
-            $r0 = $c.($missing[0])
-            if ($r0 -and $r0.Error) { $evidence += " ($($r0.Error))" }
+            $never = @($missing | Where-Object { -not $c.$_ })
+            if ($never.Count -eq $missing.Count) {
+                # never asked on this server (another console's check filled the rest of the table): no verdict and grey -
+                # not a finding, not an amber error (2026-11-06); a collector that ran and was refused stays Error below
+                $verdict = 'NotCollected'; $evidence = 'not collected yet: ' + ($never -join ', ')
+            } else {
+                $evidence = "collector not available: " + ($missing -join ', ')
+                $r0 = $c.($missing[0])
+                if ($r0 -and $r0.Error) { $evidence += " ($($r0.Error))" }
+            }
         } elseif ($chk.Applies -eq 'dc' -and -not $isDc) {
             $verdict = 'NotApplicable'; $evidence = 'not a domain controller'
         } elseif ($chk.Applies -eq 'member' -and $isDc) {

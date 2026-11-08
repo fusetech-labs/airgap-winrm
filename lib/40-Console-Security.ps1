@@ -45,10 +45,32 @@ function Get-IsmCatalogue {
     if (-not $script:IsmCatalogue -or -not [object]::ReferenceEquals($script:IsmCatalogueSource, $d)) {
         $script:IsmCatalogue = @{}
         $script:IsmCatalogueSource = $d
-        if ($d) { foreach ($c in $d.Controls) { $script:IsmCatalogue[$c.Id] = $c }; $script:IsmCatalogueInfo = "$($d.Count) controls, generated $($d.Generated)" }
-        else { $script:IsmCatalogueInfo = 'no catalogue - data\ism-catalogue.psd1 is missing' }
+        if ($d) {
+            foreach ($c in $d.Controls) { $script:IsmCatalogue[$c.Id] = $c }
+            # the ISM release the controls come from: the catalogue's Release, else read off its Source ("... (September 2026).xlsx")
+            $rel = ''
+            try { if ($d -is [hashtable]) { if ($d.ContainsKey('Release')) { $rel = [string]$d['Release'] } } elseif ($d.PSObject.Properties['Release']) { $rel = [string]$d.Release } } catch { $rel = '' }
+            if (-not $rel -and [string]$d.Source -match '\(([A-Za-z]+ \d{4})\)') { $rel = $Matches[1] }
+            if (-not $rel) { $rel = 'unknown release' }
+            $script:IsmRelease = $rel
+            $script:IsmCatalogueInfo = "ISM release $rel ($($d.Count) controls, catalogue generated $($d.Generated))"
+        } else { $script:IsmRelease = 'no catalogue'; $script:IsmCatalogueInfo = 'no catalogue - data\ism-catalogue.psd1 is missing' }
     }
     return $script:IsmCatalogue
+}
+
+function Get-IsmRelease {
+    # The ISM release the catalogue - and so every Security check - is modelled on ("September 2026").  Named on the
+    # console, the pages and every security report (owner's ask 2026-11-09): a new ISM release means a new catalogue and
+    # code updates for the checks it adds or changes, and the reader must know which release a rating was made against.
+    $null = Get-IsmCatalogue
+    return [string]$script:IsmRelease
+}
+
+function Get-IsmCatalogueInfo {
+    # "ISM release September 2026 (1143 controls, catalogue generated 2026-10-19)" - the long form, for the reports
+    $null = Get-IsmCatalogue
+    return [string]$script:IsmCatalogueInfo
 }
 
 function Get-IsmText {
@@ -154,18 +176,33 @@ function New-TailoringRule {
 function Get-TailoringRules {
     # Rules that apply to one check on one server: scope 'all', 'group:<name>' or 'server:<name>'.
     # Most specific first (server, then group, then all), so a server's own rule wins over a fleet-wide one.
-    param([string]$Id, [string]$Server)
     # A server in more than one group gets the rules of each of its groups.
-    $byServer = @(); $byGroup = @(); $byAll = @()
-    $groupNames = @(foreach ($sg in @(Get-ServerGroups -Name $Server)) { [string]$sg.Name })
-    foreach ($r in @((Get-SecurityTailoring).rules)) {
-        if ([string]$r.check -ne $Id) { continue }
-        $scope = [string]$r.scope
-        if (-not $scope -or $scope -eq 'all') { $byAll += $r; continue }
-        if ($scope -match '^group:(.+)$' -and @($groupNames) -contains $Matches[1]) { $byGroup += $r; continue }
-        if ($scope -match '^server:(.+)$' -and $Server -ieq $Matches[1]) { $byServer += $r; continue }
+    # The server's rules are sorted into an index once and kept in the check-row cache under "Tailoring|<server>", so it
+    # goes whenever the server's rows go (a new audit, a profile, tailoring, data-file or group change): every check row,
+    # every settings row and every expected value asks for them - a pass over every rule each time was most of a cold row.
+    param([string]$Id, [string]$Server)
+    if (-not $script:CheckRowCache) { $script:CheckRowCache = @{} }
+    $key = 'Tailoring|' + $Server
+    $idx = $script:CheckRowCache[$key]
+    if (-not $idx) {
+        $idx = @{}
+        $groupNames = @(foreach ($sg in @(Get-ServerGroups -Name $Server)) { [string]$sg.Name })
+        foreach ($r in @((Get-SecurityTailoring).rules)) {
+            $chk = [string]$r.check; if (-not $chk) { continue }
+            $scope = [string]$r.scope
+            $rank = -1   # 0 = the server's own rule, 1 = one of its groups', 2 = everyone's: most specific first
+            if (-not $scope -or $scope -eq 'all') { $rank = 2 }
+            elseif ($scope -match '^group:(.+)$') { if (@($groupNames) -contains $Matches[1]) { $rank = 1 } }
+            elseif ($scope -match '^server:(.+)$') { if ($Server -ieq $Matches[1]) { $rank = 0 } }
+            if ($rank -lt 0) { continue }
+            if (-not $idx.ContainsKey($chk)) { $idx[$chk] = @{ 0 = (New-Object System.Collections.Generic.List[object]); 1 = (New-Object System.Collections.Generic.List[object]); 2 = (New-Object System.Collections.Generic.List[object]) } }
+            $idx[$chk][$rank].Add($r)
+        }
+        $script:CheckRowCache[$key] = $idx
     }
-    return @($byServer + $byGroup + $byAll)
+    if (-not $idx.ContainsKey($Id)) { return @() }
+    $e = $idx[$Id]
+    return @($e[0].ToArray() + $e[1].ToArray() + $e[2].ToArray())
 }
 
 function Test-TailoringOverdue {
@@ -242,6 +279,7 @@ function Invoke-SecurityAudit {
     Get-ServerSettings -ComputerName $ComputerName | Out-Null
     Get-ServerSecurityPolicy -ComputerName $ComputerName | Out-Null
     Get-ServerGpo -ComputerName $ComputerName | Out-Null   # which GPO sets what: the GPO recommendations page (45-Security-Gpo.ps1)
+    Get-ServerLicensing -ComputerName $ComputerName | Out-Null   # activation, KMS, RD Licensing CALs, RD Session Hosts: the SEC-LIC checks (47-Licensing.ps1; reported by the Software console)
     Clear-SecurityRowCache
 }
 
@@ -615,12 +653,20 @@ foreach ($na in @(
 # ---------------------------------------------------------------------
 #  Resolver: profile applicability, tailoring, lights
 # ---------------------------------------------------------------------
-function Resolve-SecurityRow {
-    param($Row)
-    if (-not $Row.PSObject.Properties['Tailoring']) { $Row | Add-Member -NotePropertyName Tailoring -NotePropertyValue '' }
+function Get-SecurityResolveContext {
+    # What Resolve-SecurityRow reads for every row - the profile, its classification column, the ISM catalogue - fetched
+    # once per server by Get-SecurityRows: three function calls per row x 122 rows x every server was a third of a cold repaint
     $prof = Get-SecurityProfile
-    $col = Get-ClassificationColumn -Classification ([string]$prof.classification)
-    $cat = Get-IsmCatalogue
+    return @{ Profile = $prof; Column = (Get-ClassificationColumn -Classification ([string]$prof.classification)); Catalogue = (Get-IsmCatalogue) }
+}
+
+function Resolve-SecurityRow {
+    param($Row, [hashtable]$Context = $null)   # $Context from Get-SecurityResolveContext; fetched here when a caller has none
+    if (-not $Row.PSObject.Properties['Tailoring']) { $Row | Add-Member -NotePropertyName Tailoring -NotePropertyValue '' }
+    if (-not $Context) { $Context = Get-SecurityResolveContext }
+    $prof = $Context.Profile
+    $col = $Context.Column
+    $cat = $Context.Catalogue
     if ($Row.Ism -and $Row.Verdict -ne 'Error') {
         $ids = @($Row.Ism -split ' ' | Where-Object { $_ })
         $known = $false; $applies = $false
@@ -670,13 +716,16 @@ function Get-SecurityRows {
     # All Security check rows for one server.  The three views and the report each ask for the same rows,
     # so they are kept until the next audit, refresh, or profile / tailoring change clears the cache.
     param([string]$Server)
-    return (Get-CheckRows -Console 'Security' -Server $Server -Resolve { param($r) Resolve-SecurityRow -Row $r })
+    $ctx = Get-SecurityResolveContext   # once per server, not per row; the block below finds it up the call stack
+    return (Get-CheckRows -Console 'Security' -Server $Server -Resolve { param($r) Resolve-SecurityRow -Row $r -Context $ctx })
 }
 
 function Test-SecurityCollected {
+    # An audit is on record when the settings were read AND the security policy collector has a result (Get-ConsoleCoverage):
+    # a Health check collects Settings too, and that alone is not an audit (field finding 2026-11-06)
     param([string]$Server)
     $s = Get-CollectorResult -Name 'Settings' -Server $Server
-    return ($s -and $s.Reachable)
+    return ([bool]($s -and $s.Reachable -and (Get-ConsoleCoverage -Console 'Security' -Server $Server).Complete))
 }
 
 function Get-TailoringSummary {
@@ -698,16 +747,26 @@ function Get-SecuritySummaryRows {
     foreach ($name in $Servers) {
         $gname = (@(foreach ($sg in @(Get-ServerGroups -Name $name)) { [string]$sg.Name }) -join ', ')   # every group it is in
         $set = Get-CollectorResult -Name 'Settings' -Server $name
-        if (-not $set) { $rows += [pscustomobject]@{ Server = $name; Group = $gname; Class = (Get-ServerClass -Name $name); Light = 'Grey'; Checked = ''; Red = ''; Amber = ''; Green = ''; Grey = ''; 'Pass rate' = ''; Tailoring = ''; 'Top red' = 'not audited' }; continue }
-        if (-not $set.Reachable) { $rows += [pscustomobject]@{ Server = $name; Group = $gname; Class = (Get-ServerClass -Name $name); Light = 'Grey'; Checked = $set.Checked.ToString('HH:mm:ss'); Red = ''; Amber = ''; Green = ''; Grey = ''; 'Pass rate' = ''; Tailoring = ''; 'Top red' = 'unreachable: ' + $set.Error }; continue }
+        $notAudited = 'not audited'; if (Test-RemoteDisabled -Name $name) { $notAudited = "not audited - marked 'winrm: no': import its self-check results (O/S Patching tab)" }
+        if (-not $set) { $rows += [pscustomobject]@{ Server = $name; Group = $gname; Class = (Get-ServerClass -Name $name); Light = 'Grey'; 'Last checked' = ''; Red = ''; Amber = ''; Green = ''; Grey = ''; 'Pass rate' = ''; Tailoring = ''; 'Top red' = $notAudited; Cells = @{} }; continue }
+        if (-not $set.Reachable) { $rows += [pscustomobject]@{ Server = $name; Group = $gname; Class = (Get-ServerClass -Name $name); Light = 'Grey'; 'Last checked' = (Format-LastChecked $set.Checked); Red = ''; Amber = ''; Green = ''; Grey = ''; 'Pass rate' = ''; Tailoring = ''; 'Top red' = 'unreachable: ' + $set.Error; Cells = @{ 'Last checked' = (Get-ResultAgeColour $set.Checked) } }; continue }
+        # a Health check collects Settings too: without the security policy the row is PARTIAL - grey, no counts, no pass rate
+        $cov = Get-ConsoleCoverage -Console 'Security' -Server $name
+        if (-not $cov.Complete) { $rows += [pscustomobject]@{ Server = $name; Group = $gname; Class = (Get-ServerClass -Name $name); Light = 'Grey'; 'Last checked' = (Format-LastChecked $cov.Checked); Red = ''; Amber = ''; Green = ''; Grey = ''; 'Pass rate' = ''; Tailoring = ''; 'Top red' = (Get-PartialRowText -Coverage $cov -Button 'Security audit'); Cells = @{ 'Last checked' = 'LightGray' } }; continue }
         $checks = Get-SecurityRows -Server $name
         $c = Get-LightCounts -Rows $checks
         $assessable = $c.Red + $c.Amber + $c.Green
         $score = ''; if ($assessable -gt 0) { $score = [string][int][math]::Floor(100.0 * $c.Green / $assessable) + '%' }   # rounded down, as the compliance figures are
         $top = @($checks | Where-Object { $_.Light -eq 'Red' } | Select-Object -First 3 | ForEach-Object { $_.Title })
         $tail = Get-TailoringSummary -Rows $checks
-        $rows += [pscustomobject]@{ Server = $name; Group = $gname; Class = (Get-ServerClass -Name $name); Light = (Get-WorstLight -Rows $checks); Checked = $set.Checked.ToString('HH:mm:ss'); Red = $c.Red; Amber = $c.Amber; Green = $c.Green; Grey = $c.Grey; 'Pass rate' = $score; Tailoring = $tail; 'Top red' = ($top -join '; ') }
+        # the Last checked cell by its age; an audit whose latest attempt failed paints the last good one and says so first (14-State.ps1)
+        $failedNow = Get-ResultFailure $set
+        if ($failedNow) { $top = @(('LATEST AUDIT FAILED at ' + (Format-LastChecked $set.LastAttempt) + ': ' + $failedNow + ' - the row shows the audit of ' + (Format-LastChecked $set.Checked))) + @($top) }
+        # Last checked = the oldest of the collectors the audit reads (Settings, SecurityPolicy): never fresher than its weakest input
+        $rows += [pscustomobject]@{ Server = $name; Group = $gname; Class = (Get-ServerClass -Name $name); Light = (Get-WorstLight -Rows $checks); 'Last checked' = (Format-LastChecked $cov.Checked); Red = $c.Red; Amber = $c.Amber; Green = $c.Green; Grey = $c.Grey; 'Pass rate' = $score; Tailoring = $tail; 'Top red' = ($top -join '; '); Cells = @{ 'Last checked' = (Get-ResultAgeColour $cov.Checked) } }
     }
+    # a server never called over WinRM (winrm: no): its name cell grey, in every console
+    foreach ($r in $rows) { if (Test-RemoteDisabled -Name $r.Server) { $r.Cells['Server'] = 'LightGray' } }
     return $rows
 }
 
@@ -715,11 +774,14 @@ function Get-SecurityControlRows {
     # One row per check across the audited servers.
     param([string[]]$Servers)
     $audited = @($Servers | Where-Object { Test-SecurityCollected -Server $_ })
-    $all = @()
-    foreach ($s in $audited) { $all += Get-SecurityRows -Server $s }
+    # every audited server's rows, indexed by check once: 122 checks x a pipeline over 600 rows was a second of every repaint
+    $byId = @{}
+    foreach ($s in $audited) {
+        foreach ($r in (Get-SecurityRows -Server $s)) { $id = [string]$r.Id; if (-not $byId.ContainsKey($id)) { $byId[$id] = New-Object System.Collections.Generic.List[object] }; $byId[$id].Add($r) }
+    }
     $rows = @()
     foreach ($chk in (Get-Checks -Console 'Security')) {
-        $mine = @($all | Where-Object { $_.Id -eq $chk.Id })
+        $mine = @(); if ($byId.ContainsKey([string]$chk.Id)) { $mine = $byId[[string]$chk.Id].ToArray() }
         $c = Get-LightCounts -Rows $mine
         $redServers = @($mine | Where-Object { $_.Light -eq 'Red' } | ForEach-Object { $_.Server })
         $light = 'Grey'; if ($c.Red -gt 0) { $light = 'Red' } elseif ($c.Amber -gt 0) { $light = 'Amber' } elseif ($c.Green -gt 0) { $light = 'Green' }
@@ -732,6 +794,8 @@ function Get-SecuritySettingsRows {
     # Raw values next to the expected ones, for the Settings view and the report.
     param([string[]]$Servers)
     $table = Get-SecuritySettingsTable
+    # the table's expected value depends on the classification, not the server: worked out once per setting, not per cell
+    $defs = @(foreach ($d in @($table.Settings)) { @{ Def = $d; Base = (Get-ExpectedForClassification -Def $d) } })
     $rows = @()
     foreach ($server in $Servers) {
         if (-not (Test-SecurityCollected -Server $server)) { continue }
@@ -742,11 +806,12 @@ function Get-SecuritySettingsRows {
         if ($sets.Count -gt 0) { $values = ConvertTo-SettingsTable -LineSets $sets }
         $verdicts = @{}
         foreach ($r in (Get-SecurityRows -Server $server)) { $verdicts[$r.Id] = $r }
-        foreach ($d in @($table.Settings)) {
+        foreach ($x in $defs) {
+            $d = $x.Def
             $actual = '(not collected)'
             if ($values.ContainsKey($d.Key)) { $actual = [string]$values[$d.Key] } elseif ($d.Key -like 'Right:*' -and $b -and $b.Reachable -and @($b.Errors).Count -eq 0) { $actual = '(no account holds it)' }
             $v = $verdicts[$d.Id]
-            $base = Get-ExpectedForClassification -Def $d
+            $base = [string]$x.Base
             $tailored = Get-TailoredExpected -Id $d.Id -Server $server -Default $base
             $exp = "$($d.Op) $base"; if ($tailored -ne $base) { $exp = "$($d.Op) $tailored (tailored)" }
             $rows += [pscustomobject]@{ Server = $server; Key = $d.Key; Actual = $actual; Expected = $exp; Check = $d.Id; Verdict = $(if ($v) { $v.Verdict } else { '' }); Light = $(if ($v) { $v.Light } else { 'Grey' }); Tailoring = $(if ($v) { [string]$v.Tailoring } else { '' }); Note = $(if ($v) { [string]$v.Note } else { '' }) }
@@ -759,7 +824,7 @@ function Get-SecurityDetailsHtml {
     # The double-click page for one server: one table per control group, the ISM wording under every red or amber row.
     param([string]$Server)
     $prof = Get-SecurityProfile
-    $facts = @(@('Profile', [string]$prof.classification), @('Essential Eight target', "ML$($prof.maturityTarget)"), @('Server class', $(if (Get-ServerClass -Name $Server) { Get-ServerClass -Name $Server } else { 'member' })))
+    $facts = @(@('Profile', [string]$prof.classification), @('Essential Eight target', "ML$($prof.maturityTarget)"), @('Server class', $(if (Get-ServerClass -Name $Server) { Get-ServerClass -Name $Server } else { 'member' })), @('ISM release', (Get-IsmRelease)))
     if (-not (Test-SecurityCollected -Server $Server)) { return (New-DetailsHtml -Title "Security audit: $Server" -Console 'Security' -Subtitle 'not audited yet (or unreachable) - press AUDIT' -Facts $facts) }
     $rows = Get-SecurityRows -Server $Server
     $c = Get-LightCounts -Rows $rows
@@ -776,6 +841,7 @@ function Get-SecurityDetailsHtml {
     }
     $gpoGaps = @(Get-GpoGapRows -Server $Server | Where-Object { $_.Gap })
     if ($gpoGaps.Count -gt 0) { $sections += @{ Heading = 'GPO recommendations'; Rows = $gpoGaps; Columns = @('Impact', 'Id', 'Title', 'Status', 'Now', 'Gpo', 'Value', 'Found', 'Note'); Note = 'The settings above that Group Policy does not set (or sets weaker, or does not enforce): the value now, the recommended GPO and value, and whether applying it would be felt on this server - Impact found (red), Check first (amber), No impact found / expected (blue), Not checked (grey). The whole picture is on the GPO recommendations page.' } }
+    $sections += @(Get-LicensingDetailSections -Server $Server -Short)   # activation, KMS, CALs, RDSH (47-Licensing.ps1)
     $sp = Get-CollectorResult -Name 'SecurityPolicy' -Server $Server
     if ($sp -and $sp.Reachable -and @($sp.Errors).Count -gt 0) { $sections += @{ Heading = 'Policy collector errors'; Lines = @($sp.Errors); Note = 'auditpol and secedit need an administrator on the server; rows that depend on them show Amber with this reason.' } }
     return (New-DetailsHtml -Title "Security audit: $Server" -Subtitle 'every control with its evidence, the fix and the ISM wording' -Console 'Security' -Facts $facts -Sections $sections)
@@ -786,7 +852,7 @@ function Get-ControlDetailsHtml {
     param([string]$Id, [string[]]$Servers)
     $chk = Get-Checks -Console 'Security' | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
     if (-not $chk) { return (New-DetailsHtml -Title "Control $Id" -Console 'Security' -Subtitle 'unknown check') }
-    $facts = @(@('ISM', ($chk.Ism -join ' ')), @('Essential Eight level', $(if ($chk.ML -gt 0) { "ML$($chk.ML)" } else { 'not an Essential Eight control' })), @('Severity', $chk.Severity), @('Group', $chk.Group), @('Collectors needed', ($chk.Needs -join ', ')), @('Applies to', $chk.Applies))
+    $facts = @(@('ISM', ($chk.Ism -join ' ')), @('ISM release', (Get-IsmRelease)), @('Essential Eight level', $(if ($chk.ML -gt 0) { "ML$($chk.ML)" } else { 'not an Essential Eight control' })), @('Severity', $chk.Severity), @('Group', $chk.Group), @('Collectors needed', ($chk.Needs -join ', ')), @('Applies to', $chk.Applies))
     $ismLines = @(); foreach ($ref in @($chk.Ism)) { $t = Get-IsmText -Id $ref; if ($t) { $ismLines += "$ref - $t" } }   # not $id: that is the parameter
     $perServer = @()
     foreach ($s in $Servers) {
@@ -816,7 +882,7 @@ function Export-SecurityReport {
     $notes = @(
         ("Security profile: classification $($prof.classification), Essential Eight maturity target ML$($prof.maturityTarget); internet-facing servers: " + ($(if (@(Get-InternetFacingServers).Count -gt 0) { @(Get-InternetFacingServers) -join ', ' } else { 'none (tick them on the Security profile tab)' }))),
         "Lights: Red = Fail inside the maturity target or Severity High; Amber = other Fail, Warn, overdue acceptance; Green = Pass; Grey = not applicable, not assessable or risk accepted.",
-        "ISM catalogue: $($script:IsmCatalogueInfo). Expected settings table as of $((Get-SecuritySettingsTable).AsOf).")
+        "Checks modelled on the $(Get-IsmCatalogueInfo). Expected settings table as of $((Get-SecuritySettingsTable).AsOf).")
     return (Export-ConsoleReport -Console 'Security' -Title 'Security audit report (ISM)' -Summary $summary -SummaryColumns @('Server', 'Group', 'Class', 'Light', 'Red', 'Amber', 'Green', 'Grey', 'Pass rate', 'Tailoring', 'Top red') -Notes $notes -Sections @(
         @{ Name = 'By server'; Rows = $byServer; Columns = @('Server', 'Id', 'Group', 'Title', 'Ism', 'ML', 'Severity', 'Verdict', 'Light', 'Tailoring', 'Evidence', 'Note', 'Fix') },
         @{ Name = 'By control'; Rows = $byControl; Columns = @('Id', 'Group', 'Title', 'ISM', 'ML', 'Severity', 'Light', 'Red', 'Amber', 'Green', 'Grey', 'Servers red') },
@@ -830,7 +896,7 @@ function Export-SecurityReport {
 # ---------------------------------------------------------------------
 function Show-TailoringRuleEditor {
     param($Rule)
-    $dlg = New-Object System.Windows.Forms.Form
+    $dlg = New-ToolkitDialogForm
     $dlg.Text = 'Tailoring rule (a recorded risk decision)'; $dlg.Size = New-Object System.Drawing.Size(640, 412); $dlg.StartPosition = 'CenterParent'; $dlg.FormBorderStyle = 'FixedDialog'; $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
     $y = 14
     $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = 'Check:'; $lbl.Location = New-Object System.Drawing.Point(12, $y); $lbl.AutoSize = $true
@@ -1044,7 +1110,7 @@ function Update-SecurityProfilePage {
     $ifs = @(Get-InternetFacingServers)
     $state = 'not saved yet - the defaults apply (PROTECTED, ML2) until you press Save settings'
     if ($fileStamp) { $state = 'saved ' + (Get-Item -LiteralPath $path).LastWriteTime.ToString('yyyy-MM-dd HH:mm') }
-    $script:Gui['SecProfileStatus'].Text = ('In force: classification {0}, Essential Eight target ML{1} (security\profile.json {2}).  Internet-facing: {3}.' -f $prof.classification, $prof.maturityTarget, $state, $(if ($ifs.Count -gt 0) { $ifs -join ', ' } else { 'no server' }))
+    $script:Gui['SecProfileStatus'].Text = ('In force: classification {0}, Essential Eight target ML{1} (security\profile.json {2}).  Internet-facing: {3}.  Checks modelled on the {4}.' -f $prof.classification, $prof.maturityTarget, $state, $(if ($ifs.Count -gt 0) { $ifs -join ', ' } else { 'no server' }), (Get-IsmCatalogueInfo))
 }
 
 function Update-SecurityGrids {
@@ -1052,9 +1118,9 @@ function Update-SecurityGrids {
     if (-not $grid) { return }
     $servers = @(Get-UniqueNames (Get-GroupRows -Combo $script:Gui['SecurityGroupCombo'] | ForEach-Object { $_.Server }))
     $rows = @(Get-SecuritySummaryRows -Servers $servers)
-    Set-GridRows -Grid $grid -Rows $rows -RowColour { param($r) Get-LightColour $r.Light } -ToolTipProperty 'Top red'
+    Set-GridRows -Grid $grid -Rows $rows -RowColour { param($r) Get-LightColour $r.Light } -ToolTipProperty 'Top red' -CellColourProperty 'Cells'
     $prof = Get-SecurityProfile
-    $script:Gui['SecurityCount'].Text = ('{0} server(s): {1} red, {2} amber, {3} green  |  profile {4}, target ML{5}' -f $rows.Count, @($rows | Where-Object { $_.Light -eq 'Red' }).Count, @($rows | Where-Object { $_.Light -eq 'Amber' }).Count, @($rows | Where-Object { $_.Light -eq 'Green' }).Count, $prof.classification, $prof.maturityTarget)
+    $script:Gui['SecurityCount'].Text = ('{0} server(s): {1} red, {2} amber, {3} green  |  profile {4}, target ML{5}  |  checks modelled on the ISM of {6}' -f $rows.Count, @($rows | Where-Object { $_.Light -eq 'Red' }).Count, @($rows | Where-Object { $_.Light -eq 'Amber' }).Count, @($rows | Where-Object { $_.Light -eq 'Green' }).Count, $prof.classification, $prof.maturityTarget, (Get-IsmRelease))
     Set-GridRows -Grid $script:Gui['SecurityControlGrid'] -Rows @(Get-SecurityControlRows -Servers $servers) -RowColour { param($r) Get-LightColour $r.Light } -ToolTipProperty 'Servers red' -NoKeepChecks
     Update-SecurityConfigServers -Servers $servers
     Update-SecurityGpoGrid -Servers $servers
@@ -1093,7 +1159,8 @@ function New-SecurityConsole {
     New-SecurityGpoPage -Page $pageGpo   # 45-Security-Gpo.ps1
 
     # ---- Servers page ----
-    $grid = New-ConsoleGrid -Columns @(@{ Name = 'Server'; Width = 180 }, @{ Name = 'Group'; Width = 100 }, @{ Name = 'Class'; Width = 95 }, @{ Name = 'Light'; Width = 55 }, @{ Name = 'Checked'; Width = 70 }, @{ Name = 'Red'; Width = 40 }, @{ Name = 'Amber'; Width = 50 }, @{ Name = 'Green'; Width = 50 }, @{ Name = 'Grey'; Width = 45 }, @{ Name = 'Pass rate'; Width = 65 }, @{ Name = 'Tailoring'; Width = 210 }, @{ Name = 'Top red'; Width = 420; Fill = $true })
+    # no Light column (the row colour says it) and no Class column (the class is on the server's page and in the reports) - owner's ask 2026-11-06
+    $grid = New-ConsoleGrid -Columns @(@{ Name = 'Server'; Width = 180 }, @{ Name = 'Group'; Width = 100 }, @{ Name = 'Last checked'; Width = 105 }, @{ Name = 'Red'; Width = 40 }, @{ Name = 'Amber'; Width = 50 }, @{ Name = 'Green'; Width = 50 }, @{ Name = 'Grey'; Width = 45 }, @{ Name = 'Pass rate'; Width = 65 }, @{ Name = 'Tailoring'; Width = 210 }, @{ Name = 'Top red'; Width = 420; Fill = $true })
     $grid.Add_DoubleClick({   # $this = the grid; a local such as $grid is gone by the time the event fires
         if ($script:Gui['Busy']) { Write-PatchLog 'Busy - details are available again when the current action finishes' 'WARN'; return }
         if ($this.SelectedItems.Count -gt 0) { $n = $this.SelectedItems[0].Text; Show-DetailsWindow -Title "Security audit: $n" -Html (Get-SecurityDetailsHtml -Server $n) }
@@ -1117,7 +1184,7 @@ function New-SecurityConsole {
     $toolbar = New-ConsoleToolbar -Tab $pageServers
     $combo = New-GroupPicker -Toolbar $toolbar -OnChange { Update-SecurityGrids }
     $script:Gui['SecurityGroupCombo'] = $combo
-    $toolbar.Controls.Add((New-GuiButton -Text 'AUDIT (ticked or all)' -X 235 -Y 8 -W 170 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Status + Inventory + Agents + Settings + SecurityPolicy (auditpol, secedit) + Group Policy collectors. Read-only, needs admin on the servers. The impact checks of the GPO recommendations run from that page (Check impact).' -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'AUDIT (ticked or all)' -X 235 -Y 8 -W 170 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Status + Inventory + Agents + Settings + SecurityPolicy (auditpol, secedit) + Group Policy + Licensing collectors. Read-only, needs admin on the servers. The impact checks of the GPO recommendations run from that page (Check impact).' -OnClick {
         Invoke-GuiAction -Name 'Security audit' -ReadOnly -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['SecurityGrid'])
             if ($servers.Count -eq 0) { $servers = @(Get-GridAllKeys -Grid $script:Gui['SecurityGrid']) }
@@ -1240,7 +1307,7 @@ function New-SecurityConsole {
     $tbar.Controls.Add((New-GuiButton -Text 'Reload from file' -X 425 -Y 8 -W 120 -ReadOnly -OnClick { Invoke-GuiAction -Name 'Reload tailoring' -ReadOnly -Action { Clear-JsonCache } }))
     $tgrid.BringToFront()
 
-    $null = New-ConsoleBanner -Tab $tab -Console 'Security' -Title 'SECURITY CONSOLE' -Subtitle 'ISM audit - audit policy, local security policy, hardening - profile, tailoring, traffic lights - read-only'
+    $script:Gui['SecurityBanner'] = New-ConsoleBanner -Tab $tab -Console 'Security' -Title 'SECURITY CONSOLE' -Subtitle ('ISM audit, modelled on the ISM of {0} - audit policy, local security policy, hardening - profile, tailoring, traffic lights - read-only' -f (Get-IsmRelease))
     $pages.BringToFront()
     Register-ConsoleRefresher -Console 'Security' -Refresh { Update-SecurityGrids }
 }

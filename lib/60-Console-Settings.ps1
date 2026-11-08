@@ -77,6 +77,7 @@ function Set-SettingsForm {
             $ctl = $script:Gui['SettingControls'][$key]; $v = $Values[$key]
             if ($ctl -is [System.Windows.Forms.CheckBox]) { $ctl.Checked = [bool]$v }
             elseif ($ctl -is [System.Windows.Forms.NumericUpDown]) { $ctl.Value = [decimal]([math]::Max([double]$ctl.Minimum, [math]::Min([double]$ctl.Maximum, [double]$v))) }
+            elseif ([string]$ctl.Tag -eq 'list') { $ctl.Text = (@($v) -join '; ') }   # a list setting: items between semicolons
             else { $ctl.Text = [string]$v }
         }
     } finally { $script:Gui['SettingsFilling'] = $false }
@@ -129,6 +130,7 @@ function Get-SettingsFormValues {
         $ctl = $script:Gui['SettingControls'][$key]
         if ($ctl -is [System.Windows.Forms.CheckBox]) { $v[$key] = $ctl.Checked }
         elseif ($ctl -is [System.Windows.Forms.NumericUpDown]) { $v[$key] = [int]$ctl.Value }
+        elseif ([string]$ctl.Tag -eq 'list') { $v[$key] = @(([string]$ctl.Text) -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
         else { $v[$key] = [string]$ctl.Text }
     }
     return $v
@@ -235,6 +237,7 @@ function Add-SettingRows {
         # the row carries a short label; the longer explanation (a spec's Tip) goes in the tool tip, so nothing wraps or is cut
         $tipText = ('{0}  ({1} in lib\01-Config.ps1)' -f $s.Label, $s.Key)
         if ($s.Tip) { $tipText = ('{0}  ({1} in lib\01-Config.ps1)' -f $s.Tip, $s.Key) }
+        if ($s.Type -eq 'list' -and ($i % 2) -eq 1) { $i++ }   # a list setting takes a row of its own: a wide box for its items
         $x = 10 + ($i % 2) * $colW; $y = $Top + [math]::Floor($i / 2) * 30
         if ($s.Type -eq 'bool') {
             $c = New-Object System.Windows.Forms.CheckBox
@@ -255,14 +258,24 @@ function Add-SettingRows {
                 $c.Add_TextChanged({ Set-SettingsDirty })
             }
             $c.Location = New-Object System.Drawing.Point(($x + $colW - 135), $y); $c.Width = 115
+            if ($s.Type -eq 'list') { $c.Tag = 'list'; $c.MaxLength = 0; $l.Size = New-Object System.Drawing.Size(330, 20); $c.Location = New-Object System.Drawing.Point(($x + 340), $y); $c.Width = ($colW * 2) - 355 }   # MaxLen is per item (the validator); the box holds them all
         }
         $c.Font = $regular
         $script:Gui['Tips'].SetToolTip($c, $tipText)
         $Box.Controls.Add($c)
         $script:Gui['SettingControls'][$s.Key] = $c
+        if ($s.Type -eq 'list') { $i++ }   # the whole row
         $i++
     }
-    return ($Top + [math]::Ceiling(@($Specs).Count / 2) * 30)
+    return ($Top + [math]::Ceiling($i / 2) * 30)
+}
+
+function Get-SettingRowSlots {
+    # How many half-rows a set of specs takes in Add-SettingRows (a list setting takes a full row of its own)
+    param([object[]]$Specs)
+    $i = 0
+    foreach ($s in @($Specs)) { if ($s.Type -eq 'list') { if (($i % 2) -eq 1) { $i++ }; $i += 2 } else { $i++ } }
+    return $i
 }
 
 function New-SettingsGrid {
@@ -343,9 +356,9 @@ function New-SettingsConsole {
 
     # ---- 3 to 5: the simple values, two to a line ----
     $y = 608
-    foreach ($sec in @(@('Log', 'The running log and the log files'), @('Safety', 'Warnings and safety limits'), @('Software', 'The Software console'), @('Commands', 'The Commands console'), @('Health', 'Health warning thresholds (Health console)'), @('Security', 'The Security console: GPO recommendations'))) {
+    foreach ($sec in @(@('Log', 'The running log and the log files'), @('Results', 'Saved results: every console remembers its last check'), @('Safety', 'Warnings and safety limits'), @('Software', 'The Software console'), @('Commands', 'The Commands console'), @('Health', 'Health warning thresholds (Health console)'), @('Security', 'The Security console: GPO recommendations'))) {
         $specs = @($script:SettingSpecs | Where-Object { $_.Section -eq $sec[0] })
-        $box = New-SettingsBox -Body $body -Title $sec[1] -Y $y -Height (26 + [math]::Ceiling($specs.Count / 2) * 30 + 8)
+        $box = New-SettingsBox -Body $body -Title $sec[1] -Y $y -Height (26 + [math]::Ceiling((Get-SettingRowSlots -Specs $specs) / 2) * 30 + 8)
         $null = Add-SettingRows -Box $box -Specs $specs
         $y += $box.Height + 10
     }

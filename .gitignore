@@ -25,6 +25,10 @@ PatchGroup-*.txt
 # Reports contain host names, account names and findings
 reports/
 
+# Saved results (one file per server: every collector's last result), the copy written for a server without WinRM
+# and the spoke's settings: host names, account names, findings, site paths
+state/
+
 # Code-signing requests made on the About tab name your organisation and this PC
 signing/
 
@@ -41,6 +45,13 @@ Build-*.ps1
 tests/
 # the capability brief (brochure.html and the PDF built from it)
 brochure/
+
+# The Download Toolkit (companion\) stays out of this version's repository - it is picked up in a later version;
+# the manifest and checksums it writes beside the WinRM toolkit's patches\ and software\ stay out too
+companion/
+library-manifest.json
+library-manifest.json.part
+CHECKSUMS.txt
 
 # Editor / OS noise
 Thumbs.db

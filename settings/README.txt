@@ -33,4 +33,10 @@ read the result from it.  Written and cleared by the tool; delete it
 only if a server's run is certainly over and the row will not clear
 (a status check or "Analyse a failure" normally does that).
 
+spoke.json (beside it) is written by Start-WinRMToolkit.ps1 -Spoke on a
+server the hub cannot reach over WinRM: the hub folder (the toolkit
+folder of the hub, a share or a copy, holding patches\ and software\)
+and the results folder (where that copy writes its results file).  The
+spoke asks for both at every start and offers these as the answers.
+
 settings\*.json is git-ignored: it describes YOUR environment.

@@ -46,12 +46,15 @@ Settings tab).
 | `lib\11-ChangeLog.ps1` | The change record asked before every change (per the Settings tab), `changes\change-log.csv`, the Change log window. |
 | `lib\12-Settings.ps1` | What the Settings tab may change, checked against its type; `settings\settings.json` laid over the defaults at start-up. |
 | `lib\13-GroupPolicy.ps1` | The Group Policy collector (Health and Security): GPOs applied or filtered, extension results, errors, last refresh, secure channel, which GPO sets which value (RSoP). |
+| `lib\14-State.ps1` | Saved results: every collector's last result per server in `state\servers\`, loaded at the next start; the **Last checked** cell and its age colours; the self-check (`-SelfCheck`) and the spoke (`-Spoke`) for a server the toolkit cannot reach over WinRM; Import results. See Saved results below. |
 | `lib\20-Console-Patching.ps1` | The O/S Patching tab: grid, inventory, software currency, report. |
 | `lib\21-Patching-Analysis.ps1` | The O/S Patching tab's **Analyse a failure**: the server's logs read after a failed install, weighed into findings and a timeline. |
 | `lib\30-Console-Health.ps1` | The Health tab: collectors, eighteen checks, the summary under the grid (processor, memory and disk dials, what needs attention), SOE standards, the Group Policy page. |
+| `lib\31-Health-Scripts.ps1` | The Health tab's **Scripts and tasks (ticked)**: the scheduled tasks and PowerShell scripts of a server, read with a bounded walk and the parser, never run; the Scripts report. |
 | `lib\40-Console-Security.ps1` | The Security tab: audit-policy collector, 118 checks, profile, tailoring, six views. |
 | `lib\45-Security-Gpo.ps1` | The Security tab's GPO recommendations: the impact checks run on the servers, the gap per setting, the GPO plan. |
 | `lib\46-Security-Compliance.ps1` | The Security tab's compliance dashboard (Essential Eight and ISM charts, by group) and the executive summary report. |
+| `lib\47-Licensing.ps1` | The Licensing collector (hardware, OS edition, Windows and Office activation, KMS hosts, RD Licensing CALs, RD Session Host licensing), the licensing models and totals of the Software report and the Licensing page, and the SEC-LIC checks. |
 | `lib\50-Console-Software.ps1` | The Software tab: package vetting, verdicts, staging, install / update / removal as tasks on the server, report. |
 | `lib\60-Console-Settings.ps1` | The Settings tab: confirmations, change records, the running log, thresholds. |
 | `lib\70-Console-About.ps1` | The About tab: version, GitHub link, this copy, the code signature of every script. |
@@ -65,6 +68,7 @@ Settings tab).
 | `soe\*.json` | Your SOE standards (composed in the Health tab, editable in Notepad). Git-ignored. |
 | `security\profile.json`, `security\tailoring.json` | The security profile and the tailoring rules. Git-ignored. |
 | `reports\` | One HTML and one or more CSV files per Report button press. Git-ignored. |
+| `state\servers\` | One `<server>.xml` per server: the last result of every collector, written after each check and shown again at the next start. `state\server-copies\<server>-local-winrm\` are the ready-to-carry copies of the toolkit written for servers marked `winrm: no`. Git-ignored (host names, accounts, findings). |
 | `logs\` | `Patcher-YYYYMMDD.log`, one file per day. Git-ignored. |
 | `signing\` | Code-signing requests made on the About tab (`.req` for your certificate authority, `.txt` saying what to ask for). Git-ignored. |
 | `images\*.png` | The eleven Code Tour pictures, and the screenshots of the consoles shown in this manual (`screen-*.png`). |
@@ -193,8 +197,10 @@ separated by semicolons, and two comment lines set group-wide fallbacks:
 ```
 srv-web01.corp.local; soe: Web tier                      this server is compared with the "Web tier" SOE standard
 srv-dmz01.corp.local; soe: DMZ; class: internet-facing   settings combine; a # comment may follow
+srv-dc01.corp.local; winrm: no                           never called over WinRM: its results come from its own self-check (see Saved results)
 # class: internet-facing      fallback for lines without their own class: the Security console applies the internet-facing rules
 # soe: Web servers            fallback for lines without their own soe: the Health console compares them with that SOE standard
+# winrm: no                   fallback for lines without their own winrm: no server of this file is called over WinRM
 ```
 
 ## O/S Patching console
@@ -221,9 +227,10 @@ file name; the KB number is read from it.
 
 1. Edit `PatchGroup-A.txt` (and B, C) with one server per line. Add more `.txt` files for more groups.
 2. Copy the month's `.msu` files into `patches\Windows\` (and `patches\DotNet\`).
-3. Start the tool. Pick a group in the drop-down, press **Check status (all shown)**. The **Inventory (roles + software)** box
-   on the toolbar is ticked by default, so the same press also fills the Roles and Software columns and the software
-   grid underneath; untick it for a quicker status-only check.
+3. Start the tool. Pick a group in the drop-down, press **Check status (all shown)**. The same press also reads the
+   inventory, so it fills the Roles and Software columns and the software grid underneath. **Clear saved data (ticked)**
+   forgets everything held on this PC for the ticked servers (every console's results and their `state\servers\` file);
+   the servers are not touched and the next check fills the rows again.
 4. Read the grid. Pink rows are pending a reboot and will be skipped. Grey rows did not answer (hover for the reason,
    or press **Test WinRM port (ticked)**). The **Help** button at the foot of the right-hand panel opens a page that
    shows an example of every row colour, column, KB cell and button and what to do about each.
@@ -233,7 +240,7 @@ file name; the KB number is read from it.
    where the install would, and also where only a reboot, servicing or the Solidcore mode blocks the install for now.
 6. Press **PATCH IT!** You get: the plan, the change record, the snapshot question, the Solidcore Update Mode question, then a second status check
    (anything that changed while the pop-ups were open is dropped). With **Stop the Trellix Agent services first** ticked
-   (the default) the two agent services are now set to Disabled and stopped on each server; a server where that fails
+   (it starts unticked) the two agent services are now set to Disabled and stopped on each server; a server where that fails
    is not installed (see The Trellix Agent services below). One patch per server per run by default: the plan
    takes the first ready file and the others wait for the reboot. The file is copied to one server at a time, and
    each server's install starts the moment its copy is verified, as a SYSTEM task on the server, so the installs
@@ -382,7 +389,7 @@ is read, never changed.
   pop-up naming the servers - ePO hears nothing from them until the agent runs again. The Patching report keeps such
   a server off green and says so in its State.
 * **The box.** **Stop the Trellix Agent services first** sits above PATCH IT! and above STAGE ONLY on the Software tab,
-  ticked at start (`StopTrellixAgentForInstall` on the Settings tab; unticking it there is named as a weakening).
+  unticked at start (`StopTrellixAgentForInstall` on the Settings tab: tick it there where the agent blocks installs).
   Ticked, PATCH IT! and INSTALL / UPDATE set the two services to Disabled and stop them on each server right after
   their second status check, under the install's own change record, before anything is copied. A server where that
   fails is not installed and its result row says why (fail closed); untick the box to install with the agent running.
@@ -428,7 +435,7 @@ one's reboot flag. The red and amber findings also go to the running log.
 
 ### Inventory and software currency
 
-**Inventory (roles + software)** is a tick box on the toolbar, on by default: every status check then also reads installed products, roles and features, .NET, SQL Server instances (version,
+**Inventory (roles + software)** rides along with every status check: it reads installed products, roles and features, .NET, SQL Server instances (version,
 patch level, edition), Exchange, services, processes and scheduled tasks. The grid gains Roles and Software columns,
 and the software grid underneath shows every product with a verdict against `data\known-apps.psd1` and the rest of
 the fleet: **Current**, **Behind** (a newer version is known or runs elsewhere), **Stale** (old install, nothing newer
@@ -565,8 +572,9 @@ text names the task to remove by hand (Commands tab) when you cannot wait.
 
 ### Removing software
 
-The bottom list shows the products of the ticked servers, by default only those needing attention (Behind, Stale,
-Ageing, End of life) or **dormant** (installed over `DormantMonths` ago, nothing on the server running from its folder).
+The bottom list shows the products of the ticked servers: every product at start (**Show all products** ticked);
+unticked, only those needing attention (Behind, Stale, Ageing, End of life) or **dormant** (installed over
+`DormantMonths` ago, nothing on the server running from its folder).
 **Use** says what runs from a product's folder; **Removal** says whether the tool may remove it:
 
 | Removal | Meaning |
@@ -596,6 +604,35 @@ still points into the removed product's folder: in the log, in the change log (t
 uninstaller: ...*) and in the pop-up at the end. It deletes nothing itself. A service left like that is also flagged by
 the Health check *Automatic services running* ("its program no longer exists"); remove it with `sc.exe delete <name>`
 under a change record - the Commands tab runs it and records it.
+
+### Licensing
+
+Every software check also collects what the estate is licensed for, read-only: the hardware the licensing models
+count on (sockets, cores, physical or virtual, a Hyper-V host's virtual machines) and the OS edition; the
+activation state of Windows (and Office where installed) and its channel (KMS client, MAK, Active Directory,
+retail, OEM, evaluation) with the KMS host used; on a KMS host the service's counts; on an RD Licensing server
+every CAL key pack (installed, issued, available) and the issued CALs; on an RD Session Host the licensing mode,
+the licence servers and the grace days left. SQL Server and Exchange editions come from the inventory. From that
+the toolkit works out, per server and product, the licensing model that applies and the count it is driven by:
+Windows Server per core (16 per server and 8 per processor at least, 2-core packs; Standard covers two VMs per
+core set, Datacenter unlimited; the per-VM option for virtual machines), Essentials per server, 2012 R2 and
+older per processor; SQL Server per core (4 per processor or VM at least) or Server + CAL by edition; Exchange
+server + CALs; RDS CALs per user or device; Office per device or per Microsoft 365 user; and whether activation
+is volume (KMS, Active Directory, MAK) or direct (retail, OEM). The **Software report** carries three sections:
+the licensing models, the totals of the servers shown (physical and virtual, Hyper-V hosts and VMs, core licences
+needed by product, Windows by state and channel, KMS hosts, RD Licensing servers and every CAL pack summed, RD
+Session Hosts, SQL Server by edition, Exchange) and one row per server; the HTML prints to PDF from the browser.
+**Licensing (shown)** opens the same as a page. The counting rules, checked against Microsoft's Product Terms and
+licensing guides in November 2026, are headed lists of short points (Windows Server, Essentials, CALs, SQL Server,
+Exchange, RDS, KMS, Office, the agreement) in the report, on the page and on a server's page; report and page end
+with the references (Microsoft's pages, not reachable from an air-gapped network): the Windows Server licensing FAQ
+and guide, the virtualization and core
+licensing briefs, the Product Terms for Windows Server, SQL Server and Exchange, the SQL Server 2022 licensing guide,
+the RDS CAL page and the KMS planning page. The agreement decides (Software Assurance, subscriptions, SPLA, licence
+mobility, the Flexible Virtualization Benefit): verify with the reseller before buying or reconciling. The Security audit runs the collector too, for four checks on its Servers grid: SEC-LIC-01 Windows
+activated (a grace period is amber), SEC-LIC-02 RD Session Host licensing configured (red: the 120-day grace ends
+in refused connections), SEC-LIC-03 RD Licensing CALs available, none temporary, licence server activated,
+SEC-LIC-04 KMS host activation threshold reached. Nothing is changed on any server.
 
 ## Change records
 
@@ -662,6 +699,35 @@ Hardware and Speed columns show what each server runs on and how fast one of its
 the last reading next to the fullest disk. After a few checks the Speed column says what the fleet scores: set
 `MinCpuScore` on the Settings tab at the line where patching became too slow (2 vCPUs on a 2 GHz host, scoring well
 under 6, spent a whole patch window at 100% in the field).
+
+### Scripts and scheduled tasks
+
+**Scripts and tasks (ticked)** answers "what runs on this server by itself, from where, and what does it do?" for
+the ticked servers, then writes `reports\Scripts-<date>.html` (and CSV files). On each server, read-only:
+
+* every scheduled task outside `\Microsoft\` and not the OS's own: state, author, the account and run level, each
+  trigger in words, the action, the script it runs (a bare `.ps1`, `powershell -File`, or a batch file followed
+  into the `.ps1` it calls), last run, last result, next run;
+* every `.ps1` and `.psm1` under the folders named on the Settings tab (`ScriptSearchFolders`; empty = every fixed
+  drive), parsed with PowerShell's own parser and never run: its functions, what it does (web requests, Active
+  Directory, SQL, mail, files, services, remoting, credentials, cloud and more, from the commands it calls), the
+  scripts it calls, its `.SYNOPSIS`, its signature;
+* what to look at, in red or amber: a password written in clear (the line is named, never the value), an encoded
+  command, code downloaded or decoded and run, a task that runs a script elevated from a folder every user can write
+  to, a task whose script is missing. A script's folder being writable by every user is noted on its own row without
+  a colour (a data drive's default rights make it common); the task that runs it from there is what lights up.
+
+The walk is bounded so it neither stalls nor runs for ever: every folder is read in its own try (one it cannot read
+is one line in the report, the walk carries on), junctions and symbolic links are never followed, `Windows`,
+`Program Files`, `ProgramData\Microsoft`, `AppData`, the profiles' module folders and the like are skipped by rule
+(`ScriptSearchSkip`), each script is analysed the moment it is found, and the time budget (`ScriptSearchSeconds`,
+60 s per server) ends the walk, after which the report says PARTIAL and what was left (every script listed is
+complete). The result is kept like every collector's and shown on the server's Health page; the button scans afresh
+at every press (a Health check reads only the tasks with a failing last result, never scripts), and a rescan that
+fails keeps the earlier scan for the report with a note in its Scan column. In the report, a click
+on a column heading sorts the table, and a script file named in a task's Scripts cell or a script's Calls cell is a
+link that puts the name into the filter box, so the script's own row is one click away; the page shows a task's
+full name and a script's name and folder, the CSV files beside it keep the path and every column.
 
 ### Summary: processor, memory, disk and what needs attention
 
@@ -734,6 +800,11 @@ carries the comparison for every server shown. The SOE page tells you which grou
 
 *The Security console, Servers page: lights, counts, pass rate and tailoring per server, with the compliance
 dashboard below.*
+
+The checks are modelled on one release of the ISM, and the console says which: the Servers page header ends
+"checks modelled on the ISM of September 2026", the Security profile page repeats it, and every server page,
+control page and security report carries it as a fact. The release comes from `data\ism-catalogue.psd1`; a newer ISM
+means a new catalogue and code updates for the checks it adds or changes.
 
 **AUDIT** runs the Status, Inventory, Agents, Settings, SecurityPolicy (`auditpol /get /category:* /r` and
 `secedit /export`, both read-only, both needing an administrator) and Group Policy collectors and evaluates 118 checks:
@@ -903,8 +974,11 @@ page, the server's details page and the Security report carry the same rows.
 The ISM wording comes from `data\ism-catalogue.psd1`, generated offline from the
 *System security plan annex template* spreadsheet published by the Australian Cyber Security Centre. Source
 material: Australian Signals Directorate, Information Security Manual, (c) Commonwealth of Australia, licensed under
-Creative Commons Attribution 4.0 (<https://www.cyber.gov.au/ism>). The file's header names the ISM release it was
-generated from; it is never edited by hand.
+Creative Commons Attribution 4.0 (<https://www.cyber.gov.au/ism>). The file's `Release` names the ISM release it was
+generated from (September 2026 in this version), and the Security console shows it on the Servers page header, the
+Security profile page, every server and control page and every security report, so a rating is never read against
+the wrong release. A new ISM release means a new catalogue and code updates for the checks it adds or changes; the
+file is never edited by hand.
 
 ## Commands console
 
@@ -953,7 +1027,7 @@ the settings in use again; **Restore defaults...** fills the page with the defau
 | Before any change: the pre-action confirmations | One row per product or task in use here - VMware snapshot and Trellix Solidcore Update Mode by default, Airlock offered but off. Each ticked row is a Yes/No pop-up naming the servers, asked in the list's order before every OS patch install, software install / update and removal (and before a command that may change a server, when The Commands console box says so); No stops the change. Add step, Remove step, Move up / down. |
 | Change records | The change management system (filled in every time), the fields that must be filled in, and per action: change record required / change record or maintenance / not recorded (see Change records). |
 | The running log and the log files | Whether the window shows the command (CMD) and reasoning (WHY) lines - the log file always has them - its size, and how many days of log files to keep (0 = all; applied when you save and at every start). |
-| Warnings and safety limits | Free space that refuses or warns, how long an OS patch install is watched, whether it is watched at all after PATCH IT! (`AutoCheckInstalls`, the box on the tab), PendingFileRenameOperations as a pending reboot, staging clean-up, the Trellix Solidcore guard (`RequireSolidcoreUpdateMode`), one patch per server per run (`OnePatchPerRun`), how long a check waits for a server that does not answer (`SilentServerSec`, 180 s: the server shows as unreachable with that reason and the others carry on - a down or wedged server, or one the account gets no answer from, no longer holds a 35-server check for ten minutes; a check with a limit of its own, such as Impact, gives each server that long instead; never applied to an install), whether Trellix is used here at all (`TrellixInUse`: off takes its columns, boxes, buttons, warnings and confirmation away), whether the Trellix Agent services box starts ticked (`StopTrellixAgentForInstall`), the operator name. |
+| Warnings and safety limits | Free space that refuses or warns, how long an OS patch install is watched, whether it is watched at all after PATCH IT! (`AutoCheckInstalls`, the box on the tab), PendingFileRenameOperations as a pending reboot, staging clean-up, the Trellix Solidcore guard (`RequireSolidcoreUpdateMode`), one patch per server per run (`OnePatchPerRun`), how long a check waits for a server that does not answer (`SilentServerSec`, 180 s: the server shows as unreachable with that reason and the others carry on - a down or wedged server, or one the account gets no answer from, no longer holds a 35-server check for ten minutes; a check with a limit of its own, such as Impact, gives each server that long instead; never applied to an install), whether Trellix is used here at all (`TrellixInUse`: off takes its columns, boxes, buttons, warnings and confirmation away), whether the Trellix Agent services box starts ticked (`StopTrellixAgentForInstall`, off by default), the operator name. |
 | The Software console | The software install timeout, and how many packages it shows at once (see A big library). |
 | The Commands console | How long a command may run, how much of each server's answer is kept, and whether a command that may change a server also asks the pre-action confirmations (off by default: it always asks for the change record and its own confirmation). |
 | Health warning thresholds | The thresholds of the Health checks (disk, memory, processor and its sample length, uptime, event log, failed logons, scheduled-task failures, certificates, time, dormant and unknown software, Group Policy refresh, and the hardware line: logical processors, memory and the one-thread speed score a server should have). |
@@ -979,11 +1053,82 @@ language mode and execution policy, where the settings and logs are, and the cod
 ## Reports
 
 Each Report button writes `reports\<Console>-<yyyyMMdd-HHmmss>.html` (banner in the console colour, operator and time,
-notes, the summary table, one table per section, a filter box, inline CSS) and one CSV per section (UTF-8 with BOM,
+notes, the summary table, one table per section, a filter box, a click on a column heading to sort, inline CSS) and
+one CSV per section (UTF-8 with BOM,
 data only; a cell that starts with `=`, `+`, `-`, `@` or a tab is prefixed with an apostrophe so Excel never runs it as a
 formula - unless the cell is just a number, such as -0.5). Reports contain host names, the local Administrators membership, the name of the renamed built-in
 Administrator, the account strings from failed logons, the WinRM account's user name when alternate credentials are
 set, and findings: treat them as internal.
+
+## Saved results, servers without WinRM, the self-check and the spoke
+
+Every console paints from one table: the last result of every collector for every server. That table is now kept
+on disk, one `state\servers\<server>.xml` per server (written with `Export-Clixml` after each check, a few files at
+a time between clicks, and read back with `Import-Clixml`, which only ever builds property bags), so every console
+shows at the next start what it knew when the window closed. The window opens first and reads the files behind a
+small *Loading last data* box that counts them off, so a big fleet never holds the window back. Each grid has a
+**Last checked** column with the date
+and time of the result it paints, the cell green while the result is at most `ResultFreshDays` old (1), amber up to
+`ResultStaleDays` (3), red beyond; the tooltip says the age. A check that fails keeps the last good result and its
+age: the WinRM cell says FAILED in grey on the O/S Patching and Software grids, the Worst or Top red text says it
+first on Health and Security, and nothing is acted on until a check succeeds (an install, a reboot or a plan treats
+such a server as unreachable). `KeepResults` on the Settings tab turns the writing off; `ResultsKeepDays` deletes a
+file no check has written for that long. The files hold host names, account names and findings: `state\` is
+git-ignored and for the operators only.
+
+**A row claims only what its own check collected.** Every check button also collects the status and the inventory,
+and a Health check collects the settings an audit reads, so one console's check fills part of another's table. Such
+a row says **partial** in grey (the WinRM cell on Software, the Worst or Top red text on Health and Security), names
+what was never collected and the button that collects it, counts for nothing on the dashboards and carries no pass
+rate; what was collected stays visible. A check whose collector was never run gets no verdict, shown grey, instead
+of an amber error. *Last checked* on a row is the oldest of the collectors the row relies on, so a row is never
+fresher than its weakest input.
+
+**A server the toolkit cannot reach over WinRM** (a hardened domain controller that refuses remote PowerShell while
+RDP works) is marked in its group file: `srv-dc01.corp.local; winrm: no`, or `# winrm: no` at the top of a file for
+all of them. **Mark winrm: no (ticked)** on the O/S Patching toolbar writes that entry on the ticked servers' lines
+for you (and takes it off again when every ticked server already carries it); the lists are re-read at once. No console
+or action ever calls such a server: *Check status (all shown)*, a Health check or a Security audit of every row
+skips it with a line in the log, and an install, a reboot or a command leaves it out; the WinRM cell says
+`self-check` and its name cell is grey in every console. It checks itself:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\Start-WinRMToolkit.ps1 -SelfCheck -ResultsFolder \\hub\AirgapToolkit\state\servers
+```
+
+run on the server, in a copy of the toolkit folder (`lib\`, `data\`, `settings\`, `soe\` and `security\` are enough
+for a check), runs every collector there, over no network, and writes one results file, `<computer>.xml`. Written
+into this toolkit's `state\servers\` share, it is picked up at the next *Reload*; carried over by hand, **Import
+results** (O/S Patching tab) takes one or more such files into every console, the newer result per collector winning.
+**Copy for a server** (the small green block at the right end of the O/S Patching toolbar, with *Mark winrm: no*
+and *Import results*) writes one copy per ticked server marked `winrm: no` (every marked server when nothing is
+ticked), each in `state\server-copies\<server>-local-winrm\`: a
+ready-to-carry copy of this toolkit with its scripts,
+catalogues, SOE and security standards, pictures and settings, and without its patches, installers, server lists
+and results. The dialog offers this toolkit's folder and its `state\servers\` as the server will see them, through
+this PC's administrative share (`\\<this PC>\<drive>$\...`); the answers go into the copy's `settings\spoke.json`,
+so the spoke's start on the server offers them. `INSTRUCTIONS.txt` in the copy has the steps, and the box *Include
+the self-check script* adds `Run-SelfCheck.ps1`, a two-line launcher of the self-check with the results folder
+baked in, plus a `schtasks` line for a nightly run. The self-check's exit code is 0 when every collector answered
+and the file was written, so a scheduled task can report it. Nothing flows into such a server over WinRM: results
+flow out, like log forwarding.
+
+**The spoke.** To patch such a server as well, run the window on it:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\Start-WinRMToolkit.ps1 -Spoke
+```
+
+A copy written by *Copy for a server* knows what it is and starts as the spoke by itself, so a plain start of the
+launcher (or *Run with PowerShell*) is enough there, with the folders already filled in. The start asks for the hub
+folder (this toolkit's folder as a share or a copy, holding `patches\` and `software\`) and the results folder (this
+toolkit's `state\servers\` share, or empty for the copy's own), keeps the answers in `settings\spoke.json` and offers
+them again next time. The server list is then the computer itself; every check,
+install and reboot runs locally, from the hub's patch and installer files; the results file goes where the hub
+reads it. Logs, reports and the change log stay in the copy, so bring the change log back when the site keeps one
+record. The hub's vetting caches (`patches\_info`, `software\_info`) are read and trusted, so the first load on the
+server does not read every update file over the share; what the copy vets itself it keeps under its own root and
+never writes into the hub's folders. The window title says SPOKE and the computer's name.
 
 ## Keeping the catalogues current without internet
 
@@ -1000,6 +1145,12 @@ because PowerShell's loader gives up on files that large.
 * Double-click any server row in any console for a scrollable details window.
 * A grey row in any console: hover for the reason; full text in the log. "collector not available" means that
   collector was never run for the server or failed; press the tab's Check / Audit button.
+* The port answers and RDP works, but every check says "Access is denied" whatever credentials you give: a hardened
+  server (a domain controller under a security baseline) that refuses remote PowerShell. The toolkit cannot fix that
+  from outside; mark the server `winrm: no` in its group file and let it check itself (see Saved results above).
+* A coloured row whose WinRM cell says FAILED in grey, or whose Worst / Top red text starts "LATEST CHECK FAILED":
+  the server did not answer this time; the row shows the last good result, the Last checked cell says how old it is,
+  and nothing is acted on until a check succeeds.
 * Many Amber rows saying "was not collected (auditpol returned no rows ...)": the account is not an administrator
   on the server. Set credentials and audit again.
 * On WinRM over HTTPS (`WinRMPort` 5986), a grey row whose reason says "unknown certificate authority" or "does not
@@ -1026,7 +1177,7 @@ because PowerShell's loader gives up on files that large.
   on a non-English server the audit-policy checks read "not collected" with the reason. If such servers are in scope, say
   so: reading the subcategory GUIDs instead is the fix.
 - **Row colours.** The server grids of the O/S Patching, Software, Security and Commands consoles colour the whole
-  row by the server's worst finding and say the outcome in their Light column. The Health grid colours the row by the
+  row by the server's worst finding (no Light column: the row colour says it). The Health grid colours the row by the
   worst check and each check's own cell by that check's light, so a green or amber cell shows inside a row that is red
   for another finding (the Server, Group, Checked and Worst cells keep the row colour). The newer lists (GPO
   recommendations, Needs attention, the compliance tables) say the outcome as a word in the first column and colour

@@ -76,6 +76,27 @@ function New-GuiButton {
     return $b
 }
 
+function Get-DialogFrameColour {
+    # The frame of every pop-up window: a darker shade of the brand blue (the main window wears the blue itself)
+    return (Get-EdgeColour -Colour ([System.Drawing.Color]::FromName($script:Config.BrandColour)) -Factor 0.7)
+}
+
+function New-ToolkitDialogForm {
+    # Every pop-up window of the toolkit starts here (owner's ask, 2026-11-06): a Form with a 3 px frame in a darker shade
+    # of the brand blue, like the main window's, and the window icon.  The padding keeps docked children off the frame;
+    # the frame is painted on every paint and after every resize; absolutely placed controls start at 10 px or more.
+    # A MessageBox (Show-PatcherMessage) is Windows' own window and cannot wear it.
+    $f = New-Object System.Windows.Forms.Form
+    $f.Padding = New-Object System.Windows.Forms.Padding(3)
+    try { $f.Icon = Get-ToolkitIcon } catch { }
+    $f.Add_Paint({
+        $c = Get-DialogFrameColour
+        [System.Windows.Forms.ControlPaint]::DrawBorder($_.Graphics, $this.ClientRectangle, $c, 3, 'Solid', $c, 3, 'Solid', $c, 3, 'Solid', $c, 3, 'Solid')
+    })
+    $f.Add_Resize({ $this.Invalidate() })
+    return $f
+}
+
 function Get-EdgeColour {
     # A darker shade of a colour - its red, green and blue scaled by the factor: the edge of a flat button, its pressed face
     param([System.Drawing.Color]$Colour, [double]$Factor = 0.62)
@@ -237,6 +258,24 @@ function Register-ConsoleRefresher {
     $script:Gui['RefreshByConsole'][$Console] = $Refresh
 }
 
+function Show-RepaintNotice {
+    # The status bar says which console is repainting and the pointer waits, both painted at once: a repaint blocks the
+    # window, and with many servers the operator saw nothing move for seconds after opening a tab (owner 2026-11-09).
+    # -Off puts the text and the pointer back.  Nothing before the window shows (-NoShow, the start-up).
+    param([string]$Console, [switch]$Off)
+    $form = $script:Gui['Form']; $label = $script:Gui['StatusLabel']
+    if (-not $form -or $form.IsDisposed -or -not $form.Visible) { return }
+    try {
+        if ($Off) {
+            $form.UseWaitCursor = $false; [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+            if ($label -and $script:Gui.ContainsKey('StatusBeforeRepaint')) { $label.Text = [string]$script:Gui['StatusBeforeRepaint']; $script:Gui.Remove('StatusBeforeRepaint'); if ($label.Owner) { $label.Owner.Update() } }
+        } else {
+            if ($label) { $script:Gui['StatusBeforeRepaint'] = $label.Text; $label.Text = ('Repainting the {0} console ...' -f (Get-ConsoleName $Console)); if ($label.Owner) { $label.Owner.Refresh() } }   # Refresh paints now, without pumping other messages
+            $form.UseWaitCursor = $true; [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
+        }
+    } catch { }
+}
+
 function Invoke-ConsoleRefresh {
     # Repaints the console on screen.  The others are only marked stale and repaint when their tab is opened: with
     # hundreds of servers a repaint of all three consoles after every click costs seconds.  Before the window is shown
@@ -249,7 +288,9 @@ function Invoke-ConsoleRefresh {
     if (-not $All -and $script:Gui['Form'] -and $script:Gui['Form'].Visible -and $script:Gui['Tabs']) { try { $visible = [string]$script:Gui['Tabs'].SelectedTab.Tag } catch { $visible = '' } }
     foreach ($console in @($map.Keys)) {
         if ($visible -and $console -ne $visible) { $script:Gui['Stale'][$console] = $true; continue }
-        try { & $map[$console] } catch { Write-PatchLog "refresh of the $console console failed: $(Get-ShortError $_)" 'WARN' }
+        $notice = [bool]($visible -and $console -eq $visible)   # the console on screen: say so while it repaints
+        if ($notice) { Show-RepaintNotice -Console $console }
+        try { & $map[$console] } catch { Write-PatchLog "refresh of the $console console failed: $(Get-ShortError $_)" 'WARN' } finally { if ($notice) { Show-RepaintNotice -Console $console -Off } }
         $script:Gui['Stale'][$console] = $false
     }
 }
@@ -259,7 +300,8 @@ function Update-StaleConsole {
     param([string]$Console)
     if (-not $Console -or -not $script:Gui['Stale'] -or -not $script:Gui['Stale'][$Console]) { return }
     $r = $script:Gui['RefreshByConsole'][$Console]; if (-not $r) { return }
-    try { & $r } catch { Write-PatchLog "refresh of the $Console console failed: $(Get-ShortError $_)" 'WARN' }
+    Show-RepaintNotice -Console $Console
+    try { & $r } catch { Write-PatchLog "refresh of the $Console console failed: $(Get-ShortError $_)" 'WARN' } finally { Show-RepaintNotice -Console $Console -Off }
     $script:Gui['Stale'][$Console] = $false
 }
 
@@ -405,6 +447,18 @@ function Set-GridRows {
     $Grid.Items.AddRange($items.ToArray())
     } finally { $Grid.EndUpdate(); $script:GridProgrammatic = $false }   # never leave a grid frozen or the tick guard off
     Resize-GridFillColumn -Grid $Grid
+}
+
+function Set-GridItemCellColour {
+    # One cell of a ListView row in its own colour (a hand-built grid: the O/S Patching list).  The first call switches the
+    # row to per-cell style and gives every cell the row's colour first, so the others keep looking like the row.
+    param([Parameter(Mandatory = $true)]$Item, [int]$Index, [string]$Colour)
+    if (-not $Colour -or $Index -lt 0 -or $Index -ge $Item.SubItems.Count) { return }
+    if ($Item.UseItemStyleForSubItems) {
+        $Item.UseItemStyleForSubItems = $false
+        foreach ($si in $Item.SubItems) { $si.BackColor = $Item.BackColor }
+    }
+    $Item.SubItems[$Index].BackColor = [System.Drawing.Color]::FromName($Colour)
 }
 
 function Get-GridChecked {
@@ -650,7 +704,7 @@ function Show-DetailsWindow {
     # The window behind every console's double-click.  -Html shows a formatted page (headings, tables, coloured
     # lights, wrapped text) in the built-in browser control, offline; -Text shows plain text in a box.
     param([string]$Title, [string]$Text = '', [string]$Html = '')
-    $dlg = New-Object System.Windows.Forms.Form
+    $dlg = New-ToolkitDialogForm
     $dlg.Text = $Title
     # 1200 x 780, or what the screen has: on a 1366 x 768 laptop the full size would put the button bar below the edge
     $w = 1200; $h = 780
@@ -849,6 +903,7 @@ function Show-ToolkitGui {
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "$($script:Config.OperatorName)'s $($script:Config.ToolName) $($script:Config.ToolVersion) - offline, over WinRM"
+    if ($script:SpokeMode) { $form.Text = "$($script:Config.OperatorName)'s $($script:Config.ToolName) $($script:Config.ToolVersion) - SPOKE on $(Get-ThisComputerFqdn): this computer only, no WinRM" }
     $form.Size = New-Object System.Drawing.Size(1360, 900)
     $form.MinimumSize = New-Object System.Drawing.Size(1100, 720)
     $form.StartPosition = 'CenterScreen'
@@ -940,6 +995,8 @@ function Show-ToolkitGui {
         try { $outer.SplitterDistance = [Math]::Max(300, $outer.Height - [int]$script:Gui['LogHeight'] - $outer.SplitterWidth) } catch { }   # the log underneath (Get-ToolkitStartSize), draggable
         try { $script:Gui['TourSplit'].SplitterDistance = 450 } catch { }   # the longest topic title plus the menu's scroll bar
         Select-CodeTourTopic -Index 0
+        # the saved results, now that the window is on screen: a small box in front says "Loading last data" meanwhile
+        if ($script:Gui['LoadOnShow']) { $script:Gui['LoadOnShow'] = $false; try { Show-SavedResultsLoading } catch { Write-PatchLog ("Loading last data failed: {0}" -f (Get-ShortError $_)) 'ERROR' } }
     })
     # Closing the window while a copy or install is running would leave sessions and DISM to their fate.
     $form.Add_FormClosing({
@@ -952,14 +1009,29 @@ function Show-ToolkitGui {
         # a timed close (-AutoCloseSeconds) must not stop at this question
         if ($script:Gui['SettingsDirty'] -and -not $script:Gui['AutoCloseTimer']) {
             $a = Show-PatcherMessage -Title 'Unsaved settings' -Buttons 'YesNo' -Icon 'Warning' -Default 'Button2' -Text "The Settings tab has changes that are not saved.`n`nClose anyway and lose them?"
-            if ($a -ne 'Yes') { $_.Cancel = $true; $script:Gui['Tabs'].SelectedTab = @($script:Gui['Tabs'].TabPages | Where-Object { $_.Tag -eq 'Settings' })[0] }
+            if ($a -ne 'Yes') { $_.Cancel = $true; $script:Gui['Tabs'].SelectedTab = @($script:Gui['Tabs'].TabPages | Where-Object { $_.Tag -eq 'Settings' })[0]; return }
             else { Write-PatchLog 'Closed with unsaved changes on the Settings tab - they were not saved' 'WARN' }
         }
+        # the results the timer has not written yet go to state\servers\ now (14-State.ps1)
+        try { $t = $script:Gui['StateTimer']; if ($t) { $t.Stop() }; $n = Save-DirtyStates -All; if ($n -gt 0) { Write-PatchLog ("Saved results written for {0} server(s) at close" -f $n) 'INFO' } } catch { Write-PatchLog ("Saved results not written at close: {0}" -f (Get-ShortError $_)) 'WARN' }
     })
+    # the results of every check reach state\servers\ a few files at a time, between the operator's clicks (Save-DirtyStates).
+    # Not with -NoShow: nothing pumps messages for a timer there, so Invoke-Collector writes the files itself (review 2026-11-08)
+    if ($NoShow) { if ($script:Gui.ContainsKey('StateTimer')) { $script:Gui.Remove('StateTimer') } } else {
+        $stateTimer = New-Object System.Windows.Forms.Timer
+        $stateTimer.Interval = 700
+        $stateTimer.Add_Tick({ try { $null = Save-DirtyStates -MaxMs 250 } catch { } })
+        $stateTimer.Start()
+        $script:Gui['StateTimer'] = $stateTimer
+    }
 
     # ---- load the data and go ----
     Write-PatchLog ("Welcome, {0}! {1} {2}, root folder = {3}   (running as {4})" -f $script:Config.OperatorName, $script:Config.ToolName, $script:Config.ToolVersion, $script:RootFolder, (Get-OperatorIdentity)) 'INFO'
-    Initialize-ToolkitData
+    # a big fleet's saved results take seconds to read: the window opens first and reads them behind the "Loading last
+    # data" box (the Shown handler above); with -NoShow there is no Shown, so Initialize-ToolkitData reads them here
+    $loadOnShow = (-not $NoShow) -and [bool]$script:Config.KeepResults
+    $script:Gui['LoadOnShow'] = $loadOnShow
+    Initialize-ToolkitData -WithoutSavedResults:$loadOnShow
     # the first size: every button of the right-hand panels in view (measured after the data is in: the NEW box moves them)
     $size = Get-ToolkitStartSize -Form $form -Outer $outer -Strip $strip -Tabs $tabs
     $form.Size = New-Object System.Drawing.Size($size.Width, $size.Height)
@@ -980,6 +1052,7 @@ function Show-ToolkitGui {
     try {
         [void]$form.ShowDialog()
     } finally {
+        try { $stateTimer.Stop(); $stateTimer.Dispose(); $script:Gui.Remove('StateTimer'); $null = Save-DirtyStates -All } catch { }
         $form.Dispose()
         # When the launcher was dot-sourced ($NoGui), $script: is the console's own scope - do not leave a password behind.
         if ($script:Credential) { Clear-PatcherCredential }
@@ -988,11 +1061,16 @@ function Show-ToolkitGui {
 }
 
 function Initialize-ToolkitData {
-    # Reads the group files and the patch folders, fills every group combo, then lets each console repaint.
+    # Reads the group files and the patch folders, fills every group combo, then lets each console repaint.  The saved
+    # results (14-State.ps1) come in too - every file at the first load, at a Reload the files written since, which is
+    # how a self-check or a spoke that writes into this folder arrives - unless -WithoutSavedResults: the first open of
+    # the window reads them once it is on screen, behind the "Loading last data" box (Show-SavedResultsLoading).
+    param([switch]$WithoutSavedResults)
     Get-PatchGroups | Out-Null
     Get-PatchFiles  | Out-Null
     Get-SoftwarePackageFiles | Out-Null
     Clear-CheckRowCache   # class: and soe: on the group lines feed the checks
+    if (-not $WithoutSavedResults) { $null = Import-SavedResults }
     foreach ($combo in @($script:Gui['GroupCombos'])) {
         $keep = [string]$combo.SelectedItem
         $combo.Items.Clear()
@@ -1001,6 +1079,53 @@ function Initialize-ToolkitData {
         if ($keep -and $combo.Items.Contains($keep)) { $combo.SelectedItem = $keep } else { $combo.SelectedIndex = 0 }
     }
     Invoke-ConsoleRefresh
+}
+
+function Show-SavedResultsLoading {
+    # The first open: the window is on screen with its lists and no results yet; this box in front of it says "Loading
+    # last data" and counts the files off while Import-SavedResults reads state\servers\.  The box's own Shown handler
+    # does the reading, a DoEvents per file keeps both windows painting, and the window behind takes no click until the
+    # box closes - then the console on screen repaints with what came in.  No file yet: no box, the log line says so.
+    $folder = Get-StateFolder
+    $total = 0
+    if (Test-Path -LiteralPath $folder) { $total = @(Get-ChildItem -LiteralPath $folder -Filter '*.xml' -File -ErrorAction SilentlyContinue).Count }
+    if ($total -eq 0) { $null = Import-SavedResults; return }
+    Write-PatchLog ("Loading last data: {0} saved results file(s) in {1}" -f $total, $folder) 'INFO'
+    Set-GuiStatus 'Loading last data ...'
+    $box = New-ToolkitDialogForm
+    $box.Text = 'Loading last data'; $box.FormBorderStyle = 'FixedDialog'; $box.ControlBox = $false
+    $box.MaximizeBox = $false; $box.MinimizeBox = $false; $box.ShowInTaskbar = $false; $box.StartPosition = 'CenterParent'
+    $box.ClientSize = New-Object System.Drawing.Size(480, 112); $box.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+    $head = New-Object System.Windows.Forms.Label
+    $head.Text = 'Loading last data - the saved results of the last checks'; $head.AutoSize = $false
+    $head.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
+    $head.Location = New-Object System.Drawing.Point(16, 14); $head.Size = New-Object System.Drawing.Size(448, 22)
+    $line = New-Object System.Windows.Forms.Label
+    $line.Text = ('{0} file(s) in {1}' -f $total, $folder); $line.AutoSize = $false; $line.AutoEllipsis = $true
+    $line.Location = New-Object System.Drawing.Point(16, 40); $line.Size = New-Object System.Drawing.Size(448, 22)
+    $bar = New-Object System.Windows.Forms.ProgressBar
+    $bar.Style = 'Continuous'; $bar.Minimum = 0; $bar.Maximum = $total; $bar.Value = 0
+    $bar.Location = New-Object System.Drawing.Point(16, 72); $bar.Size = New-Object System.Drawing.Size(448, 20)
+    $box.Controls.AddRange([System.Windows.Forms.Control[]]@($head, $line, $bar))
+    $script:Gui['LoadBox'] = @{ Line = $line; Bar = $bar }
+    $box.Add_Shown({
+        # the reading, once the box is painted; whatever happens the box closes and the window takes over
+        try {
+            $null = Import-SavedResults -Progress {
+                param($FileNo, $FileCount, $FileName)
+                $lb = $script:Gui['LoadBox']
+                if ($lb) {
+                    $lb.Line.Text = ('Reading file {0} of {1}: {2}' -f $FileNo, $FileCount, $FileName)
+                    $lb.Bar.Value = [Math]::Min([int]$FileNo, [int]$lb.Bar.Maximum)
+                }
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+        } catch { Write-PatchLog ("Loading last data failed: {0}" -f (Get-ShortError $_)) 'ERROR' }
+        $this.Close()
+    })
+    try { [void]$box.ShowDialog($script:Gui['Form']) } finally { $script:Gui.Remove('LoadBox'); $box.Dispose() }
+    try { Invoke-ConsoleRefresh } catch { Write-PatchLog ("The repaint after loading last data failed: {0}" -f (Get-ShortError $_)) 'WARN' }
+    Set-GuiStatus 'Ready.'
 }
 
 # ---------------------------------------------------------------------

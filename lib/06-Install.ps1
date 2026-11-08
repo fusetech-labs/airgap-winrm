@@ -471,11 +471,12 @@ function Show-PatcherMessage {
 function Show-PatcherLongMessage {
     # A MessageBox taller than the screen loses its buttons; long texts get a scrollable window instead.
     param([string]$Text, [string]$Title, [string]$Buttons = 'OK', [string]$Default = 'Button1', [switch]$Wrap)
-    $dlg = New-Object System.Windows.Forms.Form
+    $dlg = New-ToolkitDialogForm
     $dlg.Text = $Title; $dlg.Size = New-Object System.Drawing.Size(900, 640); $dlg.StartPosition = 'CenterParent'
     $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9); $dlg.MinimizeBox = $false; $dlg.MaximizeBox = $true
     $box = New-Object System.Windows.Forms.TextBox
-    $box.Multiline = $true; $box.ReadOnly = $true; $box.Dock = 'Fill'; $box.BackColor = 'White'; $box.Text = $Text
+    # a multiline TextBox shows a bare line feed as nothing: the breaks a message carries become Windows ones (2026-11-06)
+    $box.Multiline = $true; $box.ReadOnly = $true; $box.Dock = 'Fill'; $box.BackColor = 'White'; $box.Text = ([string]$Text -replace "(?<!`r)`n", "`r`n")
     if ($Wrap) {
         $box.WordWrap = $true; $box.ScrollBars = 'Vertical'; $box.Font = New-Object System.Drawing.Font('Segoe UI', 10)
     } else {
@@ -564,7 +565,7 @@ function New-PatchPlan {
     $Patches = @($Patches | Sort-Object @{ Expression = { & $rank $_ } }, @{ Expression = { [double]$_.SizeMB } }, Name)
     $plan = @()
     foreach ($c in $ComputerName) {
-        $s = $script:ServerStatus[$c]
+        $s = Get-ActionResult -Name 'Status' -Server $c   # a status whose latest check failed counts as unreachable here, whatever the grid still shows
         foreach ($p in $Patches) {
             $v = Get-PatchVerdict -Status $s -Patch $p -Server $c
             $plan += [pscustomobject]@{ Computer = $c; KB = $p.KB; Name = $p.Name; File = $p.FullName; Hash = $p.Hash; Go = $v.Go; Reason = $v.Reason }
@@ -900,7 +901,7 @@ function Get-PatchStagePlan {
     param([string[]]$ComputerName, [object[]]$Patches)
     $plan = @()
     foreach ($c in $ComputerName) {
-        $s = $script:ServerStatus[$c]
+        $s = Get-ActionResult -Name 'Status' -Server $c   # the latest check failed = unreachable for a copy, whatever the grid still shows
         foreach ($p in $Patches) {
             $v = Get-PatchVerdict -Status $s -Patch $p -Server $c
             $go = $v.Go
@@ -930,7 +931,8 @@ function Copy-PatchToServers {
     # record ('OS patch stage', Not recorded by default: no form), per server the locked staging folder and the slice
     # copy.  No pre-action confirmations: a copy changes no installed software.
     param([Parameter(Mandatory = $true)][string[]]$ComputerName, [Parameter(Mandatory = $true)][object[]]$Patches)
-    $targets = @(Get-UniqueNames $ComputerName)
+    $targets = @(Remove-RemoteDisabledServers -Names @(Get-UniqueNames $ComputerName) -Action 'STAGE ONLY')
+    if ($targets.Count -eq 0) { $null = Show-PatcherMessage -Text "Every ticked server is marked 'winrm: no' in its group file: nothing is sent to such a server." -Icon 'Warning'; return @() }
     $who = Get-OperatorIdentity
     Write-PatchLog ("=== STAGE ONLY REQUESTED by {0}: {1} to {2} ===" -f $who, (($Patches | ForEach-Object { $_.KB }) -join ', '), ($targets -join ', ')) 'INFO'
     Write-PatchLog 'Pre-flight: fresh status, so a file is not copied where it is installed, cannot apply, or would not fit' 'WHY'
@@ -998,7 +1000,8 @@ function Install-PatchOnServers {
         [Parameter(Mandatory = $true)][string[]]$ComputerName,
         [Parameter(Mandatory = $true)][object[]]$Patches      # objects from Get-PatchFiles
     )
-    $targets = @(Get-UniqueNames $ComputerName)
+    $targets = @(Remove-RemoteDisabledServers -Names @(Get-UniqueNames $ComputerName) -Action 'PATCH IT!')
+    if ($targets.Count -eq 0) { $null = Show-PatcherMessage -Text "Every ticked server is marked 'winrm: no' in its group file: nothing is sent to such a server. Patch it from its own console (Start-WinRMToolkit.ps1 -Spoke on the server)." -Icon 'Warning'; return @() }
     $who = Get-OperatorIdentity
     Write-PatchLog ("=== INSTALL REQUESTED by {0}: {1} on {2} ===" -f $who, (($Patches | ForEach-Object { $_.KB }) -join ', '), ($targets -join ', ')) 'INFO'
 
@@ -1277,7 +1280,8 @@ function Restart-PatchedServers {
     # boot that ended with 3010).  Anything else needs a second,
     # explicit Yes.  On the server, a reboot is refused while dism/TiWorker are still running.
     param([Parameter(Mandatory = $true)][string[]]$ComputerName)
-    $targets = @(Get-UniqueNames $ComputerName)
+    $targets = @(Remove-RemoteDisabledServers -Names @(Get-UniqueNames $ComputerName) -Action 'Reboot')
+    if ($targets.Count -eq 0) { $null = Show-PatcherMessage -Text "Every ticked server is marked 'winrm: no' in its group file: nothing is sent to such a server. Reboot it from its own console (Start-WinRMToolkit.ps1 -Spoke on the server)." -Icon 'Warning'; return }
     $who = Get-OperatorIdentity
     Write-PatchLog "Reboot requested by $who for $($targets -join ', ') - checking status first" 'WHY'
     Get-ServerStatus -ComputerName $targets | Out-Null
@@ -1285,7 +1289,7 @@ function Restart-PatchedServers {
     $targets = @(Remove-DuplicateServers $targets)
     $pending = @(); $advised = @(); $notPending = @(); $unreachable = @(); $installing = @()
     foreach ($c in $targets) {
-        $s = $script:ServerStatus[$c]
+        $s = Get-ActionResult -Name 'Status' -Server $c   # the latest check failed = unreachable, whatever the grid still shows
         $runFlag = Get-InstallFlag -Server $c   # the fresh status above has recorded every run that finished: what is left is still going
         if ($runFlag -and [string]$runFlag.State -ne 'unknown') { $installing += ('{0}   (run {1}: {2}, started {3})' -f $c, $runFlag.Stamp, (@($runFlag.KBs) -join ', '), $runFlag.Started) }
         elseif (-not $s -or -not $s.Reachable) { $unreachable += $c }
@@ -1365,7 +1369,7 @@ function Restart-PatchedServers {
 #  client reports component status only, so the cause stays open (an
 #  ATP policy, most likely).  Hence:
 #    * the box "Stop the Trellix Agent services first" on the O/S Patching
-#      and Software tabs (ticked by default: StopTrellixAgentForInstall)
+#      and Software tabs (unticked by default: StopTrellixAgentForInstall)
 #      sets both services to Disabled and stops them on each server before
 #      an install; a server where that fails is not installed (fail closed
 #      - untick the box to install with the agent running)
@@ -1512,7 +1516,8 @@ function Set-TrellixAgentOnServers {
     # default), the change record of 'Trellix Agent services' (a change record or a maintenance activity by default), the
     # change itself, a fresh status so the grid tells the truth, then the summary.
     param([Parameter(Mandatory = $true)][string[]]$ComputerName, [ValidateSet('start', 'stop')][string]$Mode)
-    $targets = @(Get-UniqueNames $ComputerName)
+    $targets = @(Remove-RemoteDisabledServers -Names @(Get-UniqueNames $ComputerName) -Action ('Trellix Agent ' + $Mode))
+    if ($targets.Count -eq 0) { $null = Show-PatcherMessage -Text "Every ticked server is marked 'winrm: no' in its group file: nothing is sent to such a server." -Icon 'Warning'; return @() }
     $who = Get-OperatorIdentity
     $what = 'set to Automatic and started'; $want = 'running'; if ($Mode -eq 'stop') { $what = 'set to Disabled and stopped'; $want = 'stopped' }
     Write-PatchLog ("=== TRELLIX AGENT {0} REQUESTED by {1} on {2} - checking status first ===" -f $Mode.ToUpper(), $who, ($targets -join ', ')) 'INFO'
@@ -1521,7 +1526,7 @@ function Set-TrellixAgentOnServers {
     $targets = @(Remove-DuplicateServers $targets)
     $todo = @(); $skipped = @()
     foreach ($c in $targets) {
-        $st = $script:ServerStatus[$c]
+        $st = Get-ActionResult -Name 'Status' -Server $c   # the latest check failed = unreachable, whatever the grid still shows
         if (-not $st -or -not $st.Reachable) { $skipped += "$c   (unreachable)"; continue }
         $ta = Get-TrellixAgentInfo -Status $st
         if (-not $ta.Present) { $skipped += "$c   (no Trellix Agent on the server)"; continue }

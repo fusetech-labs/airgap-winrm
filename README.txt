@@ -14,6 +14,18 @@ Open a PowerShell window in this folder and run:
 
 or right-click Start-WinRMToolkit.ps1 and choose "Run with PowerShell".
 
+On a server the toolkit cannot reach over WinRM (marked "winrm: no" in
+its group file), run a copy of the toolkit folder there instead - the
+hub writes one, ready to carry, with "Copy for a server" on its O/S
+Patching toolbar (state\server-copies\<server>-local-winrm\, INSTRUCTIONS.txt inside):
+    powershell.exe -ExecutionPolicy Bypass -File .\Start-WinRMToolkit.ps1 -SelfCheck -ResultsFolder <the hub's state\servers share>
+        no window: every check runs on that computer and one results
+        file is written for the hub (Import results on the O/S Patching tab)
+    powershell.exe -ExecutionPolicy Bypass -File .\Start-WinRMToolkit.ps1 -Spoke
+        the window, working on that computer only, patching it from the
+        hub's patches\ and software\ (asked for at start); a copy written
+        by "Copy for a server" starts so by itself - a plain start is enough
+
 Run it as the account that is a local administrator on the target servers.
 Keep the whole folder together (the launcher needs lib\ and data\ next to it),
 on a local disk of this PC.

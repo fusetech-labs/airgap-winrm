@@ -81,11 +81,16 @@ THE FILES (root folder)
   lib\11-ChangeLog.ps1       the change record before every change; changes\change-log.csv
   lib\12-Settings.ps1        what the Settings tab may change; settings\settings.json over the defaults
   lib\13-GroupPolicy.ps1     the Group Policy collector (Health and Security): GPOs, errors, RSoP
+  lib\14-State.ps1           saved results (state\servers\), "Last checked", the self-check and the spoke (topic F9)
   lib\20-Console-Patching.ps1   the O/S Patching tab
   lib\30-Console-Health.ps1     the Health tab
+  lib\31-Health-Scripts.ps1     scripts and scheduled tasks on a server: the bounded walk, scripts parsed (never run),
+                                what to look at; the Scripts report and the server's Health page
   lib\40-Console-Security.ps1   the Security tab
   lib\45-Security-Gpo.ps1       its GPO recommendations: impact checks, gaps, the GPO plan
   lib\46-Security-Compliance.ps1  its compliance dashboard and the executive summary
+  lib\47-Licensing.ps1            licensing: the models (cores, VMs, CALs), activation, KMS, RD Licensing - the Software report's
+                                  licensing sections, the Licensing page and the SEC-LIC checks
   lib\50-Console-Software.ps1   the Software tab (data\software-packages.psd1, installers in software\)
   lib\60-Console-Settings.ps1   the Settings tab
   lib\70-Console-About.ps1      the About tab
@@ -193,6 +198,8 @@ status check.  "Reload lists + patches" re-reads the group files and patches\ on
                          TimeOffsetFailSec, MemoryWarnPercent / MemoryFailPercent,
                          CpuWarnPercent / CpuFailPercent, CpuSampleSeconds, MaxProducts,
                          MinLogicalProcessors / MinMemoryGB / MinCpuScore (H-HW-01, hardware fit)
+  Scripts scan        -> ScriptSearchFolders (empty = every fixed drive), ScriptSearchSkip (folders never
+                         entered), ScriptSearchSeconds (the budget per server) - D11
 Shared state: $script:Credential (memory only, cleared when the GUI closes),
 $script:Results[<collector>][<server>] (every collector result; $script:ServerStatus IS
 $Results['Status']), $script:Groups, $script:Patches, $script:Checks (every check
@@ -370,7 +377,10 @@ FAULT FINDING: the CMD line in the log shows exactly what was sent.  Typical err
   "certificate ... unknown authority",
   "... does not match the CN"            -> WinRMPort is 5986: the listener's certificate must chain to
                                             a CA this PC trusts and carry the FQDN in the group file
-  "Access is denied"                     -> account is not an admin on that server
+  "Access is denied"                     -> account is not an admin on that server; the same with an
+                                            admin account on a server whose baseline refuses remote
+                                            PowerShell (a hardened domain controller): "; winrm: no"
+                                            on its line and let it check itself (topic F9)
   "Kerberos ... "                        -> use the FQDN in the group file.  Do NOT "fix"
                                             it with TrustedHosts=*; that turns off the
                                             check that you are talking to the right server.
@@ -465,8 +475,8 @@ draws every one of these cells the way the grid colours them, with the next step
   5. Safety pop-up 2 - Trellix Solidcore Update Mode (the status check already read the
      mode: "Blocked: Solidcore" never reaches the plan; this is the human's word on top)
   6. Status check AGAIN - the pop-ups may have been open for minutes; any pair that is
-     no longer READY is dropped.  With "Stop the Trellix Agent services first" ticked (the
-     default) the two ePO agent services are now set to Disabled and stopped on each server
+     no longer READY is dropped.  With "Stop the Trellix Agent services first" ticked (off at
+     start) the two ePO agent services are now set to Disabled and stopped on each server
      (Invoke-TrellixAgentChange, under the install's change record; a server where that
      fails is dropped - B18).  Then, one server at a time: New-PSSession,
      RemoteStagingScript (C:\PatchStaging must be a real folder owned by admins; ACL
@@ -636,9 +646,8 @@ thrown away because it is now stale.
 '@ }
 
     [pscustomobject]@{ Title = 'B16. RemoteInventoryScript - roles, software, SQL and Exchange'; Source = 'RemoteInventoryScript'; Explain = @'
-The Inventory collector (run by every Patching status check while the "Inventory (roles +
-software)" tick box on the toolbar is on, and by the Health and Security consoles) reads,
-read-only:
+The Inventory collector (run by every Patching status check - it always rides along - and by
+the Software, Health and Security consoles) reads, read-only:
   Products     both Uninstall registry hives: Name|Version|Publisher|InstallDate|Location|
                KeyName|MSI|Quiet|Hive (the last four tell the Software console's UNINSTALL
                how, and in which hive: 7-Zip x64 and x86 share the key name "7-Zip")
@@ -730,8 +739,8 @@ Trellix (the Solidcore mode is read, never changed):
                   consoles, Get-ServerStatus writes a WARN line, a scan from the toolbar adds
                   a pop-up (Show-TrellixAgentWarning): ePO hears nothing from that server.
   the box         "Stop the Trellix Agent services first" on the O/S Patching and Software
-                  tabs, ticked at start (StopTrellixAgentForInstall, Settings tab; unticking
-                  it is named as a weakening).  Test-TrellixStopOn reads the tab's box.
+                  tabs, unticked at start (StopTrellixAgentForInstall, Settings tab: tick it
+                  there where the agent blocks installs).  Test-TrellixStopOn reads the tab's box.
                   PATCH IT! and INSTALL / UPDATE call Invoke-TrellixAgentChange -Mode stop
                   right after their second status check, under the install's own change
                   record: a server where the stop fails is not installed (fail closed; the
@@ -1091,7 +1100,8 @@ or more Sections (name, rows, columns) and Notes.  The result:
   reports\<Console>-<yyyyMMdd-HHmmss>.html banner in the console colour, the operator and
                                            time, the notes, the summary table, then one
                                            table per section; a filter box searches every
-                                           row; Light cells are coloured; inline CSS, no
+                                           row, a click on a column heading sorts; rows
+                                           wear their Light colour; inline CSS, no
                                            external files, opens anywhere offline
   reports\<Console>-<stamp>-<Section>.csv  one CSV per section (data only, UTF-8 with BOM
                                            so Excel reads it); a single section = one .csv
@@ -1322,6 +1332,45 @@ Only the Level cell is coloured - the word says it, the colour repeats it once.
 '@ }
 
     # =================================================================  PART E - SECURITY CONSOLE
+    [pscustomobject]@{ Title = 'D11. RemoteScriptsScript - scripts and scheduled tasks on a server'; Source = 'RemoteScriptsScript'; Explain = @'
+WHAT IT ANSWERS
+  "What runs on this server by itself, from where, and what does it do?" - Scripts and tasks (ticked)
+  on the Health console.  The Scripts collector (lib\31-Health-Scripts.ps1) runs on each ticked server,
+  read-only, and brings back:
+  1. Every scheduled task outside \Microsoft\ and not the OS's own: state, author, the account and run
+     level, each trigger in words (daily at 03:00, weekly Mon,Fri, at startup, repeat every 1h), the
+     action, the script it runs (a bare .ps1, powershell -File, a batch file followed into the .ps1 it
+     calls), last run, last result, next run.
+  2. Every .ps1 and .psm1 under the folders on the Settings tab (ScriptSearchFolders; empty = every
+     fixed drive), each parsed with PowerShell's own parser and never run: its functions, what it does
+     (web requests, Active Directory, SQL, mail, files, services, remoting, credentials, cloud ...) from
+     the commands it calls, the scripts it calls, its .SYNOPSIS, its signature.
+  3. What to look at: a password written in clear (the line is named, never the value), an encoded
+     command, code downloaded or decoded and run, a task whose script is missing, and a task that runs
+     a script elevated from a folder every user can write to.  The folder note alone colours nothing (a
+     data drive's default rights make it common): the task that runs the script from there lights up.
+THE WALK IS BOUNDED (field concern 2026-11: a search that is slow or stalls)
+  An explicit stack, not recursion; every folder read in its own try - one that cannot be read is one
+  line of the report and the walk carries on; junctions and symbolic links are never followed; Windows,
+  Program Files, ProgramData\Microsoft, AppData, $Recycle.Bin and the like are skipped by rule
+  (ScriptSearchSkip); each script is analysed the moment it is found, so the budget (ScriptSearchSeconds,
+  60 s) ends the walk with every script listed complete, and the result says PARTIAL with what was left.
+  Caps: 3,000 scripts, 1 MB per script, the signature read for the first 500 scripts.  A server without
+  the ScheduledTasks module is read with schtasks (fewer fields).
+THE PAGE
+  The two tables are wide (a task's command line, a script's folder, its functions) and long (thousands
+  of rows): fixed column widths, so a date or a size never breaks and a path wraps at a backslash; the
+  page shows a task's full name and a script's name and folder, the CSV keeps the path and every column;
+  a click on a column heading sorts (every report and page has that); a script file named in a task's
+  Scripts cell or a script's Calls cell is a link that puts the name into the filter box (FilterLinks in
+  ConvertTo-ReportTable), so the script's own row is one click away.
+THE RESULT
+  Saved like every collector's (state\servers\).  Export-ScriptsReport writes reports\Scripts-<date>.html
+  + CSV (the scan per server, every task, every script, the folders not read); Get-ScriptsDetailSections
+  puts the same on the server's Health page.  Red = look at it now, amber = worth a look.  The button
+  scans afresh at every press (a Health check reads only the tasks with a failing last result, never
+  scripts); a rescan that fails keeps the earlier scan, and the summary's Scan column says so.
+'@ }
     [pscustomobject]@{ Title = 'E1. PICTURE: the Security console pipeline'; Source = ''; Image = 'images\10-security-pipeline.png'; Explain = @'
 Top: the ISM annex spreadsheet becomes data\ism-catalogue.psd1, generated offline.  Middle: the 89 expected values, the 29 code checks and the collectors that feed
 them.  Then the profile (what applies, what is red) and the tailoring file (recorded risk
@@ -1416,7 +1465,10 @@ data\ism-catalogue.psd1 holds every ISM control: Id, Section, Topic, Rev, Update
 control text.  It is GENERATED from the ISM annex spreadsheet (cyber.gov.au, "System security
 plan annex template") and never edited by hand; the typographic quotes and dashes of the
 spreadsheet are turned into plain ASCII (PowerShell treats a curly apostrophe as a string
-delimiter).  Its header names the ISM release it was generated from.
+delimiter).  Its Release ("September 2026") names the ISM release it was generated from, and
+Get-IsmRelease puts that on the Security console (Servers page header, Security profile page),
+on every server and control page and in every security report: a new ISM release means a new
+catalogue and code updates for the checks it adds or changes.
 Get-IsmCatalogue (below) reads it with Import-DataFileSafely - PowerShell's own loader gives up
 on a data file this large - once per session.
 Source material: Australian Signals Directorate, Information Security Manual, (c) Commonwealth
@@ -1527,6 +1579,59 @@ shown (New-ChartTag), so they print sharp.
 '@ }
 
     # =================================================================  PART F - GUI AND FAULT FINDING
+    [pscustomobject]@{ Title = 'S12. Licensing - the models, activation, KMS, RD Licensing CALs, RD Session Hosts'; Source = 'RemoteLicensingScript'; Explain = @'
+WHY (owner's ask 2026-11-06)
+  A licence reconciliation needs, per server, the model that applies and the count it is driven by -
+  cores, processors, VMs, CALs - beside the activation state: Windows activation and its channel on
+  every server, the KMS hosts and their counts, every RD Licensing server's CAL packs (installed,
+  issued, available), every RD Session Host's licensing mode and grace days, the SQL Server and
+  Exchange editions.  Reported with the software checks, in the Software report (prints to PDF).
+THE COLLECTOR (lib\47-Licensing.ps1)
+  RemoteLicensingScript runs with every software check, every Security audit and the self-check,
+  read-only CIM:
+    Win32_ComputerSystem,         the hardware the models count on: sockets, cores, logical processors,
+    Win32_Processor               physical or virtual (the model and maker), a hypervisor present
+    Win32_OperatingSystem         the edition (Standard, Datacenter, Essentials, evaluation) and version
+    Msvm_ComputerSystem           a Hyper-V host's virtual machines (count, running, the first 200 named)
+    SoftwareLicensingProduct      every product with a key: Windows (and Office) - LicenseStatus,
+                                  the channel from the Description (KMS client, MAK, retail, OEM,
+                                  evaluation; VLActivationType 1 = Active Directory), grace days,
+                                  the KMS host it uses
+    Win32_ServerFeature           the roles: RD Licensing, RD Session Host, broker, gateway, web
+                                  access, Volume Activation Services
+    SoftwareLicensingService      a KMS host (IsKeyManagementServiceMachine): current count, the
+                                  count required, requests by outcome
+    Win32_TSLicenseKeyPack        the CAL packs: type, per user or device, version, total, issued,
+                                  available; Win32_TSIssuedLicense the issued CALs (counts per pack
+                                  and status, the first 300 listed); Win32_TSLicenseServer activation
+    Win32_TerminalServiceSetting  the RD Session Host: licensing mode, the licence servers
+                                  (GetSpecifiedLicenseServerList), the grace days (GetGracePeriodDays)
+  Everything travels as strings with | between the fields; ConvertFrom-LicensingResult reads them
+  back on the hub.  A read that fails lands in Errors - it never fails the rest.  A CIM uint32 can be
+  4294967295 ("not applicable"): every number is read as int64 (the first run cast one to int).
+THE MODELS - Get-LicensingModelRows
+  One row per licensable product per server: Windows Server 2016 and later per core (16 per server
+  and 8 per processor at least, 2-core packs; a Hyper-V host on Standard needs a core set per two
+  VMs, Datacenter covers them all; a VM reads the per-VM option, 8 core licences at least, or its
+  host), Essentials per server, 2012 R2 and older per processor; SQL Server by edition - Enterprise
+  per core (4 per processor or VM at least), Standard per core or Server + CAL, Express, Developer
+  and Evaluation free; Exchange server + CALs; the RD Session Host's CAL mode; the licence server's
+  packs; Office by channel (volume per device, Microsoft 365 per user); the KMS host itself.  The
+  Activation column says volume (KMS, Active Directory, MAK) or direct (retail, OEM).  The rules
+  are $script:LicensingRules: headed lists of short points (Windows Server, Essentials, CALs, SQL
+  Server, Exchange, RDS, KMS, Office, the agreement) on the page, in the report and on a server's
+  page; under every table: the agreement decides, verify with the reseller.
+THE REPORT, THE PAGE, THE CHECKS
+  Export-SoftwareReport carries Licensing models, Licensing totals (Get-LicensingTotals: physical
+  and virtual servers, Hyper-V hosts and VMs, the core licences needed by product, Windows by state
+  and channel, KMS hosts, RD Licensing servers and every CAL pack summed, RD Session Hosts, SQL
+  Server by edition, Exchange) and Licensing by server (Get-LicensingRows); the browser prints the
+  HTML to PDF.  The Licensing button of the Software console shows the same page
+  (Get-LicensingReportHtml); a server's own page comes from Get-LicensingDetailsHtml.  The Security
+  audit collects it too, for SEC-LIC-01 Windows activated (grace = Warn), SEC-LIC-02 RD Session Host
+  licensing configured (High: the grace period ends in refused connections), SEC-LIC-03 RD Licensing
+  CALs available, none temporary, server activated, SEC-LIC-04 KMS host threshold reached.
+'@ }
     [pscustomobject]@{ Title = 'F1. The GUI shell - Show-ToolkitGui'; Source = 'Show-ToolkitGui'; Explain = @'
 Plain Windows Forms, no designer, no XAML.  The window is a SplitContainer: the console tabs
 on top, the shared log box and status bar underneath.  Each console file adds its own tab
@@ -1550,7 +1655,8 @@ on the Fill control.
 Every button goes through Invoke-GuiAction: disable the state-changing buttons -> run ->
 catch errors into the log -> repaint -> re-enable.  Invoke-ConsoleRefresh runs the refresher
 of the console on screen (Register-ConsoleRefresher); the others are marked stale and repaint
-when their tab is opened, so a click stays quick with hundreds of servers.  A crash in a
+when their tab is opened, so a click stays quick with hundreds of servers; while a console
+repaints, the status bar says so and the pointer waits (Show-RepaintNotice).  A crash in a
 button never kills the window; it shows up as [ERROR] with the line that failed.
 READ-ONLY buttons (every Health and Security button, status checks, reports, tick/untick)
 are tagged -ReadOnly and stay enabled during an install: the install's wait loop pumps the
@@ -1876,6 +1982,85 @@ and Application event 930 BEFORE it runs ("starting") and AFTER ("finished: <res
 a command that cuts the connection (Restart-Service WinRM) leaves its start on record.
 Run it on THIS machine:
    & $RemoteCommandScript 'Get-Service WinRM' $false 'me' '' 'C:\Temp\x' 256 250
+'@ }
+    [pscustomobject]@{ Title = 'F9. Saved results, Last checked, the self-check and the spoke'; Source = 'Invoke-SelfCheck'; Explain = @'
+WHY (field test 2026-11)
+  The window forgot everything when it closed, and a few domain controllers under a security
+  baseline refused remote PowerShell ("Access is denied" whatever the account) while RDP worked.
+  lib\14-State.ps1 answers both.
+SAVED RESULTS
+  Every console paints from $Results[<collector>][<server>].  Invoke-Collector marks each server it
+  touched (Set-StateDirty); a 700 ms timer in the window writes the files a few at a time
+  (Save-DirtyStates, about 250 ms a tick), all of them when the window closes, at once without a
+  window.  One file per server, state\servers\<name as typed>.xml, Export-Clixml depth 8: the good
+  result of every collector, the latest failed attempt of the others, who wrote it and when.
+  Import-SavedResults reads them (Import-ServerStates): at the first open once the window is on
+  screen, behind the "Loading last data" box that counts the files off (Show-SavedResultsLoading,
+  from the window's Shown handler, so a big fleet's files never hold the window back), and at a
+  Reload only the files written since - that is how a self-check or a spoke that writes into the
+  hub's share arrives.  Merge-StateDocument lays a file over the table collector by collector: the
+  newer result wins, so a partial run never wipes a fuller one.  Import-Clixml builds property bags only: a
+  results file cannot run anything.  KeepResults (Settings tab) turns the writing off;
+  ResultsKeepDays deletes a file no check has written for that long.
+A FAILED CHECK KEEPS THE GOOD RESULT
+  Invoke-Collector: a server that fails while the table holds a good result keeps that result,
+  marked with the attempt (Set-ResultFailure: LastAttempt, LastError).  The grids paint the data
+  with its age; the WinRM cell says FAILED in grey (O/S Patching, Software), the Worst / Top red
+  text says it first (Health, Security).  An action asks Get-ActionResult, which hands back an
+  "unreachable" stand-in for such a result: nothing is installed, rebooted or planned on data the
+  server did not confirm this time.
+LAST CHECKED
+  Every grid: Format-LastChecked (yyyy-MM-dd HH:mm) and Get-ResultAgeColour - PaleGreen up to
+  ResultFreshDays, Khaki up to ResultStaleDays, LightCoral beyond (Settings tab).  One cell; the row
+  keeps its own colour.  Get-LastCheckedTip is the row's tool tip: the age, the failed attempt.
+PARTIAL ROWS (field finding 2026-11-06)
+  Every check button collects Status and Inventory, a Health check collects Settings: one console's
+  check fills part of another's table, and a row built from that passed for a finished check.
+  Get-ConsoleCollectors names what each console's rows rely on; Get-ConsoleCoverage says whether
+  every one has a result and gives the OLDEST of their times - the row's Last checked, so a row is
+  never fresher than its weakest input.  A row short of one says PARTIAL in grey (the WinRM cell
+  on Software, Worst or Top red on Health and Security), names what was never collected and is
+  left out of the dashboards (Test-SecurityCollected).  Invoke-Checks gives a check whose collector
+  was never asked the verdict NotCollected (grey); one that ran and was refused stays Error (amber).
+WINRM: NO
+  "; winrm: no" on a server's line, or "# winrm: no" in its file (Read-GroupFile, Test-RemoteDisabled):
+  Invoke-Collector never calls it, every action takes it out (Remove-RemoteDisabledServers), the
+  WinRM cell says self-check and its name cell is grey in every console.  Remove-ServerResults (the
+  "Clear saved data (ticked)" button) forgets a server on this PC: every collector's result and its
+  results file, so the rows say not checked until the next check.  The "Mark winrm: no (ticked)" button writes the mark on the ticked
+  servers' lines (Set-RemoteDisabledMark, through Set-ServerAttribute like the SOE and class
+  entries) and takes it off again when every ticked server carries it; the group files are read
+  again at once, so "Check status (all shown)" skips the server from the next press.  Its results
+  come from itself:
+     Start-WinRMToolkit.ps1 -SelfCheck [-ResultsFolder <the hub's state\servers share>] [-Only Status]
+  run on the server, in a copy of the toolkit folder.  Invoke-SelfCheck (below) sets the server list
+  to this computer, runs the collectors of Get-SelfCheckSteps through their own functions
+  (Invoke-Collector runs them as a local job - no WinRM call to itself), writes the one file and
+  returns the outcome; the launcher turns it into the exit code (0 every collector answered, 1 one
+  failed, 3 no file).  New-ServerCopies (the Copy for a server button: the ticked marked servers, or
+  every marked one) writes state\server-copies\<server>-local-winrm\ per server (New-ServerCopy,
+  Get-ServerCopyFolderName): a
+  ready-to-carry copy of the toolkit - scripts, catalogues, standards, pictures, settings; never the
+  patches, installers, group files or results (Get-ServerCopyItems) - with settings\spoke.json filled
+  in with the hub folder and the results folder as the server sees them (Get-ToolkitUncPath: this
+  PC's folders through its administrative share, \\<fqdn>\<drive>$\...), INSTRUCTIONS.txt and, when
+  asked, Run-SelfCheck.ps1 from New-SelfCheckPackage - a short launcher of the self-check with the
+  results folder baked in; the collectors stay the toolkit's own, never copied out, so a self-check
+  always matches the hub's version.  Import-ResultsFile
+  (the Import results button) takes such files from anywhere; Resolve-StateServerNames finds the
+  name the hub lists the server under (short name or FQDN).
+THE SPOKE
+  Start-WinRMToolkit.ps1 -Spoke - or a plain start of a copy written by Copy for a server: its
+  settings\spoke.json carries the mark ServerCopy (Test-ServerCopyFolder), the launcher sets the
+  spoke itself, and a spoke start passes the mark on.  Initialize-SpokeMode asks for the hub folder
+  and the results folder (Show-SpokeSetupDialog; the answers kept in spoke.json and offered again),
+  Set-SpokeFolders points PatchFolder and SoftwareFolder at the hub's and StateFolder at the
+  results folder; Get-PatchGroups returns one group, "This computer".  Every check, install and
+  reboot then runs locally (Test-ThisComputer), from the hub's files; the results file goes where the
+  hub reads it.  Logs, reports and the change log stay in the copy.  The hub's vetting caches are
+  read and trusted - the same file by size and time (Get-PatchInfoCacheFolders; the software cache
+  is keyed by the path under software\, so a share path matches) - and never written: what the copy
+  vets itself goes under its own root (Get-SoftwareVettingCacheWritePath).
 '@ }
 )
 

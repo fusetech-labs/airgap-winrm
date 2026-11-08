@@ -1375,8 +1375,12 @@ function Get-HealthSummaryRows {
     foreach ($name in $Servers) {
         $h = Get-CollectorResult -Name 'Health' -Server $name
         $g = Get-ServerGroup -Name $name
-        if (-not $h) { $rows += [pscustomobject]@{ Server = $name; Group = $(if ($g) { $g.Name } else { '' }); Light = 'Grey'; Checked = ''; Red = ''; Amber = ''; Green = ''; Services = ''; Tasks = ''; 'Failed logons' = ''; Lockouts = ''; Dormant = ''; SOE = ''; GPO = ''; Hardware = ''; Speed = ''; CPU = ''; 'RAM used' = ''; 'Disk free (min)' = ''; 'Up (d)' = ''; 'Errors' = ''; 'Clock' = ''; Worst = 'not checked' }; continue }
-        if (-not $h.Reachable) { $rows += [pscustomobject]@{ Server = $name; Group = $(if ($g) { $g.Name } else { '' }); Light = 'Grey'; Checked = $h.Checked.ToString('HH:mm:ss'); Red = ''; Amber = ''; Green = ''; Services = ''; Tasks = ''; 'Failed logons' = ''; Lockouts = ''; Dormant = ''; SOE = ''; GPO = ''; Hardware = ''; Speed = ''; CPU = ''; 'RAM used' = ''; 'Disk free (min)' = ''; 'Up (d)' = ''; 'Errors' = ''; 'Clock' = ''; Worst = 'unreachable: ' + $h.Error }; continue }
+        $notChecked = 'not checked'; if (Test-RemoteDisabled -Name $name) { $notChecked = "not checked - marked 'winrm: no': import its self-check results (O/S Patching tab)" }
+        if (-not $h) { $rows += [pscustomobject]@{ Server = $name; Group = $(if ($g) { $g.Name } else { '' }); Light = 'Grey'; 'Last checked' = ''; Red = ''; Amber = ''; Green = ''; Services = ''; Tasks = ''; 'Failed logons' = ''; Lockouts = ''; Dormant = ''; SOE = ''; GPO = ''; Hardware = ''; Speed = ''; CPU = ''; 'RAM used' = ''; 'Disk free (min)' = ''; 'Up (d)' = ''; 'Errors' = ''; 'Clock' = ''; Worst = $notChecked; Cells = @{} }; continue }
+        if (-not $h.Reachable) { $rows += [pscustomobject]@{ Server = $name; Group = $(if ($g) { $g.Name } else { '' }); Light = 'Grey'; 'Last checked' = (Format-LastChecked $h.Checked); Red = ''; Amber = ''; Green = ''; Services = ''; Tasks = ''; 'Failed logons' = ''; Lockouts = ''; Dormant = ''; SOE = ''; GPO = ''; Hardware = ''; Speed = ''; CPU = ''; 'RAM used' = ''; 'Disk free (min)' = ''; 'Up (d)' = ''; 'Errors' = ''; 'Clock' = ''; Worst = 'unreachable: ' + $h.Error; Cells = @{ 'Last checked' = (Get-ResultAgeColour $h.Checked) } }; continue }
+        # a Health result without its companions (an import, an older results file): PARTIAL - grey, nothing judged
+        $cov = Get-ConsoleCoverage -Console 'Health' -Server $name
+        if (-not $cov.Complete) { $rows += [pscustomobject]@{ Server = $name; Group = $(if ($g) { $g.Name } else { '' }); Light = 'Grey'; 'Last checked' = (Format-LastChecked $cov.Checked); Red = ''; Amber = ''; Green = ''; Services = ''; Tasks = ''; 'Failed logons' = ''; Lockouts = ''; Dormant = ''; SOE = ''; GPO = ''; Hardware = ''; Speed = ''; CPU = ''; 'RAM used' = ''; 'Disk free (min)' = ''; 'Up (d)' = ''; 'Errors' = ''; 'Clock' = ''; Worst = (Get-PartialRowText -Coverage $cov -Button 'Check health (ticked or all)'); Cells = @{ 'Last checked' = 'LightGray' } }; continue }
         $checks = @(Get-CheckRows -Console 'Health' -Server $name)
         $c = Get-LightCounts -Rows $checks
         $worst = @($checks | Where-Object { $_.Light -eq 'Red' } | Select-Object -First 2 | ForEach-Object { $_.Title })
@@ -1403,14 +1407,21 @@ function Get-HealthSummaryRows {
                 'NotApplicable' { $soe = 'none' }
                 'NotAssessable' { $soe = 'empty' }
                 'Error' { $soe = '?' }
+                'NotCollected' { $soe = '?' }
                 default {
                     if ($soeRow.Evidence -match '^(\d+) of (\d+)') { $soe = $Matches[1] + ' differ' } else { $soe = $soeRow.Verdict }
                     if ($soeRow.Evidence -match ', (\d+) not read') { $soe += ', ' + $Matches[1] + ' not read' }
                 }
             }
         }
+        # each check's cell in its own colour (Set-GridRows -CellColourProperty), the Last checked cell by its age; a check whose
+        # latest attempt failed paints the last good result and says so first in Worst (14-State.ps1)
+        $cellMap = Get-HealthCellColours -Checks $checks -Counts $c
+        $cellMap['Last checked'] = Get-ResultAgeColour $cov.Checked   # the oldest of the collectors the row reads: never fresher than its weakest input
+        $failedNow = Get-ResultFailure $h
+        if ($failedNow) { $worst = @(('LATEST CHECK FAILED at ' + (Format-LastChecked $h.LastAttempt) + ': ' + $failedNow + ' - the row shows the check of ' + (Format-LastChecked $h.Checked))) + @($worst) }
         $rows += [pscustomobject]@{
-            Server = $name; Group = $(if ($g) { $g.Name } else { '' }); Light = (Get-WorstLight -Rows $checks); Checked = $h.Checked.ToString('HH:mm:ss')
+            Server = $name; Group = $(if ($g) { $g.Name } else { '' }); Light = (Get-WorstLight -Rows $checks); 'Last checked' = (Format-LastChecked $cov.Checked)
             Red = $c.Red; Amber = $c.Amber; Green = $c.Green
             # a count whose query failed is "not read", never 0 (a Security log the account cannot read gave 0 failed logons, R6-D04)
             Services = $(if (Get-HealthReadError -Health $h -Prefix 'services:') { 'not read' } else { $svcBad }); Tasks = $(if (Get-HealthReadError -Health $h -Prefix 'tasks:') { 'not read' } else { @($h.FailingTasks).Count })
@@ -1419,9 +1430,11 @@ function Get-HealthSummaryRows {
             Hardware = (Get-HealthHardwareText -Health $h); Speed = $(if ($h.PSObject.Properties['CpuScore'] -and $null -ne (ConvertTo-HealthNumber $h.CpuScore)) { [string]$h.CpuScore } else { '' })
             CPU = (Format-HealthPercent $h.CpuPercent); 'RAM used' = (Format-HealthPercent $h.MemoryFreePct -Invert); 'Disk free (min)' = $diskMin; 'Up (d)' = $(if ($s) { $s.UptimeDays } else { '' }); 'Errors' = $h.ErrorCount; 'Clock' = $clock
             Worst = ($worst -join '; ')
-            Cells = (Get-HealthCellColours -Checks $checks -Counts $c)   # each check's cell in its own colour (Set-GridRows -CellColourProperty)
+            Cells = $cellMap
         }
     }
+    # a server never called over WinRM (winrm: no): its name cell grey, in every console
+    foreach ($r in $rows) { if (Test-RemoteDisabled -Name $r.Server) { $r.Cells['Server'] = 'LightGray' } }
     return $rows
 }
 
@@ -1473,6 +1486,7 @@ function Get-HealthDetailsHtml {
     $soeSection = @{ Heading = $(if ($soeName) { "SOE standard '$soeName'" } else { 'SOE standard' }); Rows = $soeRows; Columns = @('Light', 'Type', 'Item', 'Expected', 'Actual', 'Verdict', 'Note'); Note = $(if ($soeName) { 'every rule of the standard against this server (check H-SOE-01); Red = a required rule differs, Amber = an optional one' } else { "no standard applies to this server's group: add '# soe: <name>' to the group file, or create soe\default.json" }) }
     $sections = @($sections[0]) + @($soeSection) + @($sections | Select-Object -Skip 1)
     $sections += @(Get-GpoDetailsSections -Server $Server)
+    $sections += @(Get-ScriptsDetailSections -Server $Server)   # the scripts and tasks scan, when it has run (31-Health-Scripts.ps1)
     $sections += Get-ChangeLogSection -Server $Server
     return (New-DetailsHtml -Title "Health: $Server" -Subtitle 'every check with its evidence and fix, the SOE comparison, then what the collector read' -Console 'Health' -Facts $facts -Sections $sections)
 }
@@ -1775,7 +1789,7 @@ function Get-HealthAttentionHtml {
         return (New-DetailsHtml -Title ('Needs attention: ' + $what) -Console 'Health' -Facts @(@('Servers', [string]@($Servers).Count)) -Sections @(@{ Heading = 'Servers'; Rows = $rows; Columns = @('Server', 'State') }, @{ Heading = 'What to do'; Lines = $lines }))
     }
     if ($Id -eq 'couldnotrun') {
-        $rows = @(foreach ($s in $Servers) { foreach ($r in @(Get-CheckRows -Console 'Health' -Server $s | Where-Object { $_.Verdict -eq 'Error' })) { [pscustomobject]@{ Server = $s; Check = ('{0} {1}' -f $r.Id, $r.Title); Reason = $r.Evidence } } })
+        $rows = @(foreach ($s in $Servers) { foreach ($r in @(Get-CheckRows -Console 'Health' -Server $s | Where-Object { $_.Verdict -in 'Error', 'NotCollected' })) { [pscustomobject]@{ Server = $s; Check = ('{0} {1}' -f $r.Id, $r.Title); Reason = $r.Evidence } } })
         $lines = @('These checks have no verdict on these servers, so they are neither clear nor failing.', '"collector not available": that collector did not run or was refused on the server - press "Check health (ticked or all)", which runs every collector, and look at the log for the error (often access denied).', 'Anything else is a check that broke on the data it was given - the Reason says what; report it with the server''s details page.')
         return (New-DetailsHtml -Title 'Needs attention: checks that could not run' -Console 'Health' -Facts @(@('Servers', [string]@($Servers).Count)) -Sections @(@{ Heading = 'Checks without a verdict'; Rows = $rows; Columns = @('Server', 'Check', 'Reason') }, @{ Heading = 'What to do'; Lines = $lines }))
     }
@@ -1987,7 +2001,7 @@ function Update-SoeStandardCombo {
 function Show-SoePicker {
     # "Add from server": tick candidates from one scanned server.  Returns the picked candidate rows.
     param([string[]]$Servers)
-    $dlg = New-Object System.Windows.Forms.Form
+    $dlg = New-ToolkitDialogForm
     $dlg.Text = 'Add items from a scanned server'; $dlg.Size = New-Object System.Drawing.Size(1000, 680); $dlg.StartPosition = 'CenterParent'; $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
     $top = New-Object System.Windows.Forms.Panel; $top.Dock = 'Top'; $top.Height = 70
     $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = 'Server:'; $lbl.Location = New-Object System.Drawing.Point(10, 12); $lbl.AutoSize = $true
@@ -2067,7 +2081,7 @@ function New-SoeItemEditorForm {
     # The "SOE item" form.  Returns the form and its controls: Fields and Labels by item property, Shown = the fields
     # the current type uses, Points = the configuration-point catalogue.  Show-SoeItemEditor shows it.
     param($Item)
-    $dlg = New-Object System.Windows.Forms.Form
+    $dlg = New-ToolkitDialogForm
     $dlg.Text = 'SOE item'; $dlg.StartPosition = 'CenterParent'; $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9); $dlg.FormBorderStyle = 'FixedDialog'
     $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false; $dlg.ShowInTaskbar = $false
     $dlg.AutoSize = $true; $dlg.AutoSizeMode = 'GrowAndShrink'
@@ -2325,7 +2339,7 @@ function New-HealthConsole {
     $pages.TabPages.AddRange(@($pageChecks, $pageSoe, $pageGpo))
 
     # ---- Health checks page ----
-    $grid = New-ConsoleGrid -Columns @(@{ Name = 'Server'; Width = 170 }, @{ Name = 'Group'; Width = 100 }, @{ Name = 'Checked'; Width = 70 }, @{ Name = 'Red'; Width = 40 }, @{ Name = 'Amber'; Width = 50 }, @{ Name = 'Green'; Width = 50 }, @{ Name = 'Services'; Width = 60 }, @{ Name = 'Tasks'; Width = 50 }, @{ Name = 'Failed logons'; Width = 85 }, @{ Name = 'Lockouts'; Width = 65 }, @{ Name = 'Dormant'; Width = 60 }, @{ Name = 'SOE'; Width = 70 }, @{ Name = 'GPO'; Width = 120 }, @{ Name = 'Hardware'; Width = 90 }, @{ Name = 'Speed'; Width = 50 }, @{ Name = 'CPU'; Width = 50 }, @{ Name = 'RAM used'; Width = 70 }, @{ Name = 'Disk free (min)'; Width = 110 }, @{ Name = 'Up (d)'; Width = 50 }, @{ Name = 'Errors'; Width = 55 }, @{ Name = 'Clock'; Width = 75 }, @{ Name = 'Worst'; Width = 420; Fill = $true })
+    $grid = New-ConsoleGrid -Columns @(@{ Name = 'Server'; Width = 170 }, @{ Name = 'Group'; Width = 100 }, @{ Name = 'Last checked'; Width = 105 }, @{ Name = 'Red'; Width = 40 }, @{ Name = 'Amber'; Width = 50 }, @{ Name = 'Green'; Width = 50 }, @{ Name = 'Services'; Width = 60 }, @{ Name = 'Tasks'; Width = 50 }, @{ Name = 'Failed logons'; Width = 85 }, @{ Name = 'Lockouts'; Width = 65 }, @{ Name = 'Dormant'; Width = 60 }, @{ Name = 'SOE'; Width = 70 }, @{ Name = 'GPO'; Width = 120 }, @{ Name = 'Hardware'; Width = 90 }, @{ Name = 'Speed'; Width = 50 }, @{ Name = 'CPU'; Width = 50 }, @{ Name = 'RAM used'; Width = 70 }, @{ Name = 'Disk free (min)'; Width = 110 }, @{ Name = 'Up (d)'; Width = 50 }, @{ Name = 'Errors'; Width = 55 }, @{ Name = 'Clock'; Width = 75 }, @{ Name = 'Worst'; Width = 420; Fill = $true })
     $grid.Add_DoubleClick({   # $this = the grid; a local such as $grid is gone by the time the event fires
         if ($script:Gui['Busy']) { Write-PatchLog 'Busy - details are available again when the current action finishes' 'WARN'; return }
         if ($this.SelectedItems.Count -gt 0) { $n = $this.SelectedItems[0].Text; Show-DetailsWindow -Title "Health: $n" -Html (Get-HealthDetailsHtml -Server $n) }
@@ -2375,6 +2389,24 @@ function New-HealthConsole {
         Invoke-GuiAction -Name 'Assign SOE standard' -Action {
             if (-not (Test-GuiDialogAllowed 'The assignment dialog')) { return }
             if (Show-SoeAssignmentDialog -Servers @(Get-GridChecked -Grid $script:Gui['HealthGrid'])) { Get-PatchGroups | Out-Null; Clear-CheckRowCache; Invoke-ConsoleRefresh; Update-SoeItemsGrid }
+        }
+    }))
+    # what runs on the ticked servers by itself (31-Health-Scripts.ps1): the tasks, the scripts, what to look at - then the report
+    $toolbar.Controls.Add((New-GuiButton -Text 'Scripts and tasks (ticked)' -X 1040 -Y 8 -W 175 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Scheduled tasks and PowerShell scripts on the ticked servers: what runs, from where, what it does and what to look at. Read-only, within the time budget (Settings tab, Health); then the Scripts report.' -OnClick {
+        Invoke-GuiAction -Name 'Scripts and tasks' -ReadOnly -Action {
+            $servers = @(Get-GridChecked -Grid $script:Gui['HealthGrid'])
+            if ($servers.Count -eq 0) { Show-GuiNotice 'Tick the servers to scan: the scan walks their disks for scripts (the folders and the time budget are on the Settings tab, Health).'; return }
+            # a fresh scan at every press (owner's decision 2026-11-09: the data is worth it and the budget bounds it); the
+            # earlier scan stays on the server's Health page meanwhile, and a failed rescan keeps it, marked, for the report
+            $scanned = @(Get-ServerScripts -ComputerName $servers)
+            # no report over nothing: a server that refused, timed out or is marked winrm: no says so here, with the reason
+            $good = @($scanned | Where-Object { $_.Reachable })
+            if ($good.Count -eq 0) {
+                $why = @($servers | ForEach-Object { $r = Get-CollectorResult -Name 'Scripts' -Server $_; if ($r -and -not $r.Reachable) { '{0}: {1}' -f $_, $r.Error } elseif (Test-RemoteDisabled -Name $_) { '{0}: marked winrm: no (run the copy on the server instead)' -f $_ } elseif (-not $r) { '{0}: not called' -f $_ } })
+                Show-GuiNotice ("Nothing was scanned, so no report was written:`n" + ($why -join "`n"))
+                return
+            }
+            Show-ReportDone -Report (Export-ScriptsReport -Servers $servers)
         }
     }))
     # what the row colours and the SOE column mean: on hover over the row count, not as a paragraph under the page
@@ -2576,7 +2608,7 @@ function Show-SoeAssignmentDialog {
     if ($names.Count -eq 0) { Show-GuiNotice 'No SOE standard exists yet - create one on the SOE standards page first (New, then Add from server...).'; return $false }
     if (@($script:Groups).Count -eq 0) { Show-GuiNotice 'No group files are loaded.'; return $false }
     $none = '(none - group or default standard, if any)'
-    $dlg = New-Object System.Windows.Forms.Form
+    $dlg = New-ToolkitDialogForm
     $dlg.Text = 'Assign SOE standards to servers'; $dlg.Size = New-Object System.Drawing.Size(1000, 600); $dlg.StartPosition = 'CenterParent'; $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
     $grid = New-ConsoleGrid -NoCheckBoxes -Columns @(@{ Name = 'Server'; Width = 230 }, @{ Name = 'Group'; Width = 120 }, @{ Name = 'On the server line'; Width = 220 }, @{ Name = 'In effect'; Width = 200 }, @{ Name = 'From'; Width = 160; Fill = $true })
     $grid.MultiSelect = $true
@@ -2652,7 +2684,7 @@ function Show-SoeAssignmentDialog {
 function Show-InputBox {
     # A one-line prompt (WinForms has no InputBox of its own).
     param([string]$Title, [string]$Prompt, [string]$Default = '')
-    $dlg = New-Object System.Windows.Forms.Form
+    $dlg = New-ToolkitDialogForm
     $dlg.Text = $Title; $dlg.Size = New-Object System.Drawing.Size(480, 160); $dlg.StartPosition = 'CenterParent'; $dlg.FormBorderStyle = 'FixedDialog'; $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
     $l = New-Object System.Windows.Forms.Label; $l.Text = $Prompt; $l.Location = New-Object System.Drawing.Point(12, 12); $l.Size = New-Object System.Drawing.Size(440, 20)
     $t = New-Object System.Windows.Forms.TextBox; $t.Location = New-Object System.Drawing.Point(12, 40); $t.Width = 440; $t.Text = $Default

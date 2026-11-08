@@ -95,13 +95,14 @@ function Get-PatchFiles {
     #   Name, FullName, KB, SizeMB, Type, PatchType, Installable, OsLine, TargetBuild, TargetOs, Signature, Signer, Hash
     # PatchType comes from the sub-folder (patches\Windows, patches\DotNet, patches\SQL ...).  Files left in the
     # root of patches\ count as Windows so the version 1 layout keeps working.
-    if (-not (Test-Path -LiteralPath $script:Config.PatchFolder)) {
+    # the folders are made here, never on a spoke: the hub's share is read, not written (review 2026-11-08)
+    if (-not $script:SpokeMode -and -not (Test-Path -LiteralPath $script:Config.PatchFolder)) {
         New-Item -ItemType Directory -Path $script:Config.PatchFolder -Force | Out-Null
         Write-PatchLog "Created empty patch folder $($script:Config.PatchFolder)" 'WARN'
     }
     foreach ($typeName in $script:Config.PatchTypes.Keys) {
         $sub = Join-Path $script:Config.PatchFolder $typeName
-        if (-not (Test-Path -LiteralPath $sub)) { New-Item -ItemType Directory -Path $sub -Force | Out-Null }
+        if (-not $script:SpokeMode -and -not (Test-Path -LiteralPath $sub)) { New-Item -ItemType Directory -Path $sub -Force | Out-Null }
     }
 
     $patches = @()
@@ -211,8 +212,19 @@ function Get-OsNameForBuild {
     return "build $Build"
 }
 
+function Get-PatchInfoCacheFolders {
+    # Where a file's cached reading may be: this copy's patches\_info, and on a spoke the hub's patches\_info as well, read
+    # only (the first load on a server read every update file over the share - field finding 2026-11-06)
+    $folders = @([string]$script:Config.PatchInfoFolder)
+    if ($script:SpokeHubFolder) {
+        $hubInfo = Join-Path $script:SpokeHubFolder 'patches\_info'
+        if ($hubInfo -ine $folders[0]) { $folders += $hubInfo }
+    }
+    return $folders
+}
+
 function Get-PatchFileInfo {
-    # Target build + signature + SHA256 of one file, cached in patches\_info\<file>.txt.
+    # Target build + signature + SHA256 of one file, cached in patches\_info\<file>.txt (a spoke reads the hub's cache too).
     # The cache is only trusted when the file's size and last-write time still match (a replaced
     # file with the same name is read again).  Reading takes a few seconds for a 600 MB file.
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -222,9 +234,13 @@ function Get-PatchFileInfo {
     $stamp = '{0}|{1}' -f $file.Length, $file.LastWriteTimeUtc.Ticks
     $cache = Join-Path $infoFolder ($file.Name + '.txt')
 
-    if (Test-Path -LiteralPath $cache) {
+    # this copy's own cache first, then the hub's (a spoke trusts what the hub worked out - the same file by size and time -
+    # and never writes into the hub's folder: Get-PatchInfoCacheFolders)
+    foreach ($folder in @(Get-PatchInfoCacheFolders)) {
+        $cached = Join-Path $folder ($file.Name + '.txt')
+        if (-not (Test-Path -LiteralPath $cached)) { continue }
         $h = @{}
-        foreach ($line in (Get-Content -LiteralPath $cache)) { if ($line -match '^([A-Za-z]+)=(.*)$') { $h[$Matches[1]] = $Matches[2] } }
+        foreach ($line in (Get-Content -LiteralPath $cached)) { if ($line -match '^([A-Za-z]+)=(.*)$') { $h[$Matches[1]] = $Matches[2] } }
         # Reader=5: the cache also holds the OS family, the .NET line, the kind of package and the builds a .NET rollup is for
         # (read from inside its cab; older entries are read again)
         if ($h['Stamp'] -eq $stamp -and $h['Hash'] -and $h.ContainsKey('TargetBuild') -and $h.ContainsKey('Signature') -and $h['Reader'] -eq '5') {

@@ -218,7 +218,7 @@ function Request-ChangeRecord {
     $last = $script:LastChangeRecord
     $required = @(@($script:Config.ChangeRequiredFields) | Where-Object { $script:ChangeFieldNames.Contains([string]$_) })
     while ($true) {
-        $dlg = New-Object System.Windows.Forms.Form
+        $dlg = New-ToolkitDialogForm
         $dlg.Text = 'Change record - ' + $Action
         $dlg.Size = New-Object System.Drawing.Size(640, 500); $dlg.StartPosition = 'CenterParent'; $dlg.FormBorderStyle = 'FixedDialog'; $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
         $intro = New-Object System.Windows.Forms.Label; $intro.Location = New-Object System.Drawing.Point(12, 10); $intro.Size = New-Object System.Drawing.Size(600, 74)

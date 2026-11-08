@@ -40,7 +40,7 @@ if (-not $script:RootFolder) { $script:RootFolder = (Get-Location).Path }
 $script:Config = @{
     # ---- Identity ----
     ToolName       = 'Sysadmin WinRM Toolkit'   # banner, window title, reports
-    ToolVersion    = '2.1'
+    ToolVersion    = '2.2'
     SourceUrl      = 'https://github.com/fusetech-labs/airgap-winrm'   # the About tab shows it to copy; the tool never opens it
     Author         = 'Chris Fryer'                       # the About tab
     SupportEmail   = 'products@fusetech.com.au'          # the About tab shows it to copy; the tool sends no mail
@@ -49,6 +49,7 @@ $script:Config = @{
     # ---- Folders (relative to the root folder = where the launcher lives) ----
     PatchFolder    = Join-Path $script:RootFolder 'patches'   # one sub-folder per patch type (see PatchTypes)
     PatchInfoFolder = Join-Path $script:RootFolder 'patches\_info'   # cache: which build each file targets
+    SoftwareInfoFolder = Join-Path $script:RootFolder 'software\_info'   # a spoke's own vetting cache (the hub's is read, never written)
     LogFolder      = $(if ($script:LogFolderOverride) { $script:LogFolderOverride } else { Join-Path $script:RootFolder 'logs' })   # one log file per day ($script:LogFolderOverride, when set before this loads, wins)
     ReportFolder   = Join-Path $script:RootFolder 'reports'   # HTML + CSV reports (git-ignored: host names)
     DataFolder     = Join-Path $script:RootFolder 'data'      # shipped catalogues (*.psd1), refreshed offline
@@ -56,6 +57,7 @@ $script:Config = @{
     SecurityFolder = Join-Path $script:RootFolder 'security'  # profile.json + tailoring.json
     SoftwareFolder = Join-Path $script:RootFolder 'software'  # one sub-folder per package of data\software-packages.psd1 (installers)
     ChangeLogFolder = Join-Path $script:RootFolder 'changes'  # change-log.csv: the change record of every install, removal and reboot (git-ignored)
+    StateFolder    = Join-Path $script:RootFolder 'state\servers'   # one <server>.xml per server: the last result of every collector (14-State.ps1; git-ignored: host names, accounts, findings)
     SettingsFile   = $(if ($script:SettingsFileOverride) { $script:SettingsFileOverride } else { Join-Path $script:RootFolder 'settings\settings.json' })   # what the Settings tab saved (git-ignored); $script:SettingsFileOverride, when set before this loads, wins
     DefaultSoeStandard = 'default'   # soe\default.json applies to every group without a "# soe: <name>" line in its file
 
@@ -96,6 +98,13 @@ $script:Config = @{
     LogShowWhy           = $true   # ... and the reasoning lines (WHY)
     LogKeepDays          = 0       # log files older than this many days are deleted at start-up; 0 = every log file is kept
 
+    # ---- Saved results (lib\14-State.ps1): every collector's last result per server, kept in state\servers\ and loaded
+    #      at the next start, so every console shows what it knew; the "Last checked" cell says how old that is ----
+    KeepResults          = $true   # off = nothing is written to state\ (the window forgets everything when it closes)
+    ResultFreshDays      = 1       # "Last checked" is green when the result is at most this many days old ...
+    ResultStaleDays      = 3       # ... amber up to this many days, red beyond
+    ResultsKeepDays      = 180     # a saved results file not written for this many days is deleted at start-up (0 = keep every file)
+
     # ---- Software deployment (lib\50-Console-Software.ps1) ----
     SoftwareTimeoutMin  = 45       # an installer still running after this long is reported UNKNOWN (it keeps running on the server)
     MaxSoftwareColumns  = 6        # a big library: the Software console shows at most this many packages - as grid columns and in the
@@ -121,6 +130,9 @@ $script:Config = @{
     LogonFailFail        = 50
     MaxEvents            = 5000    # cap per event query so a busy server cannot stall the check
     TaskFailDays         = 7       # scheduled task failures within this many days count
+    ScriptSearchFolders  = @()     # Scripts and tasks (Health): the folders walked for .ps1 / .psm1 files; empty = every fixed drive
+    ScriptSearchSkip     = @('Windows', 'Windows.old', 'Program Files', 'Program Files (x86)', 'ProgramData\Microsoft', 'ProgramData\Package Cache', '$Recycle.Bin', 'System Volume Information', 'AppData', 'WindowsApps', 'Documents\WindowsPowerShell\Modules', 'Documents\PowerShell\Modules', '.vscode', 'node_modules', '.git')   # folder names or path parts never entered: vendor modules (the profiles' module folders too), caches, the profiles' app data
+    ScriptSearchSeconds  = 60      # the walk stops here, per server (each script is analysed as it is found); the result then says PARTIAL and what was left
     DormantMonths        = 12      # software installed longer ago than this, with nothing using it
     UnknownStaleMonths   = 6       # a product NOT in known-apps.psd1, installed longer ago than this: updates are likely waiting (Stale)
     UnknownAgeingMonths  = 12      # ... and longer ago than this: probably unmaintained or unsupported, a cessation risk (Ageing)
@@ -172,7 +184,7 @@ $script:Config = @{
     TreatPendingFileRenameAsReboot = $false  # PendingFileRenameOperations is noisy; off by default
     RequireSolidcoreUpdateMode = $true   # Trellix Solidcore on a server must say Update (or Disabled) now AND on reboot, else installs and reboots are blocked
     OnePatchPerRun = $true               # one patch per server per run; the next one waits for the reboot (a second package on top of a 3010 failed in the field)
-    StopTrellixAgentForInstall = $true   # the box on the O/S Patching and Software tabs starts ticked: the two Trellix Agent services (masvc, macmnsvc) are set to
+    StopTrellixAgentForInstall = $false   # the box on the O/S Patching and Software tabs starts unticked (owner's choice 2026-11-06; tick it where the agent blocks installs); ticked, the two Trellix Agent services (masvc, macmnsvc) are set to
                                          # Disabled and stopped on each server before an install (the field test found the install only completes without them);
                                          # "Start Trellix Agent (ticked)" sets them to Automatic and starts them again after the reboot
     TrellixInUse = $true                 # Trellix runs on these servers: the Solidcore and Trellix Agent columns, the agent boxes and buttons, the agent
@@ -206,6 +218,9 @@ $script:Gui          = @{}     # hashtable of WinForms controls, filled by Show-
 $script:SettingsDefaults = $null   # 12-Settings: the defaults as copied at start-up
 $script:SoftwareRowCache = $null; $script:CheckRowCache = $null; $script:ToolFilesStamp = $null   # verdict and data caches, keyed on stamps
 $script:PreGuiLines = @()          # WARN / ERROR lines logged before the window exists: replayed into the log box when it is built
+$script:StateDirty = @{}           # 14-State: servers whose results changed and are not written to state\ yet (name as typed -> $true)
+$script:StateSeen = @{}            # 14-State: the results files read so far (path -> last-write ticks), so a reload re-reads only what changed
+if ($null -eq $script:SpokeMode) { $script:SpokeMode = $false }   # Start-WinRMToolkit.ps1 -Spoke: this copy checks and patches the computer it runs on, from a hub's folders
 $script:LogFileBroken = ''; $script:LogFileBrokenShown = $false   # 02-Logging: the log file cannot be written - said once in the window
 $script:InstallOutcomeSink = $null # 06-Install: while set, results a status check records go here instead of their own pop-up
 

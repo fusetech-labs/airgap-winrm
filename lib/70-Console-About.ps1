@@ -693,7 +693,7 @@ function New-SigningRequestForm {
     # The request dialog, not shown yet: the certificate's name (left), then the classification, key and hash with the
     # ISM controls they meet.  -Last offers what was typed before.  Returns @{ Form; Fields }.
     param($Last = $null)
-    $dlg = New-Object System.Windows.Forms.Form
+    $dlg = New-ToolkitDialogForm
     $dlg.Text = 'Create a signing request'; $dlg.ClientSize = New-Object System.Drawing.Size(1000, 600); $dlg.StartPosition = 'CenterParent'; $dlg.FormBorderStyle = 'FixedDialog'; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false; $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
     $region = ''; try { $region = [System.Globalization.RegionInfo]::CurrentRegion.TwoLetterISORegionName } catch { }
     $fields = @{}; $y = 14
@@ -777,7 +777,7 @@ function New-CertificatePickerForm {
     # The "Sign with a certificate" dialog, not shown yet: the certificate, and - for the one picked - its key and hash
     # against the ISM for the classification (shown, not chosen: they are the certificate's).  Returns the form.
     param([object[]]$Certificates)
-    $dlg = New-Object System.Windows.Forms.Form
+    $dlg = New-ToolkitDialogForm
     $dlg.Text = 'Sign with a certificate'; $dlg.ClientSize = New-Object System.Drawing.Size(1000, 400); $dlg.StartPosition = 'CenterParent'; $dlg.FormBorderStyle = 'FixedDialog'; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false; $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
     $l = New-Object System.Windows.Forms.Label; $l.Text = 'Code-signing certificate:'; $l.Location = New-Object System.Drawing.Point(12, 17); $l.AutoSize = $true
     $combo = New-Object System.Windows.Forms.ComboBox; $combo.DropDownStyle = 'DropDownList'; $combo.Location = New-Object System.Drawing.Point(200, 14); $combo.Width = 788
@@ -920,7 +920,7 @@ function Confirm-CodeSigningGaps {
 function New-CodeSigningDialog {
     # The self-sign dialog, not shown yet: what will happen (-Intro), then the classification / key / hash panel.
     param([string]$Title, [string]$Intro, [string]$OkText, [string]$HashNote)
-    $dlg = New-Object System.Windows.Forms.Form
+    $dlg = New-ToolkitDialogForm
     $dlg.Text = $Title; $dlg.ClientSize = New-Object System.Drawing.Size(1000, 520); $dlg.StartPosition = 'CenterParent'; $dlg.FormBorderStyle = 'FixedDialog'; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false; $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
     $introLabel = New-Object System.Windows.Forms.Label; $introLabel.Text = $Intro; $introLabel.Location = New-Object System.Drawing.Point(12, 12); $introLabel.Size = New-Object System.Drawing.Size(976, 150)
     $dlg.Controls.Add($introLabel)

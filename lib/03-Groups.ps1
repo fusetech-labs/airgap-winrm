@@ -8,6 +8,8 @@
 #    * blank lines are ignored
 #    * anything after a # is a comment:   SRV-APP01   # finance app
 #    * the file name (without .txt) becomes the group name
+#    * "; winrm: no" after a name (or "# winrm: no" for the whole file): the server is never called over WinRM -
+#      its results come from its own self-check (14-State.ps1), imported on the O/S Patching tab
 #  A .txt file that contains lines that do not look like host names is
 #  ignored, so a README or other text file is never mistaken for a list.
 # =====================================================================
@@ -70,11 +72,22 @@ function Test-ThisComputer {
     return $false
 }
 
+function Get-ThisComputerFqdn {
+    # This computer's name as a self-check or a spoke writes it: the FQDN when it has a DNS domain, else the computer name.
+    try { $ip = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties(); if ($ip.DomainName) { return ($ip.HostName + '.' + $ip.DomainName).ToLower() } } catch { }
+    return $env:COMPUTERNAME.ToLower()
+}
+
+function Get-ThisComputerDomain {
+    # The DNS domain of this computer ('' in a workgroup): a results file names it so two SRV01s in two domains stay two boxes.
+    try { $ip = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties(); return ([string]$ip.DomainName).ToLower() } catch { return '' }
+}
+
 function Read-GroupFile {
     # One group file -> a group object, or $null when the file is not a server list.
     #   server lines:   name[; key: value[; key: value ...]][  # comment]      e.g.  srv-web01.corp.local; soe: Web tier
-    #   directives:     # class: <name>   # soe: <name>        (group-wide fallbacks for lines without their own)
-    # Per-line keys live in Attributes[<name, lower case>] = @{ key = value }; 'soe' and 'class' are the ones the
+    #   directives:     # class: <name>   # soe: <name>   # winrm: no      (group-wide fallbacks for lines without their own)
+    # Per-line keys live in Attributes[<name, lower case>] = @{ key = value }; 'soe', 'class' and 'winrm' are the ones the
     # consoles read today (Get-ServerAttribute); any other key is kept for later use.
     param([string]$Path)
     $file = Get-Item -LiteralPath $Path
@@ -82,11 +95,12 @@ function Read-GroupFile {
     $odd = New-Object System.Collections.Generic.List[string]; $lineNo = 0
     $class = ''      # "# class: internet-facing"  -> patch timeframes and application control expectations
     $soe = ''        # "# soe: Web tier"           -> the SOE standard this group is compared against
+    $winrm = ''      # "# winrm: no"               -> no server of this file is called over WinRM (self-check results)
     foreach ($raw in @(Get-Content -LiteralPath $file.FullName)) {
         $lineNo++
-        if ($raw -match '^\s*#\s*(class|soe)\s*:\s*(.+?)\s*$') {      # directives live in comment lines
+        if ($raw -match '^\s*#\s*(class|soe|winrm)\s*:\s*(.+?)\s*$') {      # directives live in comment lines
             $val = ($Matches[2] -replace '\s+#.*$', '').Trim()
-            if ($Matches[1] -eq 'class') { $class = $val } else { $soe = $val }
+            if ($Matches[1] -eq 'class') { $class = $val } elseif ($Matches[1] -eq 'winrm') { $winrm = $val } else { $soe = $val }
             continue
         }
         $line = ($raw -split '#')[0].Trim()          # drop comments and whitespace
@@ -127,13 +141,17 @@ function Read-GroupFile {
         Servers    = $servers
         Class      = $class
         Soe        = $soe
+        Winrm      = $winrm
         Attributes = $attributes
     }
     $extra = ''
     if ($class) { $extra += ", class: $class" }
     if ($soe) { $extra += ", SOE standard: $soe" }
+    if ($winrm) { $extra += ", winrm: $winrm" }
     if ($withOwn -gt 0) { $extra += (", {0} line(s) with their own settings" -f $withOwn) }
     Write-PatchLog ("Group '{0}' loaded with {1} server(s) from {2}{3}" -f $file.BaseName, $servers.Count, $file.Name, $extra) 'INFO'
+    $noWinrm = @($servers | Where-Object { $own = $attributes[$_.ToLower()]; (Test-WinrmOffValue $(if ($own -and $own['winrm']) { $own['winrm'] } else { $winrm })) })
+    if ($noWinrm.Count -gt 0) { Write-PatchLog ("  -> {0} server(s) marked 'winrm: no' - never called over WinRM; their results come from their own self-check (Import results on the O/S Patching tab): {1}" -f $noWinrm.Count, ($noWinrm -join ', ')) 'INFO' }
     foreach ($s in $servers) {
         if ($s -match '^\d{1,3}(\.\d{1,3}){3}$') {
             Write-PatchLog "  -> '$s' is an IP address: WinRM cannot use Kerberos for it and will fall back to NTLM, which needs TrustedHosts on this PC. Use the server's FQDN instead." 'WARN'
@@ -145,10 +163,26 @@ function Read-GroupFile {
     return $group
 }
 
+function Test-GroupFileName {
+    # A *.txt in the root folder is a server list unless it is a manual: README.txt, the INSTRUCTIONS.txt a copy for a
+    # server carries (read as a list, its 28 lines were "not host names" in the log - field finding 2026-11-06), or a
+    # CHECKSUMS.txt written beside patches\ and software\ (a group of 0 servers otherwise)
+    param([string]$Name)
+    return ([string]$Name -notin 'README.txt', 'INSTRUCTIONS.txt', 'CHECKSUMS.txt')
+}
+
 function Get-PatchGroups {
-    # Returns one object per group:  Name, File, Servers (array of strings), Class, Soe, Attributes (Read-GroupFile).
+    # Returns one object per group:  Name, File, Servers (array of strings), Class, Soe, Winrm, Attributes (Read-GroupFile).
+    # A spoke (Start-WinRMToolkit.ps1 -Spoke, 14-State.ps1) has one group, "This computer", with its own name: it checks and
+    # patches the computer it runs on, from the hub's patches and software, and never calls another server.
     $groups = @()
-    $files  = @(Get-ChildItem -LiteralPath $script:RootFolder -Filter '*.txt' -File | Where-Object { $_.Name -ine 'README.txt' } | Sort-Object Name)   # -LiteralPath: a folder name may hold [ ]; README.txt is the manual, never a list
+    if ($script:SpokeMode) {
+        $groups += [pscustomobject]@{ Name = 'This computer'; File = ''; Servers = @((Get-ThisComputerFqdn)); Class = ''; Soe = ''; Winrm = ''; Attributes = @{} }
+        Write-PatchLog ("Spoke: the server list is this computer, {0} - the group files of the hub are not read here" -f (Get-ThisComputerFqdn)) 'INFO'
+        $script:Groups = $groups
+        return $groups
+    }
+    $files  = @(Get-ChildItem -LiteralPath $script:RootFolder -Filter '*.txt' -File | Where-Object { Test-GroupFileName -Name $_.Name } | Sort-Object Name)   # -LiteralPath: a folder name may hold [ ]; README.txt is the manual, never a list
     foreach ($file in $files) {
         $g = Read-GroupFile -Path $file.FullName
         if ($g) { $groups += $g }
@@ -173,10 +207,83 @@ function Get-PatchGroups {
     return $groups
 }
 
+function Test-WinrmOffValue {
+    # The values of "winrm:" that mean "never over WinRM": no, off, none, false, 0, disabled, self-check
+    param([string]$Value)
+    return (([string]$Value).Trim().ToLower() -in 'no', 'off', 'none', 'false', '0', 'disabled', 'self-check', 'selfcheck')
+}
+
+function Test-RemoteDisabled {
+    # Is this server marked "winrm: no" (its own line, or its group file's directive)?  Such a server is never called
+    # over WinRM by any console or action: its results come from its own self-check (14-State.ps1).  The toolkit PC
+    # itself is never remote-disabled: its checks run here without WinRM anyway.
+    param([string]$Name)
+    if (Test-ThisComputer -Name $Name) { return $false }
+    return (Test-WinrmOffValue (Get-ServerAttribute -Name $Name -Key 'winrm'))
+}
+
+function Get-RemoteDisabledServers {
+    # The names among -Names that are marked "winrm: no"; with no -Names, every such server of every loaded group.
+    param([string[]]$Names)
+    if ($null -eq $Names) { $Names = @(Get-UniqueNames @(foreach ($g in @($script:Groups)) { @($g.Servers) })) }
+    return @($Names | Where-Object { Test-RemoteDisabled -Name $_ })
+}
+
+function Remove-RemoteDisabledServers {
+    # The names an action may work on: a server marked "winrm: no" is taken out with one log line naming the action -
+    # nothing is ever sent to it, whatever its imported results say.
+    param([string[]]$Names, [string]$Action = 'this action')
+    $off = @(Get-RemoteDisabledServers -Names $Names)
+    if ($off.Count -gt 0) { Write-PatchLog ("{0}: {1} skipped - marked 'winrm: no' in the group file (never called over WinRM; the results shown are from its own self-check)" -f $Action, ($off -join ', ')) 'WARN' }
+    return @($Names | Where-Object { $off -notcontains $_ })
+}
+
+function Set-RemoteDisabledMark {
+    # The "Mark winrm: no (ticked)" button's work, and its reverse: writes "; winrm: no" on each server's line in its
+    # group file (Set-ServerAttribute, the way the SOE and class entries are written), or with -Clear takes the mark off -
+    # the pair goes, or "; winrm: yes" is written where the file's own "# winrm: no" directive would keep the server
+    # marked.  The group files are read again afterwards, so every console and action answers from the files from the
+    # next press on.  A server already as asked is skipped; so is the toolkit PC (it checks itself without WinRM).
+    # Returns @{ Changed; Skipped; Errors } - names, names, messages.
+    param([string[]]$Servers, [switch]$Clear)
+    $changed = @(); $skipped = @(); $errors = @()
+    $want = -not $Clear
+    foreach ($s in @(Get-UniqueNames @($Servers))) {
+        if (Test-ThisComputer -Name $s) { $skipped += $s; Write-PatchLog ("{0}: no winrm mark - the toolkit PC checks itself without WinRM" -f $s) 'INFO'; continue }
+        if ((Test-RemoteDisabled -Name $s) -eq $want) { $skipped += $s; continue }
+        try {
+            if ($want) {
+                Set-ServerAttribute -Server $s -Key 'winrm' -Value 'no'
+            } else {
+                $g = Get-ServerGroup -Name $s
+                $fileWide = ($null -ne $g -and (Test-WinrmOffValue ([string]$g.Winrm)))
+                Set-ServerAttribute -Server $s -Key 'winrm' -Value $(if ($fileWide) { 'yes' } else { '' })
+            }
+            $changed += $s
+        } catch { $errors += ('{0}: {1}' -f $s, (Get-ShortError $_)); Write-PatchLog ("{0}: the winrm mark was not written: {1}" -f $s, (Get-ShortError $_)) 'ERROR' }
+    }
+    if ($changed.Count -gt 0) {
+        # the files decide: each group file written is read again in place, so Test-RemoteDisabled answers from it from now on
+        $written = @($changed | ForEach-Object { $g = Get-ServerGroup -Name $_; if ($g -and $g.File) { [string]$g.File } } | Select-Object -Unique)
+        $groups = @($script:Groups)
+        for ($i = 0; $i -lt $groups.Count; $i++) {
+            if ($written -notcontains [string]$groups[$i].File) { continue }
+            $fresh = Read-GroupFile -Path $groups[$i].File
+            if ($fresh) { $groups[$i] = $fresh }
+        }
+        $script:Groups = $groups; $script:GroupIndex = $null
+        Clear-CheckRowCache
+        if (Get-Command -Name 'Clear-SecurityRowCache' -ErrorAction SilentlyContinue) { Clear-SecurityRowCache }
+        $script:SoftwareRowCache = $null
+        Write-PatchLog ("{0} server(s) {1}; the group files were read again: {2}" -f $changed.Count, $(if ($want) { "now marked 'winrm: no' - never called over WinRM" } else { "no longer marked 'winrm: no' - called over WinRM from the next check" }), ($changed -join ', ')) 'INFO'
+    }
+    return @{ Changed = $changed; Skipped = $skipped; Errors = $errors }
+}
+
 function Get-ServerAttribute {
     # A server's setting by key: its own "; key: value" on the group-file line first, else the group's directive
-    # ("# soe:" / "# class:") for the two keys that have one, else ''.  The FIRST group file that lists the server
-    # decides - the Health and Security pages write and read that one.  A different value in a later file is a
+    # ("# soe:" / "# class:" / "# winrm:") for the three keys that have one, else ''.  The FIRST group file that lists the
+    # server decides - the Health and Security pages write and read that one.  A different value in a later file is a
     # conflict: said once per server, key and file in the log, so a hand-written directive is never lost in silence.
     param([string]$Name, [string]$Key)
     $groups = @(Get-ServerGroups -Name $Name)
@@ -187,6 +294,7 @@ function Get-ServerAttribute {
         if ($g.PSObject.Properties['Attributes'] -and $g.Attributes) { $own = $g.Attributes[$Name.ToLower()]; if ($own -and $own[$k]) { return [string]$own[$k] } }
         if ($k -eq 'soe') { return [string]$g.Soe }
         if ($k -eq 'class') { return [string]$g.Class }
+        if ($k -eq 'winrm' -and $g.PSObject.Properties['Winrm']) { return [string]$g.Winrm }
         return ''
     }
     $value = & $pick $groups[0]
