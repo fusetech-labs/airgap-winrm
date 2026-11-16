@@ -46,12 +46,20 @@ tests/
 # the capability brief (brochure.html and the PDF built from it)
 brochure/
 
-# The Download Toolkit (companion\) stays out of this version's repository - it is picked up in a later version;
-# the manifest and checksums it writes beside the WinRM toolkit's patches\ and software\ stay out too
-companion/
+# The Download Toolkit (companion\): what it saved for this site and its last run, and the library it keeps when it
+# is not beside the WinRM toolkit (its logs\ and reports\ are covered by the rules above). The manifest and checksums
+# it writes beside the WinRM toolkit's patches\ and software\ name the operator and stay out too
+companion/settings/*.json
+companion/settings/*.part
+companion/library/
 library-manifest.json
 library-manifest.json.part
+library-manifest.json.lock
 CHECKSUMS.txt
+# a download in progress (the file arrives in _incoming\ of its product's folder and is checked there)
+_incoming/
+patches/**/*.part
+software/**/*.part
 
 # Editor / OS noise
 Thumbs.db
