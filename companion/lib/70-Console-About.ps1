@@ -6,8 +6,9 @@
 #  Version, author, support, the source link, this copy (PowerShell,
 #  execution policy, the settings and environment files, the library),
 #  the code signature of every script as PowerShell sees it, the
-#  requirements.  The tool itself signs nothing and needs no elevation:
-#  it runs as an ordinary user.
+#  requirements, and how this session was started (as a file, or from
+#  text).  The tool itself signs nothing and needs no elevation: it runs
+#  as an ordinary user.
 # =====================================================================
 
 function Get-ToolkitScriptFiles {
@@ -54,6 +55,7 @@ function Get-AboutHtml {
     $copy = @(
         [pscustomobject]@{ Item = 'PowerShell'; Value = ('{0}, {1} language mode' -f $PSVersionTable.PSVersion, $ExecutionContext.SessionState.LanguageMode) }
         [pscustomobject]@{ Item = 'Execution policy'; Value = ('{0} in effect ({1})' -f (Get-ExecutionPolicy), $policy) }
+        [pscustomobject]@{ Item = 'Started'; Value = $(if ($script:StartedFromText) { 'from text: the launcher and its building blocks were read from their files and run as text, which the execution policy does not check' } else { 'as a file' }) }
         [pscustomobject]@{ Item = 'Settings'; Value = $settings }
         [pscustomobject]@{ Item = 'This site'; Value = $environment }
         [pscustomobject]@{ Item = 'Library'; Value = ('{0} ({1})' -f $script:Config.LibraryFolder, (Get-LibraryPlaceText)) }
@@ -63,6 +65,7 @@ function Get-AboutHtml {
         @{ Heading = 'What it is'; Lines = @(
             ('The companion of the {0} for the side that has internet: it fetches the newest appropriate update of every product - Windows and .NET cumulative updates from the Microsoft Update Catalog, VMware Tools from the VMware package site, any product with a fixed link or an index page - checks every file (size, the published hash, the Authenticode signature, a SHA256 of its own) and keeps the library in the folders the WinRM toolkit reads.' -f $script:Config.CompanionOf),
             'The Settings tab names what this site runs and the Products tab what is fetched; nothing else is. The Schedule tab makes it a scheduled task. The library carries library-manifest.json and CHECKSUMS.txt so the other side can check every file by hand.',
+            'Where this tool cannot run - PowerShell in ConstrainedLanguage mode under application control, or scripts blocked altogether - simple\Simple-Companion.html is the simple companion: one page in a browser that keeps the versions the site has deployed, links every product to the place it is published and checks each file fetched by hand.',
             ('Author: {0}.  Support: {1} - copy the address with the Copy support email button above.' -f $script:Config.Author, $script:Config.SupportEmail),
             ('Source code, issues and new versions: {0} - copy the link with the Copy GitHub link button above.' -f $script:Config.SourceUrl)) }
         @{ Heading = 'The consoles'; Rows = $consoles; Columns = @('Console', 'Does') }

@@ -1,0 +1,1506 @@
+<!DOCTYPE html>
+<!--
+  Simple-Companion.html  -  THE SIMPLE COMPANION  (one page, opened in a browser)
+  Airgap WinRM Toolkit  -  Copyright Fusetech
+  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
+  For a PC where the Download Toolkit itself cannot run: PowerShell held in ConstrainedLanguage mode by
+  application control (AppLocker, WDAC and similar), or scripts blocked altogether.  A browser is all it
+  needs.  The page keeps a plain text file of the versions
+  a site has deployed (deployed-versions.txt: Name = version), links each product to the place its updates
+  are published, and checks a file the operator downloaded: the version in its name against the deployed
+  one, its SHA256 and SHA1, the SHA1 in an Update Catalog file name, a SHA256 the vendor publishes.
+    Versions   the rows of the versions file: deployed version, links, the check of a downloaded file
+    Settings   what this site runs - the Windows Server versions, the .NET Framework versions, the
+               software, software of the site's own - as ticks; each tick adds or removes rows
+
+  The page offers links to click, and reads from the internet only when asked: Check sources reads the newest
+  version, and Read from the source a file's published SHA256, from the vendors that let a page read their
+  list (readText, the one place it happens).  Everything else - the Update Catalog above all - is compared by
+  hand, from the link.  It reads the files it is given and writes the versions file (and a CHECKSUMS.txt)
+  where the operator says.  Nothing is installed.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simple Companion - Sysadmin Download Toolkit</title>
+<style>
+    :root { --brand: #1e90ff; --ink: #1b1f24; --soft: #5b6470; --line: #d5dbe3; --page: #f4f6f9; --card: #ffffff;
+            --green: #c9efcf; --amber: #ffe2a8; --red: #f8c9c4; --grey: #e6e9ee; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.4 "Segoe UI", Tahoma, Arial, sans-serif; }
+    header { background: var(--brand); color: #fff; padding: 12px 16px 0; }
+    header h1 { margin: 0; font-size: 20px; letter-spacing: 1px; }
+    header p { margin: 2px 0 10px; font-size: 13px; opacity: .95; }
+    .tabs { display: flex; gap: 4px; }
+    .tabs button { border: 0; border-radius: 4px 4px 0 0; padding: 7px 18px; background: rgba(255, 255, 255, .28); color: #fff; font-weight: 600; }
+    .tabs button:hover { background: rgba(255, 255, 255, .45); }
+    .tabs button.on { background: var(--card); color: var(--ink); }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 10px 16px; background: var(--card); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
+    button { font: inherit; padding: 6px 12px; border: 1px solid #9aa5b1; border-radius: 3px; background: #eef1f5; color: var(--ink); cursor: pointer; }
+    button:hover { background: #e1e6ec; }
+    button.main { background: #b9dcff; border-color: #6aa9e6; }
+    button.small { padding: 2px 8px; font-size: 12px; }
+    #status { margin-left: 8px; color: var(--soft); }
+    #status.unsaved { color: #9a5b00; font-weight: 600; }
+    main { padding: 12px 16px 40px; }
+    .scroll { overflow-x: auto; background: var(--card); border: 1px solid var(--line); }
+    table { border-collapse: collapse; width: 100%; }
+    #versions table { min-width: 1000px; }
+    th { text-align: left; font-weight: 600; background: #e9eef4; border-bottom: 1px solid var(--line); padding: 6px 8px; white-space: nowrap; }
+    td { border-bottom: 1px solid var(--line); padding: 5px 8px; vertical-align: top; }
+    tr.over td { background: #eaf4ff; }
+    td.verdict { width: 92px; font-weight: 600; white-space: nowrap; }
+    td.verdict.deployed, td.verdict.current { background: var(--green); }
+    td.verdict.newer, td.verdict.update { background: var(--amber); }
+    td.verdict.older, td.verdict.different, td.verdict.ahead { background: var(--grey); }
+    td.verdict.failed, td.verdict.wrong { background: var(--red); }
+    input[type=text] { font: inherit; width: 100%; padding: 3px 5px; border: 1px solid transparent; border-radius: 2px; background: transparent; color: var(--ink); }
+    input[type=text]:hover, input[type=text]:focus { border-color: #9aa5b1; background: #fff; outline: none; }
+    td.name { min-width: 340px; } td.version { min-width: 130px; width: 160px; } td.latest { min-width: 130px; width: 170px; } td.note { min-width: 120px; } td.file { min-width: 380px; }
+    td.latest input.problem { border-color: #c0392b; }
+    .under { font-size: 12px; color: var(--soft); padding: 1px 5px; }
+    #startBox button { padding: 10px 18px; margin-right: 8px; }
+    .product { font-weight: 600; padding: 3px 5px; }
+    .links { margin: 2px 0 2px 6px; font-size: 12.5px; }
+    .links a { margin-right: 12px; white-space: nowrap; }
+    a { color: #0b5cad; }
+    .facts { margin-top: 5px; font-size: 12.5px; color: var(--ink); }
+    .facts .fact { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 6px; margin: 3px 0; align-items: start; }
+    .facts .label { color: var(--soft); padding-top: 2px; }
+    .facts .value { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .facts code { font: 12px Consolas, "Courier New", monospace; word-break: break-all; }
+    .facts input[type=text] { width: 150px; border-color: var(--line); background: #fff; }
+    .facts input.wide { width: 100%; font: 12px Consolas, "Courier New", monospace; }
+    .good { background: var(--green); padding: 0 6px; border-radius: 2px; }
+    .bad { background: var(--red); padding: 0 6px; border-radius: 2px; font-weight: 600; }
+    .warn { background: var(--amber); padding: 0 6px; border-radius: 2px; }
+    .box { background: var(--card); border: 1px solid var(--line); padding: 8px 14px 12px; margin-bottom: 12px; max-width: 1100px; }
+    .box h2 { font-size: 14px; margin: 0 0 8px; }
+    .ticks { display: flex; flex-wrap: wrap; gap: 6px 22px; }
+    .ticks label { white-space: nowrap; cursor: pointer; }
+    .ticks input { margin-right: 6px; vertical-align: -2px; }
+    #settings table input[type=text] { border-color: var(--line); background: #fff; }
+    #settings table input.invalid { border-color: #c0392b; background: #fdecea; }
+    #settings td { border-bottom: 0; padding: 3px 8px 3px 0; }
+    #settings th { background: transparent; border-bottom: 0; padding: 0 8px 2px 0; font-weight: 400; color: var(--soft); }
+    #addOwn { margin-top: 8px; }
+    #help { background: var(--card); border: 1px solid var(--line); padding: 4px 18px 10px; margin-bottom: 12px; max-width: 1100px; }
+    #help h2 { font-size: 15px; margin: 12px 0 4px; }
+    #help ul { margin: 0; padding-left: 20px; } #help li { margin: 3px 0; }
+    #help pre { background: #eef1f5; padding: 8px 10px; margin: 6px 0; overflow-x: auto; font: 12.5px Consolas, "Courier New", monospace; }
+    footer { padding: 0 16px 20px; color: var(--soft); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+    <h1>SIMPLE COMPANION</h1>
+    <p>Sysadmin Download Toolkit 1.1, for a PC where PowerShell is restricted or blocked - the versions this site has deployed, where the next ones are published, and a check of every file fetched by hand</p>
+    <nav class="tabs">
+        <button id="tabVersions" class="on">Versions</button>
+        <button id="tabSettings">Settings</button>
+    </nav>
+</header>
+<div class="toolbar">
+    <button id="open" class="main" title="deployed-versions.txt - or drop the file on this page">Open versions file</button>
+    <button id="save" class="main" title="Writes the versions file">Save</button>
+    <button id="checkSources" title="Reads the newest version from the vendors that let a page read their list">Check sources</button>
+    <button id="checksums" title="sha256 and name of every file checked on this page">Save CHECKSUMS.txt</button>
+    <button id="helpButton">Help</button>
+    <span id="status"></span>
+</div>
+<main>
+    <section id="help" hidden>
+        <h2>What this page is for</h2>
+        <ul>
+            <li>The Download Toolkit is a PowerShell tool, and some PCs do not let it run: application control (AppLocker, WDAC and similar) holds PowerShell in ConstrainedLanguage mode, or scripts are blocked altogether.</li>
+            <li>This page is the simple companion for such a PC. It needs a browser and nothing else: nothing is installed, no script runs outside the page.</li>
+            <li>It does the part a person can do by hand, and keeps it straight: what is deployed, where the next version is published, whether the downloaded file is the right one and is intact. Finding and fetching every update by itself, on a schedule, stays with the Download Toolkit on a PC where it runs.</li>
+        </ul>
+        <h2>The versions file</h2>
+        <ul>
+            <li>A plain text file, one product a line. The Settings tab adds and removes the lines; the Versions tab fills in the versions; Notepad reads and writes the same file.</li>
+            <li>Lines that start with # are notes and stay as they are. A note may follow a version after #.</li>
+            <li>Software of the site's own may carry the page it is published on and its release notes, each between &lt; and &gt;.</li>
+        </ul>
+<pre># what this site runs today
+Windows Server 2022 cumulative update = KB5136487   # installed 2026-11-14
+Windows Server 2022 .NET Framework 4.8.1 cumulative update = KB5127693
+PuTTY = 0.83
+Our own agent = 7.2.1 &lt;https://downloads.example.com/agent/&gt; &lt;https://downloads.example.com/agent/notes&gt;</pre>
+        <h2>Open and Save</h2>
+        <ul>
+            <li>Microsoft Edge and Google Chrome: Open versions file reads the file, and Save writes it back in place after the browser has asked once. The page remembers the file: the next time, Open versions file opens the same one, and the file dialog starts in its folder.</li>
+            <li>A browser does not let a page choose the folder its file dialog starts in. The first time, find the file beside this page - or drag it from its folder onto the page, which opens it without any dialog.</li>
+            <li>Other browsers: Save hands the file over as a download. Put it in place of the old one.</li>
+            <li>The page starts with a choice. Open versions file carries on with the file there is. Start a new list gives the list the Download Toolkit starts with: set what this site runs on the Settings tab, fill in the versions, Save. A new list saved under the name of an existing file replaces that file.</li>
+        </ul>
+        <h2>Settings</h2>
+        <ul>
+            <li>Windows Server: a tick adds the rows of that version - its cumulative update, its .NET Framework updates, the servicing stack for Server 2016 - and taking the tick away removes them.</li>
+            <li>.NET Framework: the versions in use on the servers. A server version has a row for each ticked .NET version that exists for it: 4.8 for Server 2016, 4.7.2 and 4.8 for Server 2019, 4.8 and 4.8.1 for Server 2022, 4.8.1 for Server 2025.</li>
+            <li>SQL Server: a row for each version in use, and Management Studio. The Update Catalog lists a version's Cumulative Updates and its Security Updates together: take the Cumulative Update, or the Security Update of the branch the servers are on - CU where a cumulative update has been installed, GDR where only security updates have.</li>
+            <li>Software: the products the page knows. Software of this site: anything else, with the page it is published on and its release notes if it has them.</li>
+            <li>A row that holds a version or a note is removed only after a Yes. Nothing reaches the file before Save.</li>
+        </ul>
+        <h2>Looking for a newer version</h2>
+        <ul>
+            <li>The links open the place each product is published: the Microsoft Update Catalog searched for the product, Microsoft's list of every release, the vendor's download page, the release notes.</li>
+            <li>The Update Catalog lists every release of the product, the newest first: the top rows are the ones to compare. A month may hold two cumulative updates, the monthly one and a later one that includes it - take the later; leave a row that says Preview or Dynamic Update.</li>
+            <li>.NET Framework: a month holds a row for each .NET version and one that names two versions (3.5, 4.8 and 4.8.1). Take the row that names only the version of the row on this page, with or without 3.5; the row that names two holds the files of both. Not every month has a .NET Framework update.</li>
+            <li>Latest at the source is the newest version the source has. Check sources reads it where the vendor lets a page read its list: WinSCP, Wireshark, Notepad++, OpenSSH, Firefox ESR. The Update Catalog, Microsoft Edge, PuTTY, VMware Tools and the others do not let a page read them: open the link and type what it shows.</li>
+            <li>The Status column compares it with the Deployed column: Up to date, or Update when the source has a newer one. Download with the browser.</li>
+            <li>The page reads from the internet only after Check sources or Read from the source, and only those vendors' own lists.</li>
+        </ul>
+        <h2>Checking a downloaded file</h2>
+        <ul>
+            <li>Check a file (or drop the file on its row) reads the version of the file and compares it with the Deployed column: Deployed, Newer, Older or Different. The version comes from the file name, and from inside the file as its Properties show it (In the file): the ProductVersion of an .msi - for Microsoft Edge and Google Chrome the version in its Comments - and the Product version of an .exe. Where the name carries no version, the one inside is taken; where the two differ, Use takes the one inside. An update (.msu) carries its KB in its name.</li>
+            <li>The SHA256 and SHA1 of the file are worked out in the browser, and compared with what the source says. An Update Catalog file carries the catalogue's SHA1 in its name: the page compares the two by itself (Catalogue SHA1).</li>
+            <li>Published SHA256, for the other files: Read from the source asks the vendor's own list where a page may read it (WinSCP, Wireshark, Notepad++, OpenSSH). Published hashes opens the vendor's list for the rest.</li>
+            <li>A vendor's list holds many hashes, and the page does the searching: on the list press Ctrl+A and Ctrl+C, then Search the copied list here (the browser asks once whether the page may see what was copied). Or paste the list into the box, or drop the list's file on the box or on the row. The page looks for the SHA256 of the checked file in it and says what the list names beside it: the file, and its version where the list gives one (Microsoft Edge). A hash that differs, or a list without it: Mismatch.</li>
+            <li>A .NET Framework file names its .NET version (ndp48, ndp481, ndp472), a SQL Server file its SQL Server version. On the row of another version, or a .NET file on a Windows row, it is a Wrong file.</li>
+            <li>The signature cannot be read in a browser. Open the file's Properties, Digital Signatures: the signer must be the one the row names.</li>
+            <li>Set as deployed, after the version is installed everywhere, writes the file's version into the Deployed column. Save keeps it.</li>
+            <li>Save CHECKSUMS.txt writes the SHA256 and name of every file checked, to carry across with the files.</li>
+        </ul>
+    </section>
+    <div id="startBox" class="box" hidden>
+        <button id="startOpen" class="main" title="Or drop the file on this page">Open versions file</button>
+        <button id="startNew" title="The list the Download Toolkit starts with">Start a new list</button>
+    </div>
+    <section id="versions" hidden>
+        <div class="scroll">
+            <table>
+                <thead><tr><th>Status</th><th>Product, and where it is published</th><th>Deployed</th><th>Latest at the source</th><th>Downloaded file</th><th>Note</th></tr></thead>
+                <tbody id="rows"></tbody>
+            </table>
+        </div>
+    </section>
+    <section id="settings" hidden>
+        <div class="box"><h2>Windows Server</h2><div id="setBuilds" class="ticks"></div></div>
+        <div class="box"><h2>.NET Framework</h2><div id="setLines" class="ticks"></div></div>
+        <div class="box"><h2>SQL Server</h2><div id="setSql" class="ticks"></div></div>
+        <div class="box"><h2>Software</h2><div id="setSoftware" class="ticks"></div></div>
+        <div class="box">
+            <h2>Software of this site</h2>
+            <table>
+                <thead><tr><th>Name</th><th>Published at (link)</th><th>Release notes (link)</th><th></th></tr></thead>
+                <tbody id="ownRows"></tbody>
+            </table>
+            <button id="addOwn" title="A row for a product the page does not know">Add software</button>
+        </div>
+    </section>
+</main>
+<footer>Simple Companion 1.1 - Sysadmin Download Toolkit - Airgap WinRM Toolkit - Copyright Fusetech - products@fusetech.com.au</footer>
+<input type="file" id="pickVersions" accept=".txt,text/plain" hidden>
+<input type="file" id="pickFile" hidden>
+<script>
+'use strict';
+
+// ---------------------------------------------------------------------
+//  What the page knows: the products of the Download Toolkit (data\products.psd1), each with the place a person
+//  looks for its updates, its release notes and who must have signed its files.
+// ---------------------------------------------------------------------
+var CATALOG_SEARCH = 'https://www.catalog.update.microsoft.com/Search.aspx?q=';
+var RELEASE_LIST = 'https://learn.microsoft.com/en-us/windows/release-health/windows-server-release-info';
+var KB_ARTICLE = 'https://support.microsoft.com/help/{kbnumber}';
+var MICROSOFT = ['Microsoft Corporation'];
+
+// each Windows Server version: the Update Catalog's own name for it, and the .NET Framework versions that have an update of their own on it
+var BUILDS = [
+    { build: '14393', server: 'Windows Server 2016', catalog: 'Windows Server 2016', lines: ['4.8'] },
+    { build: '17763', server: 'Windows Server 2019', catalog: 'Windows Server 2019', lines: ['4.7.2', '4.8'] },
+    { build: '20348', server: 'Windows Server 2022', catalog: 'Microsoft server operating system version 21H2', lines: ['4.8', '4.8.1'] },
+    { build: '26100', server: 'Windows Server 2025', catalog: 'Microsoft server operating system version 24H2', lines: ['4.8.1'] }
+];
+var NET_LINES = ['4.7.2', '4.8', '4.8.1'];
+// what the page starts with when no versions file is open: the Download Toolkit's own starting point
+var DEFAULTS = { builds: ['17763', '20348'], lines: ['4.8', '4.8.1'] };
+
+// on = ticked to start with, as in the Download Toolkit.
+// source = the vendor's own list of versions, where the vendor lets a page read it (the same address and the same
+//          pattern as the Download Toolkit uses): Check sources reads it.  Without it the newest version is read by a
+//          person, from the link.
+// hashes = where the vendor publishes the SHA256 of its files, as a link ({version}, {file}); hashFrom / hashPattern =
+//          how Read from the source finds the SHA256 of one file there, where the page may read it.
+var SOFTWARE = [
+    { id: 'VMwareTools', name: 'VMware Tools', on: true, page: 'https://packages.vmware.com/tools/releases/latest/windows/x64/', signers: ['VMware', 'Broadcom'],
+      notes: 'https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/tools/{major}-{minor}-0/release-notes/vmware-tools-{major}{minor}{patch}-release-notes.html' },
+    { id: 'Edge', name: 'Microsoft Edge', on: true, page: 'https://www.microsoft.com/en-us/edge/business/download', signers: MICROSOFT,
+      notes: 'https://learn.microsoft.com/en-us/deployedge/microsoft-edge-relnote-stable-channel',
+      hashes: 'https://edgeupdates.microsoft.com/api/products?view=enterprise' },
+    { id: 'Google Chrome', name: 'Google Chrome', on: false, page: 'https://chromeenterprise.google/download/', signers: ['Google LLC'],
+      notes: 'https://support.google.com/chrome/a/answer/7679408' },
+    { id: 'PuTTY', name: 'PuTTY', on: true, page: 'https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html', signers: ['Simon Tatham'],
+      notes: 'https://www.chiark.greenend.org.uk/~sgtatham/putty/changes.html',
+      hashes: 'https://the.earth.li/~sgtatham/putty/latest/sha256sums' },
+    { id: 'WinSCP', name: 'WinSCP', on: true, page: 'https://winscp.net/eng/downloads.php', signers: ['Martin P'],
+      notes: 'https://winscp.net/eng/docs/history',
+      source: { url: 'https://winscp.net/eng/downloads.php', pattern: 'WinSCP-(?<version>\\d+\\.\\d+(?:\\.\\d+)?)-Setup\\.exe' },
+      hashes: 'https://winscp.net/download/{file}/download', hashFrom: 'page', hashPattern: '(?is)SHA-?256[^0-9a-f]{0,80}(?<hash>[0-9a-f]{64})' },
+    { id: 'OpenSSH', name: 'OpenSSH for Windows', on: false, page: 'https://github.com/PowerShell/Win32-OpenSSH/releases/latest', signers: MICROSOFT,
+      notes: 'https://github.com/PowerShell/Win32-OpenSSH/releases',
+      source: { url: 'https://api.github.com/repos/PowerShell/Win32-OpenSSH/releases/latest', pattern: '"browser_download_url":\\s*"(?<file>https://github\\.com/PowerShell/Win32-OpenSSH/releases/download/[^"]+/OpenSSH-Win64-v(?<version>[\\d.]+)\\.msi)"' },
+      hashes: 'https://api.github.com/repos/PowerShell/Win32-OpenSSH/releases/latest', hashFrom: 'github' },
+    { id: 'Wireshark', name: 'Wireshark', on: true, page: 'https://www.wireshark.org/download.html', signers: ['Wireshark Foundation'],
+      notes: 'https://www.wireshark.org/docs/relnotes/wireshark-{version}.html',
+      source: { url: 'https://www.wireshark.org/download/win64/', pattern: 'href="(?<file>Wireshark-(?<version>\\d+\\.\\d*[02468]\\.\\d+)-x64\\.msi)"' },
+      hashes: 'https://www.wireshark.org/download/SIGNATURES-{version}.txt', hashFrom: 'page', hashPattern: 'SHA256\\({file}\\)=(?<hash>[0-9a-f]{64})' },
+    { id: 'Npcap', name: 'Npcap', on: false, page: 'https://npcap.com/', signers: ['Nmap Software'],
+      notes: 'https://npcap.com/changelog' },
+    { id: 'NotepadPP', name: 'Notepad++', on: true, page: 'https://github.com/notepad-plus-plus/notepad-plus-plus/releases/latest', signers: ['NOTEPAD++'],
+      notes: 'https://notepad-plus-plus.org/downloads/v{version}/',
+      source: { url: 'https://api.github.com/repos/notepad-plus-plus/notepad-plus-plus/releases/latest', pattern: '"browser_download_url":\\s*"(?<file>https://github\\.com/notepad-plus-plus/notepad-plus-plus/releases/download/[^"]+/npp\\.(?<version>[\\d.]+)\\.Installer\\.x64\\.msi)"' },
+      hashes: 'https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v{version}/npp.{version}.checksums.sha256', hashFrom: 'github' },
+    { id: 'FirefoxESR', name: 'Firefox ESR', on: true, page: 'https://www.firefox.com/en-US/enterprise/', signers: ['Mozilla Corporation'],
+      notes: 'https://www.firefox.com/en-US/firefox/{version}/releasenotes/',
+      source: { url: 'https://product-details.mozilla.org/1.0/firefox_versions.json', pattern: '"FIREFOX_ESR":\\s*"(?<version>\\d+\\.\\d+(?:\\.\\d+)?)esr"' },
+      hashes: 'https://archive.mozilla.org/pub/firefox/releases/{version}esr/SHA256SUMS' },
+    { id: 'SplunkUF', name: 'Splunk Universal Forwarder', on: true, page: 'https://www.splunk.com/en_us/download/universal-forwarder.html', signers: ['Splunk'],
+      notes: 'https://help.splunk.com/en/splunk-enterprise/forward-and-process-data/universal-forwarder-manual/{major}.{minor}/release-notes/fixed-issues',
+      hashes: 'https://download.splunk.com/products/universalforwarder/releases/{version}/windows/{file}.sha256' }
+];
+
+// SQL Server: the page's own rows (the Download Toolkit does not fetch these).  One row a version; the Update Catalog
+// lists its cumulative updates and its security updates together, the newest first.
+var SQL_VERSIONS = ['2016', '2017', '2019', '2022', '2025'];
+var SQL_UPDATES = 'https://support.microsoft.com/en-us/servicing/sql/kb321185-download-and-install-latest-updates';
+
+function catalogLink(query, tip) {
+    // The search names no month: a month without a release (.NET Framework has such months) would answer "we did not
+    // find any results".  Without the month the catalogue lists every release of the product, the newest first.
+    return { text: 'Update Catalog', href: CATALOG_SEARCH + encodeURIComponent(query), tip: tip || 'Every release, the newest first' };
+}
+
+function knownProducts() {
+    // every product by the name the versions file uses, in the order of the page, with its links
+    var list = [], releaseList = { text: 'Release list', href: RELEASE_LIST, tip: 'Microsoft\'s list of every release of every build' };
+    BUILDS.forEach(function (b) {
+        list.push({ id: 'WindowsCU', kind: 'windows', build: b.build, line: '', name: b.server + ' cumulative update', signers: MICROSOFT, notes: KB_ARTICLE,
+                    links: [catalogLink('Cumulative Update for ' + b.catalog + ' for x64-based Systems'), releaseList] });
+        if (b.build === '14393') {
+            list.push({ id: 'WindowsSSU', kind: 'windows', build: b.build, line: '', name: b.server + ' servicing stack update', signers: MICROSOFT, notes: KB_ARTICLE,
+                        links: [catalogLink('Servicing Stack Update for ' + b.catalog + ' for x64-based Systems'), releaseList] });
+        }
+        // .NET Framework: a row for each .NET version, and a search that names the version - it leaves the rows of the
+        // other version out.  The row that names two versions stays in the list: it holds the files of both.
+        b.lines.forEach(function (line) {
+            list.push({ id: 'DotNetCU', kind: 'net', build: b.build, line: line, name: b.server + ' .NET Framework ' + line + ' cumulative update', signers: MICROSOFT, notes: KB_ARTICLE,
+                        links: [catalogLink('Cumulative Update for .NET Framework ' + line + ' ' + b.catalog + ' for x64',
+                                            b.lines.length > 1 ? 'Take the row that names only .NET ' + line + ', with or without 3.5: a row that names two versions holds both files' : '')] });
+        });
+        // a versions file from before the .NET rows were one per version: the row still works, the Settings tab does not offer it
+        list.push({ id: 'DotNetCU', kind: 'net', build: b.build, line: '', old: true, name: b.server + ' .NET Framework cumulative update', signers: MICROSOFT, notes: KB_ARTICLE,
+                    links: [catalogLink('Cumulative Update for .NET Framework ' + b.catalog + ' for x64')] });
+    });
+    SQL_VERSIONS.forEach(function (version) {
+        list.push({ id: 'SqlServer', kind: 'software', group: 'sql', sql: version, pageOnly: true, on: false, build: '', line: '', name: 'SQL Server ' + version + ' update', signers: MICROSOFT, notes: KB_ARTICLE,
+                    links: [catalogLink('SQL Server ' + version, 'Take the Cumulative Update, or the Security Update of the branch the servers are on: CU or GDR'),
+                            { text: 'Latest updates', href: SQL_UPDATES, tip: 'Microsoft\'s list of the latest update of every SQL Server version' }] });
+    });
+    list.push({ id: 'SSMS', kind: 'software', group: 'sql', sql: '', pageOnly: true, on: false, build: '', line: '', name: 'SQL Server Management Studio', signers: MICROSOFT,
+                notes: 'https://learn.microsoft.com/en-us/ssms/release-notes',
+                links: [{ text: 'Vendor page', href: 'https://learn.microsoft.com/en-us/ssms/install/install', tip: '' }, { text: 'Release history', href: 'https://learn.microsoft.com/en-us/ssms/release-history', tip: 'Every version, the newest first' }] });
+    SOFTWARE.forEach(function (s) {
+        list.push({ id: s.id, kind: 'software', group: '', sql: '', build: '', line: '', on: s.on, name: s.name, signers: s.signers, notes: s.notes, source: s.source || null,
+                    hashes: s.hashes || '', hashFrom: s.hashFrom || '', hashPattern: s.hashPattern || '', links: [{ text: 'Vendor page', href: s.page, tip: '' }] });
+    });
+    return list;
+}
+
+function findProduct(products, name) {
+    var wanted = String(name).trim().toLowerCase(), i;
+    for (i = 0; i < products.length; i++) { if (products[i].name.toLowerCase() === wanted) { return products[i]; } }
+    return null;
+}
+
+// ---------------------------------------------------------------------
+//  What a site runs: the ticks of the Settings tab, and the rows they ask for
+// ---------------------------------------------------------------------
+function defaultSelection(products) {
+    var selection = { builds: {}, lines: {}, software: {} };
+    DEFAULTS.builds.forEach(function (b) { selection.builds[b] = true; });
+    DEFAULTS.lines.forEach(function (l) { selection.lines[l] = true; });
+    products.forEach(function (p) { if (p.kind === 'software' && p.on) { selection.software[p.name] = true; } });
+    return selection;
+}
+
+function selectionFromEntries(entries, products) {
+    // the ticks a versions file stands for: a server version with any row, a .NET version with any row, the software named
+    var selection = { builds: {}, lines: {}, software: {} };
+    entries.forEach(function (entry) {
+        var p = entry.kind === 'row' ? findProduct(products, entry.name) : null;
+        if (!p) { return; }
+        if (p.build) { selection.builds[p.build] = true; }
+        if (p.line) { selection.lines[p.line] = true; }
+        if (p.kind === 'software') { selection.software[p.name] = true; }
+    });
+    return selection;
+}
+
+function copySelection(selection) {
+    var copy = { builds: {}, lines: {}, software: {} }, part, key;
+    for (part in copy) { for (key in selection[part]) { if (selection[part][key]) { copy[part][key] = true; } } }
+    return copy;
+}
+
+function isWanted(product, selection) {
+    if (product.kind === 'software') { return !!selection.software[product.name]; }
+    if (!selection.builds[product.build]) { return false; }
+    if (product.old) { return true; }                       // an old .NET row stays while its server version is ticked
+    return product.kind === 'windows' || !!selection.lines[product.line];
+}
+
+function planChange(entries, products, selection) {
+    // what a selection changes: the rows of known products to take out, and the names of the rows to put in
+    var present = {}, remove = [], add = [];
+    entries.forEach(function (entry) {
+        var p = entry.kind === 'row' ? findProduct(products, entry.name) : null;
+        if (!p) { return; }
+        present[p.name] = true;
+        if (!isWanted(p, selection)) { remove.push(entry); }
+    });
+    products.forEach(function (p) { if (!p.old && isWanted(p, selection) && !present[p.name]) { add.push(p.name); } });
+    return { remove: remove, add: add };
+}
+
+function newRow(name) { return { kind: 'row', name: name, version: '', note: '', link: '', notesLink: '' }; }
+
+function insertKnown(entries, products, name) {
+    // a new row goes where the page's own order puts it: after the last row that comes before it in that order
+    var order = products.map(function (p) { return p.name.toLowerCase(); }), rank = order.indexOf(name.toLowerCase()), after = -1, firstRow = -1, i, r;
+    for (i = 0; i < entries.length; i++) {
+        if (entries[i].kind !== 'row') { continue; }
+        if (firstRow < 0) { firstRow = i; }
+        r = order.indexOf(String(entries[i].name).trim().toLowerCase());
+        if (r >= 0 && r < rank) { after = i; }
+    }
+    entries.splice(after >= 0 ? after + 1 : (firstRow >= 0 ? firstRow : entries.length), 0, newRow(name));
+}
+
+function applyPlan(entries, products, plan) {
+    plan.remove.forEach(function (entry) { var at = entries.indexOf(entry); if (at >= 0) { entries.splice(at, 1); } });
+    plan.add.forEach(function (name) { insertKnown(entries, products, name); });
+}
+
+// ---------------------------------------------------------------------
+//  The versions file:  Name = version <published at> <release notes>   # note
+// ---------------------------------------------------------------------
+var FILE_HEADER = [
+    '# Deployed versions - what this site runs today.',
+    '# One product a line:   Name = version      a note may follow after #',
+    '# Software of the site\'s own may name the page it is published on, and its release notes:   Name = version <https://...> <https://...>',
+    '# The Settings tab of Simple-Companion.html adds and removes the lines. So does Notepad.',
+    ''
+];
+var LINK_TOKEN = /<(https?:\/\/[^<>\s]+)?>/g;
+
+function parseVersions(text) {
+    // every line is kept: a row (Name = version <published at> <release notes> # note) or a line of text (a note, an empty line)
+    var whole = String(text), lines = (whole.charCodeAt(0) === 0xFEFF ? whole.slice(1) : whole).split(/\r?\n/), entries = [];
+    if (lines.length > 0 && lines[lines.length - 1] === '') { lines.pop(); }
+    lines.forEach(function (line) {
+        if (/^\s*(#.*)?$/.test(line)) { entries.push({ kind: 'text', text: line }); return; }
+        // the note starts at the first # that is not inside a link
+        var hash = line.replace(LINK_TOKEN, function (token) { return new Array(token.length + 1).join(' '); }).indexOf('#');
+        var body = hash >= 0 ? line.slice(0, hash) : line, note = hash >= 0 ? line.slice(hash + 1).trim() : '', links = [];
+        body = body.replace(LINK_TOKEN, function (token, address) { links.push(address || ''); return ' '; });
+        var equals = body.indexOf('=');
+        entries.push({ kind: 'row', name: (equals >= 0 ? body.slice(0, equals) : body).trim(), version: (equals >= 0 ? body.slice(equals + 1) : '').trim(), note: note,
+                       link: links[0] || '', notesLink: links[1] || '' });
+    });
+    return entries;
+}
+
+function looksLikeVersions(text) {
+    // a versions file has a Name = version line, or nothing but notes - and no SHA256 anywhere: a CHECKSUMS.txt, a
+    // vendor's list of hashes (SHA256(file)=...) or a log dropped on the page is not one
+    var lines = String(text).split(/\r?\n/).filter(function (line) { return !/^\s*(#.*)?$/.test(line); });
+    if (/[0-9a-f]{64}/i.test(String(text))) { return false; }
+    return lines.length === 0 || lines.some(function (line) { return line.indexOf('=') > 0; });
+}
+
+function isListName(fileName) {
+    // the name of a file that may be a vendor's list of hashes: sha256sums, SHA256SUMS, x.msi.sha256, SIGNATURES-4.6.9.txt, a saved .json
+    return /\.(txt|json|sha256|sha256sums?|sums|checksums|asc)$|^sha256sums?$|checksums|signatures-/i.test(String(fileName));
+}
+
+function cleanField(text, isName) {
+    // a # starts the note, the first = ends the name, < and > hold a link: none of them may sit inside a name or a version
+    var value = String(text).replace(/[\r\n#<>]/g, ' ');
+    if (isName) { value = value.replace(/=/g, ' '); }
+    return value.replace(/\s+/g, ' ').trim();
+}
+
+function cleanLink(text) {
+    // a link the file may hold: a web address without spaces; anything else is no link
+    var value = String(text || '').trim();
+    return /^https?:\/\/[^<>\s]+$/i.test(value) ? value : '';
+}
+
+function formatVersions(entries) {
+    var lines = [];
+    entries.forEach(function (entry) {
+        if (entry.kind === 'text') { lines.push(entry.text); return; }
+        var name = cleanField(entry.name, true), version = cleanField(entry.version, false), note = String(entry.note || '').replace(/[\r\n]/g, ' ').trim();
+        var link = cleanLink(entry.link), notesLink = cleanLink(entry.notesLink);
+        if (!name) { return; }
+        lines.push(name + ' =' + (version ? ' ' + version : '') + (link || notesLink ? ' <' + link + '>' : '') + (notesLink ? ' <' + notesLink + '>' : '') + (note ? '   # ' + note : ''));
+    });
+    return lines.join('\r\n') + '\r\n';
+}
+
+function starterEntries(products) {
+    var entries = FILE_HEADER.map(function (line) { return { kind: 'text', text: line }; });
+    applyPlan(entries, products, planChange(entries, products, defaultSelection(products)));
+    return entries;
+}
+
+// ---------------------------------------------------------------------
+//  Versions: out of a file name, and one against another
+// ---------------------------------------------------------------------
+function readVersionFromName(fileName) {
+    // an update carries its KB (windows10.0-kb5136487-x64_....msu); an installer its dotted version (putty-64bit-0.83-installer.msi)
+    var name = String(fileName), kb = /kb(\d{6,8})/i.exec(name);
+    if (kb) { return 'KB' + kb[1]; }
+    var dotted = /(\d+(?:\.\d+)+)/.exec(name.replace(/\.[A-Za-z0-9]{2,4}$/, ''));
+    return dotted ? dotted[1] : '';
+}
+
+function versionParts(text) {
+    var kb = /kb\s*(\d{6,8})/i.exec(text);
+    if (kb) { return { kb: true, parts: [parseInt(kb[1], 10)] }; }
+    var dotted = /(\d+(?:\.\d+)*)/.exec(text);
+    if (!dotted) { return null; }
+    return { kb: false, parts: dotted[1].split('.').map(function (p) { return parseInt(p, 10); }) };
+}
+
+function compareVersions(deployed, found) {
+    // what the file is, next to what is deployed: 'deployed' (the same), 'newer', 'older', 'different' (not comparable), '' (nothing to compare)
+    var a = String(deployed || '').trim(), b = String(found || '').trim();
+    if (!a || !b) { return ''; }
+    if (a.toLowerCase() === b.toLowerCase()) { return 'deployed'; }
+    var left = versionParts(a), right = versionParts(b), i, x, y;
+    if (!left || !right || left.kb !== right.kb) { return 'different'; }
+    for (i = 0; i < Math.max(left.parts.length, right.parts.length); i++) {
+        x = left.parts[i] || 0; y = right.parts[i] || 0;
+        if (y > x) { return 'newer'; }
+        if (y < x) { return 'older'; }
+    }
+    return 'deployed';
+}
+
+function fillTemplate(template, version, fileName) {
+    // a link for one version or one file: {version} {major} {minor} {patch} {kbnumber} {file}; '' when a part it needs is missing
+    if (!template) { return ''; }
+    if (template.indexOf('{') < 0) { return template; }
+    var v = versionParts(String(version || '')), values = {};
+    if (v && v.kb) { values.kbnumber = String(v.parts[0]); }
+    if (v && !v.kb) { values.version = v.parts.join('.'); values.major = v.parts[0]; values.minor = v.parts[1]; values.patch = v.parts[2]; }
+    if (fileName) { values.file = encodeURIComponent(fileName); }
+    var missing = false;
+    var link = template.replace(/\{(\w+)\}/g, function (whole, key) { if (values[key] === undefined) { missing = true; return ''; } return String(values[key]); });
+    return missing ? '' : link;
+}
+
+function sha1FromName(fileName) {
+    // an Update Catalog file name ends _<the SHA1 of the file>.msu
+    var m = /_([0-9a-f]{40})\.[a-z0-9]+$/i.exec(String(fileName));
+    return m ? m[1].toLowerCase() : '';
+}
+
+function dotNetLineFromName(fileName) {
+    // a .NET Framework update names its .NET version: ...-x64-ndp48_... is 4.8, ndp481 is 4.8.1, ndp472 is 4.7.2
+    var m = /-ndp(\d{2,3})(?=[_.-])/i.exec(String(fileName));
+    return m ? m[1].split('').join('.') : '';
+}
+
+function wrongFileText(product, fileName) {
+    // the file is not what its row is for: a .NET update of another .NET version, a .NET update on a Windows row, a
+    // SQL Server update of another SQL Server version (SQLServer2019-KB...-x64.exe)
+    var line = dotNetLineFromName(fileName), sql = /sqlserver(\d{4})/i.exec(String(fileName));
+    if (!product) { return ''; }
+    if (product.sql && sql && sql[1] !== product.sql) { return 'this file is for SQL Server ' + sql[1] + ', the row is SQL Server ' + product.sql; }
+    if (!line) { return ''; }
+    if (product.kind === 'net' && product.line && product.line !== line) { return 'this file is for .NET Framework ' + line + ', the row is ' + product.line; }
+    if (product.kind === 'windows') { return 'this file is a .NET Framework ' + line + ' update, the row is a Windows update'; }
+    return '';
+}
+
+// ---------------------------------------------------------------------
+//  What a vendor's own list says: the newest version, the SHA256 of a file
+// ---------------------------------------------------------------------
+function toRegExp(pattern, flags) {
+    // a pattern as data\products.psd1 writes it: flags it opens with, (?is), become the flags of the expression
+    var opening = /^\(\?([ims]+)\)/.exec(pattern);
+    return new RegExp(opening ? pattern.slice(opening[0].length) : pattern, (flags || '') + (opening ? opening[1] : ''));
+}
+
+function fileNameOf(link) {
+    var name = String(link).split(/[?#]/)[0].split('/').pop();
+    try { return decodeURIComponent(name); } catch (problem) { return name; }
+}
+
+function latestFromText(text, pattern) {
+    // every match of the pattern on the vendor's page (group "version"; group "file" where the page links the file): the newest wins
+    var expression = toRegExp(pattern, 'g'), best = null, found;
+    while ((found = expression.exec(String(text))) !== null) {
+        if (found[0] === '') { expression.lastIndex++; continue; }
+        if (!found.groups || !found.groups.version) { continue; }
+        if (!best || compareVersions(best.version, found.groups.version) === 'newer') { best = { version: found.groups.version, file: found.groups.file ? fileNameOf(found.groups.file) : '' }; }
+    }
+    return best;
+}
+
+function hashFromGitHub(text, fileName) {
+    // GitHub's release list gives each file its digest: "sha256:<64 hex>"
+    var hash = '';
+    try {
+        (JSON.parse(String(text)).assets || []).forEach(function (asset) {
+            if (String(asset.name).toLowerCase() === String(fileName).toLowerCase() && /^sha256:[0-9a-f]{64}$/i.test(String(asset.digest))) { hash = String(asset.digest).slice(7).toLowerCase(); }
+        });
+    } catch (problem) { hash = ''; }
+    return hash;
+}
+
+function hashFromText(text, pattern, fileName) {
+    // a vendor's page or list: the pattern (group "hash", {file} = the file's name) picks the SHA256 of one file
+    var escaped = String(fileName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    var found = toRegExp(pattern.replace('{file}', escaped), '').exec(String(text));
+    return found && found.groups && found.groups.hash ? found.groups.hash.toLowerCase() : '';
+}
+
+function hostOf(link) { return String(link).replace(/^https?:\/\//i, '').split(/[/?#]/)[0]; }
+
+function sourceVerdict(deployed, latest) {
+    // what is deployed, next to the newest the source has: 'current', 'update' (the source has a newer one), 'ahead', 'different', ''
+    var compared = compareVersions(deployed, latest);
+    return compared === 'deployed' ? 'current' : (compared === 'newer' ? 'update' : (compared === 'older' ? 'ahead' : compared));
+}
+
+function publishedVerdict(pasted, fileName, sha256) {
+    // What a SHA256 - or a vendor's whole list of them - says about a file: 'match' when the file's own SHA256 is in
+    // it; 'differs' when it is one hash, and another; 'absent' when it is a list that does not hold the file's hash
+    // (the list may name the file all the same - another version of it); '' when it holds nothing like a SHA256.
+    var text = String(pasted || ''), all = (text.match(/[0-9a-f]{64}/ig) || []).map(function (h) { return h.toLowerCase(); });
+    if (all.length === 0) { return { state: '', hash: '' }; }
+    if (all.indexOf(String(sha256).toLowerCase()) >= 0) { return { state: 'match', hash: String(sha256).toLowerCase() }; }
+    return all.length === 1 ? { state: 'differs', hash: all[0] } : { state: 'absent', hash: '' };
+}
+
+function listContext(text, sha256) {
+    // Where a vendor's list holds the SHA256 of a file: how many hashes the list has, and what it says beside this
+    // one - the file's name, and its version where the list gives one (Microsoft's Edge list: "ProductVersion").
+    // null when the hash is not in the text.
+    var whole = String(text || ''), at = whole.toLowerCase().indexOf(String(sha256).toLowerCase());
+    if (at < 0 || !sha256) { return null; }
+    var lineStart = whole.lastIndexOf('\n', at) + 1, lineEnd = whole.indexOf('\n', at);
+    if (lineEnd < 0) { lineEnd = whole.length; }
+    var before = whole.slice(Math.max(lineStart, at - 700), at), after = whole.slice(at + 64, Math.min(lineEnd, at + 364));
+    var filePattern = /[\w.%+~-]+\.(?:msi|msu|msp|exe|cab|zip|pkg|deb|rpm|msix)(?![\w.])/ig, namesBefore = before.match(filePattern), namesAfter = after.match(filePattern);
+    var versions = before.match(/"ProductVersion"\s*:\s*"[^"]+"/ig), sums = at === lineStart ? /^[ \t]+\*?(\S.*?)\s*$/.exec(after) : null, file = '';
+    if (sums) { file = sums[1].split(/[\\/]/).pop(); }                                   // "<hash>  w64/Firefox Setup 153.7.0esr.msi": the rest of the line is the file
+    else if (namesBefore) { file = fileNameOf(namesBefore[namesBefore.length - 1]); }      // SHA256(file)=<hash>, or a link to the file before its hash
+    else if (namesAfter) { file = fileNameOf(namesAfter[0]); }
+    return { hashes: (whole.match(/[0-9a-f]{64}/ig) || []).length, file: file, version: versions ? /"([^"]+)"$/.exec(versions[versions.length - 1])[1] : '' };
+}
+
+function publishedShown(text) {
+    // what the box shows of what was pasted: one hash as it is, a list as its size
+    var whole = String(text || ''), hashes = (whole.match(/[0-9a-f]{64}/ig) || []).length;
+    if (hashes > 1 || whole.length > 200) { return 'a list of ' + hashes + ' hashes (' + formatSize(whole.length) + ')'; }
+    return whole.trim();
+}
+
+function formatSize(bytes) {
+    if (bytes >= 1073741824) { return (bytes / 1073741824).toFixed(2) + ' GB'; }
+    if (bytes >= 1048576) { return (bytes / 1048576).toFixed(1) + ' MB'; }
+    if (bytes >= 1024) { return (bytes / 1024).toFixed(0) + ' KB'; }
+    return bytes + ' B';
+}
+
+// ---------------------------------------------------------------------
+//  The version inside a file, as its Properties show it: an .msi (its ProductVersion, and the Comments of its
+//  summary), an .exe (its version resource).  Only the few places that hold it are read, never the whole file.
+// ---------------------------------------------------------------------
+async function readBytes(file, offset, length) {
+    if (offset < 0 || offset >= file.size || length <= 0) { return new Uint8Array(0); }
+    return new Uint8Array(await file.slice(offset, Math.min(file.size, offset + length)).arrayBuffer());
+}
+function u16(bytes, at) { return (bytes[at] | (bytes[at + 1] << 8)) & 0xFFFF; }
+function u32(bytes, at) { return (bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16) | (bytes[at + 3] << 24)) >>> 0; }
+function asciiOf(bytes, start, length) {
+    var text = '', i;
+    for (i = start; i < start + length && i < bytes.length && bytes[i] !== 0; i++) { text += String.fromCharCode(bytes[i]); }
+    return text;
+}
+function joinBytes(parts, size) {
+    var whole = new Uint8Array(size), at = 0;
+    parts.forEach(function (part) { if (at < size) { whole.set(part.subarray(0, Math.min(part.length, size - at)), at); at += part.length; } });
+    return whole;
+}
+
+async function openCompound(file) {
+    // An .msi is a compound file: sectors, a table that says which sector follows which, and a directory of streams.
+    // Returns the streams' entries and a way to read one; null when the file is not a compound file.
+    var head = await readBytes(file, 0, 512), i, sector, guard = 0;
+    if (head.length < 512 || u32(head, 0) !== 0xE011CFD0 || u32(head, 4) !== 0xE11AB1A1) { return null; }
+    var sectorSize = 1 << u16(head, 30), miniSize = 1 << u16(head, 32), perSector = sectorSize / 4, cutoff = u32(head, 56), fatSectors = [], fatCache = {}, difat = u32(head, 68);
+    for (i = 0; i < 109; i++) { sector = u32(head, 76 + 4 * i); if (sector < 0xFFFFFFFA) { fatSectors.push(sector); } }
+    while (difat < 0xFFFFFFFA && guard++ < 4096) {
+        var block = await readBytes(file, (difat + 1) * sectorSize, sectorSize);
+        if (block.length < sectorSize) { break; }
+        for (i = 0; i < perSector - 1; i++) { sector = u32(block, 4 * i); if (sector < 0xFFFFFFFA) { fatSectors.push(sector); } }
+        difat = u32(block, sectorSize - 4);
+    }
+    async function next(of) {
+        var index = Math.floor(of / perSector);
+        if (index >= fatSectors.length) { return 0xFFFFFFFE; }
+        if (!fatCache[index]) { fatCache[index] = await readBytes(file, (fatSectors[index] + 1) * sectorSize, sectorSize); }
+        return fatCache[index].length < sectorSize ? 0xFFFFFFFE : u32(fatCache[index], 4 * (of % perSector));
+    }
+    async function chain(start, size) {
+        // the bytes of a stream kept in whole sectors (size < 0: to the end of its chain); sectors that follow one another on disk are read in one go
+        var parts = [], total = 0, at = start, steps = 0, limit = size < 0 ? 67108864 : size, first, run, following, bytes;
+        while (at < 0xFFFFFFFA && total < limit && steps++ < 262144) {
+            first = at; run = 1; following = await next(first);
+            while (following === first + run && total + run * sectorSize < limit && run < 2048) { run++; following = await next(first + run - 1); }
+            bytes = await readBytes(file, (first + 1) * sectorSize, run * sectorSize);
+            if (bytes.length === 0) { break; }
+            parts.push(bytes); total += bytes.length; at = following;
+        }
+        return joinBytes(parts, size < 0 ? total : Math.min(size, total));
+    }
+    var directory = await chain(u32(head, 48), -1), entries = [], root = null, at, type, nameLength, name, miniTable = null, miniStream = null;
+    for (at = 0; at + 128 <= directory.length; at += 128) {
+        type = directory[at + 66]; nameLength = u16(directory, at + 64); name = '';
+        if (type === 0 || nameLength < 2 || nameLength > 64) { continue; }
+        for (i = 0; i < nameLength - 2; i += 2) { name += String.fromCharCode(u16(directory, at + i)); }
+        entries.push({ name: name, type: type, start: u32(directory, at + 116), size: u32(directory, at + 120) });
+        if (type === 5) { root = entries[entries.length - 1]; }
+    }
+    async function stream(entry) {
+        if (entry.size >= cutoff || !root) { return chain(entry.start, entry.size); }
+        // a small stream lives in the "mini stream", in 64-byte pieces, with a table of its own
+        if (!miniTable) { miniTable = await chain(u32(head, 60), -1); miniStream = await chain(root.start, root.size); }
+        var out = new Uint8Array(entry.size), done = 0, piece = entry.start, steps = 0, take;
+        while (piece < 0xFFFFFFFA && done < entry.size && steps++ < 1048576) {
+            take = Math.min(miniSize, entry.size - done);
+            if (piece * miniSize + take > miniStream.length) { break; }
+            out.set(miniStream.subarray(piece * miniSize, piece * miniSize + take), done);
+            done += take; piece = piece * 4 + 4 <= miniTable.length ? u32(miniTable, piece * 4) : 0xFFFFFFFE;
+        }
+        return out;
+    }
+    return { entries: entries, stream: stream };
+}
+
+function msiName(name) {
+    // the Windows Installer packs the names of its tables into the few characters a stream name may have; "!" = a table
+    var out = '', i, c;
+    function letter(x) { return x < 10 ? String.fromCharCode(48 + x) : (x < 36 ? String.fromCharCode(55 + x) : (x < 62 ? String.fromCharCode(61 + x) : (x === 62 ? '.' : '_'))); }
+    for (i = 0; i < name.length; i++) {
+        c = name.charCodeAt(i);
+        if (c >= 0x3800 && c < 0x4800) { c -= 0x3800; out += letter(c & 63) + letter((c >> 6) & 63); }
+        else if (c >= 0x4800 && c < 0x4840) { out += letter(c - 0x4800); }
+        else if (c === 0x4840) { out += '!'; }
+        else { out += name.charAt(i); }
+    }
+    return out;
+}
+
+function msiProperty(pool, data, table, wanted) {
+    // The Property table of an .msi: two columns of references into the string pool, kept column by column.
+    // pool = the lengths of the strings (4 bytes each; the first entry is the codepage), data = the strings end to end.
+    var wide = pool.length >= 4 && (u16(pool, 2) & 0x8000) !== 0, size = wide ? 3 : 2, offsets = [0], lengths = [0], offset = 0, i = 1, count = pool.length >> 2, length, rows, row, key, value;
+    while (i < count) {
+        if (u16(pool, 4 * i) === 0 && u16(pool, 4 * i + 2) === 0) { offsets.push(offset); lengths.push(0); i++; continue; }
+        // a string of 64 KB or more takes two entries: the second holds its length
+        if (u16(pool, 4 * i) === 0) { length = (u16(pool, 4 * i + 6) << 16) + u16(pool, 4 * i + 4); i += 2; } else { length = u16(pool, 4 * i); i++; }
+        offsets.push(offset); lengths.push(length); offset += length;
+    }
+    function reference(at) { return wide ? (table[at] | (table[at + 1] << 8) | (table[at + 2] << 16)) : u16(table, at); }
+    rows = Math.floor(table.length / (2 * size));
+    for (row = 0; row < rows; row++) {
+        key = reference(row * size);
+        if (key < lengths.length && lengths[key] === wanted.length && asciiOf(data, offsets[key], lengths[key]) === wanted) {
+            value = reference(rows * size + row * size);
+            return value < lengths.length ? asciiOf(data, offsets[value], lengths[value]) : '';
+        }
+    }
+    return '';
+}
+
+function summaryComments(bytes) {
+    // the summary of an .msi (what Properties, Details shows): property 6 is Comments, a string
+    if (bytes.length < 48 || u16(bytes, 0) !== 0xFFFE) { return ''; }
+    var section = u32(bytes, 44), i, at;
+    if (section + 8 > bytes.length) { return ''; }
+    for (i = 0; i < u32(bytes, section + 4) && section + 16 + 8 * i <= bytes.length; i++) {
+        at = section + u32(bytes, section + 12 + 8 * i);
+        if (u32(bytes, section + 8 + 8 * i) === 6 && at + 8 <= bytes.length && u32(bytes, at) === 30) { return asciiOf(bytes, at + 8, u32(bytes, at + 4)); }
+    }
+    return '';
+}
+
+async function msiFacts(file) {
+    // { productVersion, comments } of an .msi; null when the file is not one
+    var compound = await openCompound(file), streams = {}, facts = { productVersion: '', comments: '' }, summary;
+    if (!compound) { return null; }
+    compound.entries.forEach(function (entry) { if (entry.type === 2) { streams[msiName(entry.name)] = entry; } });
+    if (streams['!_StringPool'] && streams['!_StringData'] && streams['!Property']) {
+        facts.productVersion = msiProperty(await compound.stream(streams['!_StringPool']), await compound.stream(streams['!_StringData']), await compound.stream(streams['!Property']), 'ProductVersion');
+    }
+    summary = streams[String.fromCharCode(5) + 'SummaryInformation'];
+    if (summary && summary.size < 1048576) { facts.comments = summaryComments(await compound.stream(summary)); }
+    return facts;
+}
+
+function versionFromResource(info) {
+    // A version resource: the string "ProductVersion" where it has one (what Properties shows as Product version),
+    // else the four numbers of its fixed part.
+    var key = 'ProductVersion', i, j, at = -1, text = '', code;
+    for (i = 0; i + 2 * key.length + 2 <= info.length && at < 0; i += 2) {
+        for (j = 0; j < key.length && u16(info, i + 2 * j) === key.charCodeAt(j); j++) { }
+        if (j === key.length && u16(info, i + 2 * j) === 0) { at = i + 2 * key.length + 2; }
+    }
+    if (at >= 0) {
+        at = (at + 3) & ~3;                                  // the value starts on a 4-byte boundary
+        for (i = at; i + 2 <= info.length; i += 2) { code = u16(info, i); if (code === 0) { break; } text += String.fromCharCode(code); }
+        text = text.trim();
+        if (/^\d+(\s*,\s*\d+)+$/.test(text)) { text = text.replace(/\s*,\s*/g, '.'); }      // "8, 9, 9, 1"
+        if (/\d/.test(text)) { return text; }
+    }
+    for (i = 0; i + 24 <= info.length; i += 4) {
+        if (u32(info, i) === 0xFEEF04BD) { return (u32(info, i + 16) >>> 16) + '.' + (u32(info, i + 16) & 0xFFFF) + '.' + (u32(info, i + 20) >>> 16) + '.' + (u32(info, i + 20) & 0xFFFF); }
+    }
+    return '';
+}
+
+async function exeVersion(file) {
+    // the product version of an .exe: its headers lead to its resources, the resources to the version (type 16)
+    var head = await readBytes(file, 0, 4096), pe, sections, optional, table, resources, base, types, version, names, languages, entry, where;
+    if (head.length < 512 || u16(head, 0) !== 0x5A4D) { return ''; }
+    pe = u32(head, 60);
+    if (pe + 1024 > head.length) { head = await readBytes(file, 0, pe + 8192); }
+    if (pe + 264 > head.length || u32(head, pe) !== 0x00004550) { return ''; }
+    sections = u16(head, pe + 6); optional = pe + 24; table = optional + u16(head, pe + 20);
+    resources = u32(head, optional + (u16(head, optional) === 0x20B ? 112 : 96) + 16);
+    if (!resources || table + 40 * sections > head.length) { return ''; }
+    function offsetOf(address) {
+        var i, at, start, raw;
+        for (i = 0; i < sections; i++) {
+            at = table + 40 * i; start = u32(head, at + 12); raw = u32(head, at + 16);
+            if (address >= start && address < start + Math.max(u32(head, at + 8), raw)) { return u32(head, at + 20) + (address - start); }
+        }
+        return -1;
+    }
+    base = offsetOf(resources);
+    if (base < 0) { return ''; }
+    async function entriesAt(offset) {
+        var top = await readBytes(file, base + offset, 16), count, list, out = [], i;
+        if (top.length < 16) { return out; }
+        count = Math.min(u16(top, 12) + u16(top, 14), 4096); list = await readBytes(file, base + offset + 16, 8 * count);
+        for (i = 0; 8 * i + 8 <= list.length; i++) { out.push({ id: u32(list, 8 * i), to: u32(list, 8 * i + 4) }); }
+        return out;
+    }
+    types = await entriesAt(0);
+    version = types.filter(function (e) { return e.id === 16; })[0];
+    if (!version || version.to < 0x80000000) { return ''; }
+    names = await entriesAt(version.to - 0x80000000);
+    if (names.length === 0 || names[0].to < 0x80000000) { return ''; }
+    languages = await entriesAt(names[0].to - 0x80000000);
+    if (languages.length === 0 || languages[0].to >= 0x80000000) { return ''; }
+    entry = await readBytes(file, base + languages[0].to, 16);
+    where = entry.length < 16 ? -1 : offsetOf(u32(entry, 0));
+    if (where < 0) { return ''; }
+    return versionFromResource(await readBytes(file, where, Math.min(u32(entry, 4), 262144)));
+}
+
+async function readInside(file) {
+    // the version a file carries inside: { version, from } - version '' when it has none that the page can read
+    var name = String(file.name).toLowerCase(), facts, inComments, version;
+    try {
+        if (/\.msi$/.test(name)) {
+            facts = await msiFacts(file);
+            if (!facts) { return { version: '', from: '' }; }
+            // Edge and Chrome write the version a person knows into the Comments (Chrome's ProductVersion is a number of its own)
+            inComments = /^\s*(\d+(?:\.\d+){2,3})(?=[\s,;]|$)/.exec(facts.comments);
+            if (inComments) { return { version: inComments[1], from: 'the Comments in its properties' + (facts.productVersion && facts.productVersion !== inComments[1] ? ' (its ProductVersion says ' + facts.productVersion + ')' : '') }; }
+            return { version: facts.productVersion, from: facts.productVersion ? 'the ProductVersion of the .msi' : '' };
+        }
+        if (/\.(exe|dll)$/.test(name)) {
+            version = await exeVersion(file);
+            return { version: version, from: version ? 'the Product version in its properties' : '' };
+        }
+    } catch (problem) { return { version: '', from: '' }; }
+    return { version: '', from: '' };
+}
+
+// ---------------------------------------------------------------------
+//  SHA256 and SHA1 of a file of any size, a piece at a time (the browser's own digest wants the whole file in memory)
+// ---------------------------------------------------------------------
+function makeHash(state, compress) {
+    var held = new Uint8Array(64), heldLength = 0, total = 0, result = '';
+    function feed(data) {
+        var at = 0, length = data.length;
+        if (heldLength > 0) {
+            while (at < length && heldLength < 64) { held[heldLength++] = data[at++]; }
+            if (heldLength === 64) { compress(state, held, 0); heldLength = 0; }
+        }
+        while (at + 64 <= length) { compress(state, data, at); at += 64; }
+        while (at < length) { held[heldLength++] = data[at++]; }
+    }
+    return {
+        update: function (data) { total += data.length; feed(data); },
+        hex: function () {
+            if (result) { return result; }                  // asked twice, the answer is the same: the padding goes in once
+            var padding = new Uint8Array((heldLength < 56 ? 56 : 120) - heldLength + 8), end = padding.length;
+            var high = Math.floor(total / 0x20000000), low = ((total % 0x20000000) * 8) >>> 0, i, text = '';
+            padding[0] = 0x80;
+            padding[end - 8] = (high >>> 24) & 255; padding[end - 7] = (high >>> 16) & 255; padding[end - 6] = (high >>> 8) & 255; padding[end - 5] = high & 255;
+            padding[end - 4] = (low >>> 24) & 255; padding[end - 3] = (low >>> 16) & 255; padding[end - 2] = (low >>> 8) & 255; padding[end - 1] = low & 255;
+            feed(padding);
+            for (i = 0; i < state.length; i++) { text += ('00000000' + (state[i] >>> 0).toString(16)).slice(-8); }
+            result = text;
+            return text;
+        }
+    };
+}
+
+var SHA256_K = new Int32Array([
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]);
+var SHA256_W = new Int32Array(64);
+
+function sha256Block(s, d, o) {
+    var w = SHA256_W, k = SHA256_K, i, x, t1, t2;
+    var a = s[0], b = s[1], c = s[2], e0 = s[3], e = s[4], f = s[5], g = s[6], h = s[7];
+    for (i = 0; i < 16; i++, o += 4) { w[i] = (d[o] << 24) | (d[o + 1] << 16) | (d[o + 2] << 8) | d[o + 3]; }
+    for (i = 16; i < 64; i++) {
+        x = w[i - 15]; t1 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3);
+        x = w[i - 2]; t2 = ((x >>> 17) | (x << 15)) ^ ((x >>> 19) | (x << 13)) ^ (x >>> 10);
+        w[i] = (w[i - 16] + t1 + w[i - 7] + t2) | 0;
+    }
+    for (i = 0; i < 64; i++) {
+        t1 = (h + (((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7))) + ((e & f) ^ (~e & g)) + k[i] + w[i]) | 0;
+        t2 = ((((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10))) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+        h = g; g = f; f = e; e = (e0 + t1) | 0; e0 = c; c = b; b = a; a = (t1 + t2) | 0;
+    }
+    s[0] = (s[0] + a) | 0; s[1] = (s[1] + b) | 0; s[2] = (s[2] + c) | 0; s[3] = (s[3] + e0) | 0;
+    s[4] = (s[4] + e) | 0; s[5] = (s[5] + f) | 0; s[6] = (s[6] + g) | 0; s[7] = (s[7] + h) | 0;
+}
+
+var SHA1_W = new Int32Array(80);
+
+function sha1Block(s, d, o) {
+    var w = SHA1_W, i, x, f, k, t;
+    var a = s[0], b = s[1], c = s[2], e0 = s[3], e = s[4];
+    for (i = 0; i < 16; i++, o += 4) { w[i] = (d[o] << 24) | (d[o + 1] << 16) | (d[o + 2] << 8) | d[o + 3]; }
+    for (i = 16; i < 80; i++) { x = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]; w[i] = (x << 1) | (x >>> 31); }
+    for (i = 0; i < 80; i++) {
+        if (i < 20) { f = (b & c) | (~b & e0); k = 0x5a827999; }
+        else if (i < 40) { f = b ^ c ^ e0; k = 0x6ed9eba1; }
+        else if (i < 60) { f = (b & c) | (b & e0) | (c & e0); k = 0x8f1bbcdc | 0; }
+        else { f = b ^ c ^ e0; k = 0xca62c1d6 | 0; }
+        t = (((a << 5) | (a >>> 27)) + f + e + k + w[i]) | 0;
+        e = e0; e0 = c; c = (b << 30) | (b >>> 2); b = a; a = t;
+    }
+    s[0] = (s[0] + a) | 0; s[1] = (s[1] + b) | 0; s[2] = (s[2] + c) | 0; s[3] = (s[3] + e0) | 0; s[4] = (s[4] + e) | 0;
+}
+
+function createSha256() { return makeHash(new Int32Array([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]), sha256Block); }
+function createSha1() { return makeHash(new Int32Array([0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0]), sha1Block); }
+
+async function hashFile(file, onProgress) {
+    // both hashes in one pass, 4 MB at a time
+    var sha256 = createSha256(), sha1 = createSha1(), at = 0, piece = 4194304, bytes;
+    while (at < file.size) {
+        bytes = new Uint8Array(await file.slice(at, at + piece).arrayBuffer());
+        sha256.update(bytes); sha1.update(bytes);
+        at += bytes.length;
+        if (onProgress) { onProgress(at / file.size); }
+        if (bytes.length === 0) { throw new Error('the file could not be read to its end'); }
+    }
+    return { sha256: sha256.hex(), sha1: sha1.hex() };
+}
+
+function checksumLines(checks) {
+    // CHECKSUMS.txt as the Download Toolkit writes it: sha256, two spaces, the file
+    return checks.map(function (c) { return c.sha256 + '  ' + c.fileName; }).join('\r\n') + (checks.length ? '\r\n' : '');
+}
+
+// ---------------------------------------------------------------------
+//  The page
+// ---------------------------------------------------------------------
+var page = { products: [], entries: [], selection: null, handle: null, last: null, opened: false, started: false, tab: 'versions', fileName: 'deployed-versions.txt', unsaved: false, pickFor: null, refused: false };
+var VERDICT_WORDS = { deployed: 'Deployed', newer: 'Newer', older: 'Older', different: 'Different', failed: 'Mismatch', wrong: 'Wrong file', current: 'Up to date', update: 'Update', ahead: 'Different' };
+
+function element(tag, properties, children) {
+    var node = document.createElement(tag), key;
+    for (key in (properties || {})) { if (key === 'text') { node.textContent = properties[key]; } else { node[key] = properties[key]; } }
+    (children || []).forEach(function (child) { if (child) { node.appendChild(child); } });
+    return node;
+}
+
+function setStatus(text) {
+    var status = document.getElementById('status');
+    status.textContent = (page.unsaved ? 'not saved - ' : '') + text;
+    status.className = page.unsaved ? 'unsaved' : '';
+}
+
+function fileStatus() { return page.handle || page.opened ? page.fileName : (page.started ? 'a new list, not saved to a file yet' : 'no versions file open'); }
+function markUnsaved() { page.unsaved = true; setStatus(fileStatus()); }
+
+function linkNode(text, href, tip) { return element('a', { text: text, href: href, target: '_blank', rel: 'noopener noreferrer', title: tip || '' }); }
+
+// ---- the Versions tab ----
+function rowVerdict(entry) {
+    // The row in one word.  A checked file speaks first: the wrong file, a hash that differs, then its version next
+    // to the deployed one.  Without a file: the deployed version next to the newest the source has.
+    var check = entry.check, compared;
+    if (check && !check.busy && !check.error) {
+        if (wrongFileText(findProduct(page.products, entry.name), check.fileName)) { return 'wrong'; }
+        if (check.sha1Named && check.sha1Named !== check.sha1) { return 'failed'; }
+        if (check.publishedState === 'differs' || check.publishedState === 'absent') { return 'failed'; }
+        compared = compareVersions(entry.version, check.version);
+        if (compared) { return compared; }
+    }
+    return sourceVerdict(entry.version, entry.latest);
+}
+
+function renderVerdict(entry) {
+    var verdict = rowVerdict(entry);
+    if (!entry.verdictCell) { return; }
+    entry.verdictCell.textContent = VERDICT_WORDS[verdict] || '';
+    entry.verdictCell.className = 'verdict' + (verdict ? ' ' + verdict : '');
+}
+
+function renderLinks(entry) {
+    var cell = entry.linksCell, product = findProduct(page.products, entry.name), version = entry.check && entry.check.version ? entry.check.version : entry.version, notes;
+    if (!cell) { return; }
+    cell.textContent = '';
+    if (product) { product.links.forEach(function (link) { cell.appendChild(linkNode(link.text, link.href, link.tip)); }); }
+    if (cleanLink(entry.link)) { cell.appendChild(linkNode(product ? 'Site link' : 'Published at', cleanLink(entry.link), '')); }
+    notes = cleanLink(entry.notesLink) || (product ? fillTemplate(product.notes, version) : '');
+    if (notes) { cell.appendChild(linkNode('Release notes', notes, '')); }
+}
+
+function renderLatest(entry) {
+    // the newest version the source has: read by Check sources where the vendor lets a page read it, typed from the link elsewhere
+    if (!entry.latestBox) { return; }
+    if (entry.latestBox.value !== (entry.latest || '')) { entry.latestBox.value = entry.latest || ''; }
+    entry.latestBox.className = entry.latestProblem ? 'problem' : '';
+    entry.latestUnder.textContent = entry.latestProblem || (entry.latestFrom ? 'read from ' + entry.latestFrom : '');
+}
+
+function renderFacts(entry) {
+    var box = entry.factsBox, check = entry.check, product = findProduct(page.products, entry.name), wrong, compared, nodes, hashesLink, listed;
+    if (!box) { return; }
+    box.textContent = '';
+    if (!check) { return; }
+    function fact(label, values, tip) { box.appendChild(element('div', { className: 'fact', title: tip || '' }, [element('span', { className: 'label', text: label }), element('span', { className: 'value' }, values)])); }
+    fact('File', [element('span', { text: check.fileName + '  (' + formatSize(check.size) + ')' })]);
+    function insideFact() {
+        // the version the file carries inside, as its Properties show it; Use takes it where the name says something else
+        if (!check.inside || !check.inside.version) { return; }
+        var values = [element('span', { text: check.inside.version + ' - ' + check.inside.from })], take;
+        if (!check.busy && check.version !== check.inside.version && compareVersions(check.version, check.inside.version) !== 'deployed') {
+            take = element('button', { className: 'small', text: 'Use', title: 'Takes this as the version of the file' });
+            take.addEventListener('click', function () { check.version = check.inside.version; renderVerdict(entry); renderLinks(entry); renderFacts(entry); });
+            values.push(take);
+        }
+        fact('In the file', values, 'The version inside the file, as its Properties show it');
+    }
+    if (check.busy) { insideFact(); fact('Hashing', [element('span', { text: check.progress })]); return; }
+    if (check.error) { fact('Problem', [element('span', { className: 'bad', text: check.error })]); return; }
+    wrong = wrongFileText(product, check.fileName);
+    if (wrong) { fact('Wrong file', [element('span', { className: 'bad', text: wrong })]); }
+    var versionBox = element('input', { type: 'text', value: check.version, title: 'The version of this file' });
+    versionBox.addEventListener('change', function () { check.version = versionBox.value.trim(); renderVerdict(entry); renderLinks(entry); renderFacts(entry); });
+    var deploy = element('button', { className: 'small', text: 'Set as deployed', title: 'Writes this version into the Deployed column' });
+    deploy.addEventListener('click', function () {
+        check.version = versionBox.value.trim();
+        if (!check.version) { return; }
+        entry.version = check.version; entry.versionBox.value = check.version; markUnsaved(); renderVerdict(entry); renderLinks(entry);
+    });
+    nodes = [versionBox, deploy];
+    listed = publishedVerdict(check.publishedText, check.fileName, check.sha256).state === 'match' ? listContext(check.publishedText, check.sha256) : null;
+    if (listed && listed.version && listed.version !== check.version) {
+        // the vendor's list names another version for this very file than the one read or typed
+        var use = element('button', { className: 'small', text: 'Use', title: 'Takes the version the list names for this file' });
+        use.addEventListener('click', function () { check.version = listed.version; renderVerdict(entry); renderLinks(entry); renderFacts(entry); });
+        nodes.push(element('span', { className: 'warn', text: 'the list says ' + listed.version }), use);
+    }
+    fact('Version', nodes);
+    insideFact();
+    // the file next to the newest the source has
+    compared = entry.latest && check.version ? compareVersions(check.version, entry.latest) : '';
+    if (compared === 'deployed') { fact('Latest', [element('span', { className: 'good', text: 'this file is the newest the source has' })]); }
+    if (compared === 'newer') { fact('Latest', [element('span', { className: 'warn', text: 'the source has ' + entry.latest })]); }
+    var copy = element('button', { className: 'small', text: 'Copy' });
+    copy.addEventListener('click', function () { if (navigator.clipboard) { navigator.clipboard.writeText(check.sha256).then(function () { copy.textContent = 'Copied'; }, function () { copy.textContent = 'Select it by hand'; }); } });
+    fact('SHA256', [element('code', { text: check.sha256 }), copy]);
+    if (check.sha1Named) {
+        fact('Catalogue SHA1', [check.sha1Named === check.sha1 ? element('span', { className: 'good', text: 'matches the file' }) : element('span', { className: 'bad', text: 'DOES NOT MATCH the file (' + check.sha1 + ')' })],
+             'The Update Catalog puts the SHA1 of a file in its name');
+    } else {
+        fact('SHA1', [element('code', { text: check.sha1 })]);
+    }
+    // The SHA256 the vendor publishes: read from the source where the page may; elsewhere one hash, or the vendor's
+    // whole list - pasted, copied (Search the copied list) or as a file - which the page searches for the file's own.
+    var publishedBox = element('input', { type: 'text', className: 'wide', value: publishedShown(check.publishedText), placeholder: 'paste the SHA256, or the whole list, that the vendor publishes',
+                                          title: 'One SHA256, or the vendor\'s whole list: pasted here, or its file dropped here' });
+    var publishedMark = element('span', {});
+    function showPublished() {
+        var verdict = publishedVerdict(check.publishedText, check.fileName, check.sha256), from = check.publishedFrom ? ' - ' + check.publishedFrom : '';
+        var found = verdict.state === 'match' ? listContext(check.publishedText, check.sha256) : null, count = (String(check.publishedText || '').match(/[0-9a-f]{64}/ig) || []).length;
+        var where = found && found.hashes > 1 ? ': found among the ' + found.hashes + ' hashes of the list' + (found.file ? ', for ' + found.file : '') + (found.version ? ', version ' + found.version : '') : '';
+        check.publishedState = verdict.state;
+        publishedMark.textContent = verdict.state === 'match' ? 'matches the file' + where + from : (verdict.state === 'differs' ? 'DOES NOT MATCH the file' + from
+            : (verdict.state === 'absent' ? 'the SHA256 of this file is not among the ' + count + ' hashes of the list' + from : ''));
+        publishedMark.className = verdict.state === 'match' ? 'good' : (verdict.state ? 'bad' : '');
+        // what went wrong at the last try to read a list (the source, or what was copied) stands beside what is known
+        publishedNote.textContent = check.publishedProblem || ''; publishedNote.className = check.publishedProblem ? 'warn' : '';
+        renderVerdict(entry);
+    }
+    var publishedNote = element('span', {});
+    publishedBox.addEventListener('input', function () { check.publishedText = publishedBox.value; check.publishedFrom = ''; check.publishedProblem = ''; showPublished(); });
+    publishedBox.addEventListener('focus', function () { publishedBox.select(); });
+    publishedBox.addEventListener('paste', function (event) {
+        // all of what was copied, line breaks too: a one-line box alone would run a list together
+        var pasted = event.clipboardData ? event.clipboardData.getData('text') : '';
+        if (!pasted) { return; }
+        event.preventDefault(); setPublished(entry, pasted, '');
+    });
+    publishedBox.addEventListener('dragover', function (event) { event.preventDefault(); event.stopPropagation(); });
+    publishedBox.addEventListener('drop', function (event) {
+        event.preventDefault(); event.stopPropagation();
+        if (event.dataTransfer.files.length > 0) { readList(entry, event.dataTransfer.files[0]); }
+    });
+    var search = element('button', { className: 'small', text: 'Search the copied list', title: 'After Ctrl+A, Ctrl+C on the vendor\'s list: looks for the SHA256 of this file in what was copied' });
+    search.addEventListener('click', function () { searchCopied(entry); });
+    nodes = [publishedBox, search];
+    if (product && product.hashFrom) {
+        var read = element('button', { className: 'small', text: 'Read from the source', title: 'Asks ' + hostOf(product.hashFrom === 'github' ? product.source.url : product.hashes) + ' for the SHA256 of this file' });
+        read.addEventListener('click', function () { readPublished(entry, product); });
+        nodes.push(read);
+    }
+    hashesLink = product ? fillTemplate(product.hashes, check.version, check.fileName) : '';
+    if (hashesLink) { nodes.push(linkNode('Published hashes', hashesLink, 'Where the vendor publishes them')); }
+    nodes.push(publishedMark, publishedNote);
+    fact('Published SHA256', nodes);
+    showPublished();
+    if (product) { fact('Signer must be', [element('span', { text: product.signers.join(' or ') })], 'The file\'s Properties, Digital Signatures'); }
+}
+
+async function checkFile(entry, file) {
+    var check = { fileName: file.name, size: file.size, busy: true, progress: '0%', version: readVersionFromName(file.name), sha1Named: sha1FromName(file.name), sha256: '', sha1: '',
+                  publishedText: '', publishedState: '', publishedFrom: '', publishedProblem: '', inside: null, error: '' };
+    entry.check = check; renderVerdict(entry); renderFacts(entry);
+    // the version inside the file first - a few small reads - so that it shows while a large file is still being hashed;
+    // it is the file's version where the name carries none (Microsoft Edge, Google Chrome)
+    check.inside = await readInside(file);
+    if (check.inside.version && !check.version) { check.version = check.inside.version; }
+    if (entry.check === check) { renderFacts(entry); }
+    try {
+        var hashes = await hashFile(file, function (done) { check.progress = Math.floor(done * 100) + '%'; if (entry.check === check) { renderFacts(entry); } });
+        check.sha256 = hashes.sha256; check.sha1 = hashes.sha1;
+    } catch (problem) { check.error = 'the file could not be read: ' + (problem && problem.message ? problem.message : problem); }
+    check.busy = false;
+    if (entry.check === check) { renderVerdict(entry); renderLinks(entry); renderFacts(entry); }
+}
+
+function renderRow(entry) {
+    var product = findProduct(page.products, entry.name);
+    var versionBox = element('input', { type: 'text', value: entry.version, placeholder: 'version or KB' });
+    var latestBox = element('input', { type: 'text', value: entry.latest || '', placeholder: product && product.source ? 'Check sources' : 'from the link', title: 'The newest version the source has' });
+    var noteBox = element('input', { type: 'text', value: entry.note });
+    var pick = element('button', { className: 'small', text: 'Check a file', title: 'Or drop the file on this row' });
+    entry.versionBox = versionBox; entry.latestBox = latestBox;
+    entry.latestUnder = element('div', { className: 'under' });
+    entry.verdictCell = element('td', { className: 'verdict' });
+    entry.linksCell = element('div', { className: 'links' });
+    entry.factsBox = element('div', { className: 'facts' });
+    var row = element('tr', {}, [entry.verdictCell, element('td', { className: 'name' }, [element('div', { className: 'product', text: entry.name }), entry.linksCell]),
+                                 element('td', { className: 'version' }, [versionBox]), element('td', { className: 'latest' }, [latestBox, entry.latestUnder]),
+                                 element('td', { className: 'file' }, [pick, entry.factsBox]), element('td', { className: 'note' }, [noteBox])]);
+    versionBox.addEventListener('input', function () { entry.version = versionBox.value; markUnsaved(); renderVerdict(entry); renderLinks(entry); });
+    latestBox.addEventListener('input', function () { entry.latest = latestBox.value.trim(); entry.latestFrom = ''; entry.latestProblem = ''; renderLatest(entry); renderVerdict(entry); });
+    latestBox.addEventListener('change', function () { renderFacts(entry); });
+    noteBox.addEventListener('input', function () { entry.note = noteBox.value; markUnsaved(); });
+    pick.addEventListener('click', function () { page.pickFor = entry; var input = document.getElementById('pickFile'); input.value = ''; input.click(); });
+    row.addEventListener('dragover', function (event) { event.preventDefault(); row.className = 'over'; });
+    row.addEventListener('dragleave', function () { row.className = ''; });
+    row.addEventListener('drop', function (event) {
+        event.preventDefault(); row.className = '';
+        var files = event.dataTransfer.files, file = files.length > 0 ? files[0] : null, checked = entry.check && !entry.check.busy && !entry.check.error, asked;
+        if (!file) { return; }
+        if (/\.txt$/i.test(file.name)) {
+            // a .txt is a versions file, and the page takes it - unless the row holds a checked file and the .txt is a list of hashes for it
+            if (!checked) { return; }
+            event.stopPropagation(); asked = handleOf(event);
+            file.text().then(function (text) { if (/[0-9a-f]{64}/i.test(text)) { setPublished(entry, text, 'the file ' + file.name); } else { openDropped(file, asked); } });
+            return;
+        }
+        event.stopPropagation();
+        takeFile(entry, file);
+    });
+    renderVerdict(entry); renderLinks(entry); renderLatest(entry); renderFacts(entry);
+    return row;
+}
+
+function renderRows() {
+    var body = document.getElementById('rows');
+    body.textContent = '';
+    page.entries.forEach(function (entry) { if (entry.kind === 'row' && String(entry.name).trim()) { body.appendChild(renderRow(entry)); } });
+}
+
+// ---- what the sources say: asked for with a click, from the vendors that let a page read their list ----
+async function readText(link) {
+    // The one place this page asks the internet for anything.  No cookies, no referrer; the address is a vendor's own
+    // list, named in the products above.
+    var answer = await fetch(link, { cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' });
+    if (!answer.ok) { throw new Error('HTTP ' + answer.status); }
+    return answer.text();
+}
+
+function problemText(problem) { return problem && problem.message ? problem.message : String(problem); }
+
+async function checkSources() {
+    if (!page.started) { setStatus('open the versions file, or start a new list, first'); return; }
+    var rows = page.entries.filter(function (entry) { return entry.kind === 'row' && String(entry.name).trim(); });
+    var readable = rows.filter(function (entry) { var p = findProduct(page.products, entry.name); return !!(p && p.source); }), done = 0;
+    if (readable.length === 0) { setStatus('none of the rows on this page has a source that a page may read: compare them by hand, from their links'); return; }
+    setStatus('reading ' + readable.length + ' source(s) ...');
+    await Promise.all(readable.map(async function (entry) {
+        var product = findProduct(page.products, entry.name), found;
+        try {
+            found = latestFromText(await readText(product.source.url), product.source.pattern);
+            if (!found) { throw new Error('no version found there'); }
+            entry.latest = found.version; entry.latestFile = found.file; entry.latestFrom = hostOf(product.source.url); entry.latestProblem = '';
+            done++;
+        } catch (problem) { entry.latestProblem = hostOf(product.source.url) + ' could not be read: ' + problemText(problem); entry.latestFrom = ''; }
+        renderLatest(entry); renderVerdict(entry); renderFacts(entry);
+    }));
+    setStatus('sources read: ' + done + ' of ' + rows.length + ' rows' + (done < readable.length ? ' (' + (readable.length - done) + ' could not be read)' : '') + ' - the other ' + (rows.length - readable.length) + ' are compared by hand, from their links');
+}
+
+async function readPublished(entry, product) {
+    // the SHA256 the vendor publishes for the checked file, from the vendor's own list
+    var check = entry.check, link = product.hashFrom === 'github' ? product.source.url : fillTemplate(product.hashes, check.version, check.fileName), hash = '';
+    check.publishedProblem = '';
+    try {
+        if (!link) { throw new Error('the version of the file is needed to find its list'); }
+        if (product.hashFrom === 'github') { hash = hashFromGitHub(await readText(link), check.fileName); } else { hash = hashFromText(await readText(link), product.hashPattern, check.fileName); }
+        if (!hash) { throw new Error(product.hashFrom === 'github' ? 'lists no file of this name: it names the files of its latest release only' : 'names no SHA256 for this file'); }
+        check.publishedText = hash; check.publishedFrom = 'read from ' + hostOf(link);
+    } catch (problem) { check.publishedProblem = hostOf(link || product.hashes) + ': ' + problemText(problem); }
+    if (entry.check === check) { renderFacts(entry); }
+}
+
+function setPublished(entry, text, from) {
+    // what the vendor publishes for the checked file: one SHA256, or a whole list, which is searched for the file's own
+    var check = entry.check, found;
+    if (!check || check.busy || check.error) { return; }
+    check.publishedText = String(text || ''); check.publishedFrom = from || ''; check.publishedProblem = '';
+    found = listContext(check.publishedText, check.sha256);
+    if (found && found.version && !check.version) { check.version = found.version; }      // a name without a version (Microsoft Edge): the list names it
+    renderFacts(entry); renderVerdict(entry); renderLinks(entry);
+}
+
+async function searchCopied(entry) {
+    // the list was copied on the vendor's page (Ctrl+A, Ctrl+C): the browser asks once whether the page may see it
+    var check = entry.check, copied = '';
+    try { copied = await navigator.clipboard.readText(); } catch (problem) { copied = ''; }
+    if (!copied) { check.publishedProblem = 'the browser did not hand over what was copied: click in the box and press Ctrl+V'; renderFacts(entry); return; }
+    setPublished(entry, copied, 'the copied list');
+}
+
+function readList(entry, file) {
+    // a vendor's list as a file: sha256sums, SIGNATURES-4.6.9.txt, x.msi.sha256, a saved .json
+    var check = entry.check;
+    if (!check || check.busy) { return; }
+    if (file.size > 8388608) { check.publishedProblem = file.name + ' is too large to be a list of hashes'; renderFacts(entry); return; }
+    file.text().then(function (text) { setPublished(entry, text, 'the file ' + file.name); });
+}
+
+function takeFile(entry, file) {
+    // a file given to a row: the installer or update to check - or, once that is checked, the vendor's list of hashes for it
+    if (entry.check && !entry.check.busy && !entry.check.error && isListName(file.name) && file.size <= 8388608) {
+        file.text().then(function (text) { if (/[0-9a-f]{64}/i.test(text)) { setPublished(entry, text, 'the file ' + file.name); } else { checkFile(entry, file); } });
+        return;
+    }
+    checkFile(entry, file);
+}
+
+// ---- the Settings tab ----
+function tickBox(text, checked, tip, onChange) {
+    var box = element('input', { type: 'checkbox', checked: !!checked });
+    box.addEventListener('change', function () { onChange(box.checked); });
+    return element('label', { title: tip || '' }, [box, document.createTextNode(text)]);
+}
+
+function recorded(entry) { return !!(String(entry.version || '').trim() || String(entry.note || '').trim() || entry.check); }
+
+function removalAgreed(rows) {
+    // rows that hold a version, a note or a checked file go only after a Yes
+    var holding = rows.filter(recorded);
+    if (holding.length === 0) { return true; }
+    return window.confirm('Remove ' + (holding.length === 1 ? 'this row' : 'these ' + holding.length + ' rows') + ' and what is recorded for ' + (holding.length === 1 ? 'it' : 'them') + '?\n\n' +
+        holding.map(function (entry) { return entry.name + ' = ' + (entry.version || '') + (entry.note ? '   # ' + entry.note : ''); }).join('\n'));
+}
+
+function changeSelection(change) {
+    var next = copySelection(page.selection), plan;
+    change(next);
+    plan = planChange(page.entries, page.products, next);
+    if (!removalAgreed(plan.remove)) { renderSettings(); return; }
+    page.selection = next;
+    applyPlan(page.entries, page.products, plan);
+    if (plan.remove.length + plan.add.length > 0) { markUnsaved(); }
+    renderSettings(); renderRows();
+}
+
+function serversWith(line) { return BUILDS.filter(function (b) { return b.lines.indexOf(line) >= 0; }).map(function (b) { return b.server.replace('Windows ', ''); }).join(', '); }
+
+function renderOwnRow(entry) {
+    var nameBox = element('input', { type: 'text', value: entry.name, placeholder: 'name' });
+    var linkBox = element('input', { type: 'text', value: entry.link || '', placeholder: 'https://' });
+    var notesBox = element('input', { type: 'text', value: entry.notesLink || '', placeholder: 'https://' });
+    var remove = element('button', { className: 'small', text: 'Remove' });
+    var row = element('tr', {}, [element('td', {}, [nameBox]), element('td', {}, [linkBox]), element('td', {}, [notesBox]), element('td', {}, [remove])]);
+    function mark(box) { box.className = box.value.trim() && !cleanLink(box.value) ? 'invalid' : ''; }
+    nameBox.addEventListener('input', function () { entry.name = cleanField(nameBox.value, true); markUnsaved(); });
+    linkBox.addEventListener('input', function () { entry.link = linkBox.value.trim(); mark(linkBox); markUnsaved(); });
+    notesBox.addEventListener('input', function () { entry.notesLink = notesBox.value.trim(); mark(notesBox); markUnsaved(); });
+    remove.addEventListener('click', function () {
+        if (!removalAgreed([entry])) { return; }
+        page.entries.splice(page.entries.indexOf(entry), 1); markUnsaved(); renderSettings(); renderRows();
+    });
+    mark(linkBox); mark(notesBox);
+    return row;
+}
+
+function renderSettings() {
+    var builds = document.getElementById('setBuilds'), lines = document.getElementById('setLines'), sql = document.getElementById('setSql'), software = document.getElementById('setSoftware'), own = document.getElementById('ownRows');
+    builds.textContent = ''; lines.textContent = ''; sql.textContent = ''; software.textContent = ''; own.textContent = '';
+    BUILDS.forEach(function (b) { builds.appendChild(tickBox(b.server, page.selection.builds[b.build], '', function (on) { changeSelection(function (s) { s.builds[b.build] = on; }); })); });
+    NET_LINES.forEach(function (line) { lines.appendChild(tickBox(line, page.selection.lines[line], serversWith(line), function (on) { changeSelection(function (s) { s.lines[line] = on; }); })); });
+    page.products.forEach(function (p) {
+        if (p.kind !== 'software') { return; }
+        var box = tickBox(p.sql ? 'SQL Server ' + p.sql : (p.group === 'sql' ? 'Management Studio' : p.name), page.selection.software[p.name], '', function (on) { changeSelection(function (s) { s.software[p.name] = on; }); });
+        (p.group === 'sql' ? sql : software).appendChild(box);
+    });
+    page.entries.forEach(function (entry) { if (entry.kind === 'row' && !findProduct(page.products, entry.name)) { own.appendChild(renderOwnRow(entry)); } });
+}
+
+function addOwn() {
+    var entry = newRow('');
+    page.entries.push(entry);
+    var row = renderOwnRow(entry);
+    document.getElementById('ownRows').appendChild(row);
+    row.querySelector('input').focus();
+}
+
+// ---- the tabs, and the choice the page starts with ----
+function showTab(name) {
+    // Until a versions file is open or a new list is started there are no rows: only the choice between the two.  A
+    // list filled in beside an existing file, and then saved over it, would replace what the file held.
+    page.tab = name;
+    document.getElementById('startBox').hidden = page.started;
+    document.getElementById('startOpen').textContent = page.last ? 'Open ' + page.last.name : 'Open versions file';
+    document.getElementById('versions').hidden = !page.started || name !== 'versions';
+    document.getElementById('settings').hidden = !page.started || name !== 'settings';
+    document.getElementById('tabVersions').className = name === 'versions' ? 'on' : '';
+    document.getElementById('tabSettings').className = name === 'settings' ? 'on' : '';
+    if (!page.started) { return; }
+    if (name === 'versions') { renderRows(); } else { renderSettings(); }
+}
+
+function startNew() {
+    if (page.last && !window.confirm(page.last.name + ' was used last time and is not open.\n\nStart a new list anyway? Saved under the same name, it replaces that file.')) { return; }
+    page.entries = starterEntries(page.products); page.selection = defaultSelection(page.products);
+    page.handle = null; page.opened = false; page.unsaved = false; page.started = true;
+    showTab(page.tab); setStatus(fileStatus());
+}
+
+// ---- the versions file: opened, remembered, saved ----
+function kept(action) {
+    // The browser's own store for this page.  It holds one thing: the versions file used last, so that the page can
+    // open it again and start its file dialog in that folder.  Any failure is "nothing remembered".
+    return new Promise(function (resolve) {
+        try {
+            var request = window.indexedDB.open('simple-companion', 1);
+            request.onupgradeneeded = function () { request.result.createObjectStore('kept'); };
+            request.onerror = function () { resolve(null); };
+            request.onsuccess = function () {
+                try {
+                    var database = request.result, transaction = database.transaction('kept', 'readwrite'), answer = action(transaction.objectStore('kept'));
+                    transaction.oncomplete = function () { database.close(); resolve(answer && answer.result !== undefined ? answer.result : null); };
+                    transaction.onabort = function () { database.close(); resolve(null); };
+                } catch (problem) { resolve(null); }
+            };
+        } catch (problem) { resolve(null); }
+    });
+}
+function rememberHandle(handle) { page.last = handle; return kept(function (store) { return store.put(handle, 'versionsFile'); }); }
+function recallHandle() { return kept(function (store) { return store.get('versionsFile'); }); }
+function forgetHandle() { page.last = null; return kept(function (store) { return store.delete('versionsFile'); }); }
+
+function loadText(text, name) {
+    if (!looksLikeVersions(text)) {
+        setStatus(/[0-9a-f]{64}/i.test(String(text)) ? name + ' is a list of hashes, not a versions file: drop it on the row of the file it is for, once that file is checked' : name + ' holds no "Name = version" line: it is not a versions file');
+        return false;
+    }
+    page.entries = parseVersions(text); page.fileName = name; page.opened = true; page.unsaved = false; page.started = true;
+    page.selection = selectionFromEntries(page.entries, page.products);
+    showTab(page.tab); setStatus(fileStatus());
+    return true;
+}
+
+async function openHandle(handle) {
+    // reads the file behind a handle and remembers it; false when the file is gone or is not a versions file
+    try {
+        var file = await handle.getFile();
+        if (!loadText(await file.text(), file.name)) { return false; }
+        page.handle = handle;
+        rememberHandle(handle);
+        return true;
+    } catch (problem) { return false; }
+}
+
+async function mayUse(handle, ask) {
+    // may the page read and write this file?  ask = the browser may put its question (only after a click)
+    try {
+        if ((await handle.queryPermission({ mode: 'readwrite' })) === 'granted') { return true; }
+        return ask ? (await handle.requestPermission({ mode: 'readwrite' })) === 'granted' : false;
+    } catch (problem) { return false; }
+}
+
+function pickerOptions(startIn, more) {
+    // the dialog starts in the folder of the file used last, when there is one: a page cannot name a folder itself
+    var options = more;
+    options.id = 'deployedVersions';
+    if (startIn) { options.startIn = startIn; }
+    return options;
+}
+
+async function openVersions() {
+    if (page.unsaved && !window.confirm('The changes on this page are not saved. Open another file anyway?')) { return; }
+    var last = await recallHandle(), same = false;
+    if (last && page.handle) { try { same = await last.isSameEntry(page.handle); } catch (problem) { same = false; } }
+    if (last && !same && !page.refused) {
+        // the file used last time: the browser asks whether the page may use it again, and it opens without a dialog
+        if (await mayUse(last, true)) { if (await openHandle(last)) { return; } forgetHandle(); last = null; } else { page.refused = true; }
+    }
+    if (window.showOpenFilePicker) {
+        try {
+            var handles = await window.showOpenFilePicker(pickerOptions(page.handle || last, { types: [{ description: 'Versions file', accept: { 'text/plain': ['.txt'] } }] }));
+            await openHandle(handles[0]);
+            return;
+        } catch (problem) { if (problem && problem.name === 'AbortError') { return; } }
+    }
+    document.getElementById('pickVersions').click();
+}
+
+function downloadText(name, text) {
+    var link = element('a', { href: URL.createObjectURL(new Blob([text], { type: 'text/plain' })), download: name });
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(function () { URL.revokeObjectURL(link.href); }, 10000);
+}
+
+async function writeWithPicker(handle, suggestedName, text) {
+    // Edge and Chrome write the file in place; returns the handle, 'stopped' after a Cancel, or null where the browser cannot (the caller downloads)
+    try {
+        var target = handle;
+        if (!target && window.showSaveFilePicker) {
+            target = await window.showSaveFilePicker(pickerOptions(page.handle || page.last, { suggestedName: suggestedName, types: [{ description: 'Text file', accept: { 'text/plain': ['.txt'] } }] }));
+        }
+        if (!target) { return null; }
+        var writer = await target.createWritable();
+        await writer.write(text); await writer.close();
+        return target;
+    } catch (problem) { if (problem && problem.name === 'AbortError') { return 'stopped'; } return null; }
+}
+
+async function saveVersions() {
+    if (!page.started) { setStatus('nothing to save yet: open the versions file, or start a new list'); return; }
+    var text = formatVersions(page.entries), written = await writeWithPicker(page.handle, page.fileName, text);
+    if (written === 'stopped') { return; }
+    if (written) { page.handle = written; page.fileName = written.name; page.opened = true; page.unsaved = false; rememberHandle(written); setStatus('saved ' + page.fileName); return; }
+    downloadText(page.fileName, text);
+    page.unsaved = false; setStatus('handed over as a download: put ' + page.fileName + ' in place of the old file');
+}
+
+async function saveChecksums() {
+    var checks = page.entries.filter(function (entry) { return entry.kind === 'row' && entry.check && entry.check.sha256; }).map(function (entry) { return entry.check; });
+    if (checks.length === 0) { setStatus('no file has been checked on this page yet'); return; }
+    var text = checksumLines(checks), written = await writeWithPicker(null, 'CHECKSUMS.txt', text);
+    if (written === 'stopped') { return; }
+    if (!written) { downloadText('CHECKSUMS.txt', text); }
+    setStatus('CHECKSUMS.txt: ' + checks.length + ' file(s)');
+}
+
+function handleOf(event) {
+    // the handle of a dropped file, with which Save writes it in place: it can be asked for only inside the drop itself
+    var item = event.dataTransfer && event.dataTransfer.items && event.dataTransfer.items.length > 0 ? event.dataTransfer.items[0] : null;
+    try { return item && item.getAsFileSystemHandle ? item.getAsFileSystemHandle() : null; } catch (problem) { return null; }
+}
+
+function openDropped(file, asked) {
+    // a dropped versions file: it opens without a dialog, and Save writes it in place where the browser gave its handle
+    if (page.unsaved && !window.confirm('The changes on this page are not saved. Open ' + file.name + ' anyway?')) { return; }
+    function plain() { return file.text().then(function (text) { if (loadText(text, file.name)) { page.handle = null; } }); }
+    Promise.resolve(asked).then(function (handle) {
+        if (!handle || handle.kind !== 'file') { return plain(); }
+        return openHandle(handle).then(function (opened) { if (!opened && !page.opened) { return plain(); } });
+    }, plain);
+}
+
+function dropVersions(event) {
+    // a .txt dropped anywhere on the page (a row with a checked file looks at it first: it may be that file's list of hashes)
+    event.preventDefault();
+    var files = event.dataTransfer ? event.dataTransfer.files : null, file = files && files.length > 0 ? files[0] : null;
+    if (!file || !/\.txt$/i.test(file.name)) { return; }
+    openDropped(file, handleOf(event));
+}
+
+async function start() {
+    page.products = knownProducts();
+    page.selection = defaultSelection(page.products);
+    showTab('versions'); setStatus(fileStatus());
+    document.getElementById('tabVersions').addEventListener('click', function () { showTab('versions'); });
+    document.getElementById('tabSettings').addEventListener('click', function () { showTab('settings'); });
+    document.getElementById('open').addEventListener('click', openVersions);
+    document.getElementById('startOpen').addEventListener('click', openVersions);
+    document.getElementById('startNew').addEventListener('click', startNew);
+    document.getElementById('save').addEventListener('click', saveVersions);
+    document.getElementById('checkSources').addEventListener('click', checkSources);
+    document.getElementById('addOwn').addEventListener('click', addOwn);
+    document.getElementById('checksums').addEventListener('click', saveChecksums);
+    document.getElementById('helpButton').addEventListener('click', function () { var help = document.getElementById('help'); help.hidden = !help.hidden; });
+    document.getElementById('pickVersions').addEventListener('change', function (event) {
+        var file = event.target.files[0];
+        if (file) { file.text().then(function (text) { if (loadText(text, file.name)) { page.handle = null; } }); }
+    });
+    document.getElementById('pickFile').addEventListener('change', function (event) { if (event.target.files[0] && page.pickFor) { takeFile(page.pickFor, event.target.files[0]); } });
+    window.addEventListener('beforeunload', function (event) { if (page.unsaved) { event.preventDefault(); event.returnValue = ''; } });
+    window.addEventListener('dragover', function (event) { event.preventDefault(); });
+    window.addEventListener('drop', dropVersions);
+    // the versions file used last: opened at once where the browser already lets the page use it, else offered by name
+    var last = await recallHandle();
+    if (last && !page.started) {
+        page.last = last;
+        if (await mayUse(last, false)) { if (!page.started) { await openHandle(last); } }
+        if (!page.started) { showTab(page.tab); }
+    }
+}
+
+if (typeof document !== 'undefined') { start(); }
+</script>
+</body>
+</html>

@@ -56,6 +56,7 @@ THE TASK
   * Register task creates (or replaces) one task, \WinRMToolkit\Airgap Download Toolkit, that runs this launcher with -Unattended at the time and on the days set on the Settings tab, as the account registering it. The command it runs is shown on the page: it names this folder, so a copy moved elsewhere must register again.
   * An unattended run is Check and download without a window: every enabled product checked, what is missing downloaded and verified, the library hashed again, settings\last-run.json and a report written, exit code 0 when nothing failed. The log file in logs\ has every line.
   * Run now starts the task at once, hidden; Refresh reads the Task Scheduler again. Check and download on the Library tab runs the same job in this window instead.
+  * The task starts the tool the way this session was started. Started as a file, it starts the file. Started from text, because PowerShell refused the unsigned file here, it reads the launcher and runs it as text too: the Command row shows which.
 
 THE LOGON TYPE (Settings tab)
 
@@ -67,7 +68,7 @@ WHAT THE PAGE SHOWS
 
   * Registered, Runs, Runs as, Command, Next run, Last run (Task Scheduler): the task as the Task Scheduler holds it. The last result 0 means the run completed with nothing failed; 1 means a check, download or verification failed - the report and the log say which.
   * Last run (this tool): what the run itself recorded in settings\last-run.json - every file downloaded, every failure, the report and the log file of that day. Open last report opens the report.
-  * A Problem row: the task runs another copy, has no trigger, is disabled, or could not be read.
+  * A Problem row: the task runs another copy, has no trigger, is disabled, or could not be read; it starts the file although this session had to be started from text; or it ended with 1 and the tool recorded no run, which means PowerShell did not get to run the tool.
 '@
     return (New-DetailsHtml -Title 'Help: the Schedule console' -Subtitle 'this tool as a scheduled task' -Console 'Schedule' -Sections @(@{ Heading = ''; Html = (ConvertTo-HtmlFromNotes -Text $notes) }))
 }

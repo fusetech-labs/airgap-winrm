@@ -25,7 +25,7 @@ $script:DefaultLibraryFolder = $(if ($script:BesideToolkit) { $script:CompanionP
 $script:Config = @{
     # ---- Identity ----
     ToolName       = 'Sysadmin Download Toolkit'   # banner, window title, reports
-    ToolVersion    = '1.0'
+    ToolVersion    = '1.1'
     CompanionOf    = 'Sysadmin WinRM Toolkit'      # the toolkit whose library this tool keeps
     SourceUrl      = 'https://github.com/fusetech-labs/airgap-winrm'   # the About tab shows it to copy
     Author         = 'Chris Fryer'

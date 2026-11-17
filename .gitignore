@@ -52,6 +52,8 @@ brochure/
 companion/settings/*.json
 companion/settings/*.part
 companion/library/
+# the simple companion: the versions a site has deployed are the site's own (the example file is the one that ships)
+companion/simple/deployed-versions.txt
 library-manifest.json
 library-manifest.json.part
 library-manifest.json.lock

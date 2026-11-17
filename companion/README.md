@@ -21,12 +21,28 @@ a SHA256 of its own recorded in `library-manifest.json` and `CHECKSUMS.txt` toge
 newest file of each product, build and .NET line stays. The same window, colours and habits as the WinRM toolkit;
 PowerShell 5.1 and WinForms, no modules, no agents.
 
+Not every internet-side PC lets a PowerShell tool run. For a PC where application control holds PowerShell in
+ConstrainedLanguage mode, or where scripts are blocked altogether, this folder also holds the **simple companion**:
+one page for a browser (`simple\Simple-Companion.html`) that keeps the versions the site has deployed, links every
+product to the place it is published and checks each file fetched by hand. See *The simple companion* below.
+
 ## Running it
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\Start-DownloadToolkit.ps1               # the window
 powershell.exe -ExecutionPolicy Bypass -File .\Start-DownloadToolkit.ps1 -Unattended   # what the scheduled task runs
 ```
+
+If PowerShell answers *"... is not digitally signed"*, see *Where PowerShell refuses the file* below.
+
+Which one to use depends on what the PC allows (`$ExecutionContext.SessionState.LanguageMode` and
+`Get-ExecutionPolicy -List` say which it is):
+
+| On this PC | Use |
+|---|---|
+| PowerShell scripts run | `Start-DownloadToolkit.ps1`, as above: everything, and the scheduled task. |
+| The execution policy refuses the unsigned file; the language mode is *FullLanguage* | The same tool, started from text. See *Where PowerShell refuses the file*. |
+| The language mode is *ConstrainedLanguage* (application control: AppLocker, WDAC and similar), or scripts are blocked altogether | The simple companion, `simple\Simple-Companion.html`, in a browser. See *The simple companion*. |
 
 Beside the WinRM toolkit (this folder inside its folder) the library **is** that toolkit's `patches\` and `software\`
 folders: a verified download is a column in its O/S Patching or Software console at the next *Reload*. Copied elsewhere,
@@ -66,6 +82,7 @@ in this folder is executed from a download; the files are only hashed, their sig
 | `data\products.psd1` | The products: where each comes from, who must have signed it, and whether it is fetched when the site has not ticked otherwise. Values only. |
 | `settings\settings.json`, `settings\environment.json` | What the Settings and Products tabs saved (the second: what the site runs, the product ticks, the links given by hand). Git-ignored. |
 | `settings\last-run.json` | The outcome of the last run (every run writes it). Git-ignored. |
+| `simple\Simple-Companion.html` | The simple companion: one page for a browser, where the tool itself cannot run. `deployed-versions.example.txt` beside it is the versions file to start from. |
 | `library\` | The library when this folder is not beside the WinRM toolkit. Git-ignored. |
 | `logs\`, `reports\` | `Download-YYYYMMDD.log`, one file per day; the HTML + CSV reports. Git-ignored. |
 
@@ -146,6 +163,115 @@ is changed and nothing is signed. It writes only its own folder, the library fol
 Limited run level). The About tab shows what PowerShell sees for each script's signature; *not signed* is the normal
 state. Where application control restricts PowerShell scripts (ConstrainedLanguage mode) the tool cannot run on that
 PC: use one where it can.
+
+## Where PowerShell refuses the file
+
+*"Start-DownloadToolkit.ps1 cannot be loaded. The file ... is not digitally signed"* (`UnauthorizedAccess`) is the
+execution policy, and it uses the same words in two cases. `Get-ExecutionPolicy -List` shows which one this PC is.
+
+Look at the language mode first: `$ExecutionContext.SessionState.LanguageMode`. *ConstrainedLanguage* means that
+application control (AppLocker, WDAC and similar) decides on this PC, not the execution policy. Nothing below helps
+there - the line that starts the tool from text is answered with *"Method invocation is supported only on core types
+in this language mode"*, and so is any other text given to that session. The tool then needs a PC where it may run,
+or the approval of whoever runs the application control. The simple companion (see *The simple companion* below)
+works in a browser and is not touched by this.
+
+* **The scripts carry the "downloaded" mark** and the policy is RemoteSigned: the folder came out of a zip that a
+  browser fetched, or it sits on a network share. Take the mark away in this folder, as the account that runs the
+  tool, and start it as usual (from a share: copy the folder to a local disk):
+
+  ```powershell
+  Get-ChildItem -Recurse -Filter *.ps1 | Unblock-File
+  ```
+
+* **The policy wants every script signed** (AllSigned), or Group Policy sets the policy (the *MachinePolicy* or
+  *UserPolicy* line) and the `-ExecutionPolicy Bypass` of the command line does not count. Start the tool from text,
+  in a PowerShell window:
+
+  ```powershell
+  Set-Location 'C:\Tools\companion'     # the folder of Start-DownloadToolkit.ps1
+  . ([scriptblock]::Create((Get-Content -Raw .\Start-DownloadToolkit.ps1)))
+  ```
+
+  The execution policy checks script files; text given to PowerShell at the prompt is not a file. The launcher sees
+  that it was started this way and reads its building blocks as text too - the same files, the same list, the same
+  order. The window, the checks and the log are the same; the log and the About tab say *started from text*, and a
+  task registered from that session starts the same way (the *Command* row of the Schedule tab shows it).
+  `$NoGui = $true` before the second line loads the functions without the window.
+
+Starting from text needs no privilege and changes nothing on the PC. It is the operator's decision: where the owner
+of the PC has asked for signed scripts on purpose, ask before using it.
+
+## The simple companion: one page in a browser
+
+The simple companion is for the PC where the Download Toolkit cannot run at all:
+
+* **ConstrainedLanguage mode.** Application control (AppLocker, WDAC and similar) lets PowerShell start but holds it
+  in ConstrainedLanguage mode. The toolkit needs .NET and a window, which that mode refuses, and so does any text
+  given to such a session: the launcher stops with a message, and the start from text is answered with *"Method
+  invocation is supported only on core types in this language mode"*.
+* **Scripts blocked altogether.** A policy that runs no script at all, or no PowerShell for the account.
+
+There `simple\Simple-Companion.html` does the part a browser can do - and a browser is all it needs. Open it in
+Microsoft Edge or Google Chrome (a double-click). Nothing is installed, and no script runs outside the page. The page
+offers links to click, works on the files it is given, and reads from the internet only when asked (*Check sources*,
+*Read from the source*). It does by hand, and keeps straight, what the Download Toolkit does by itself: what is
+deployed, where the next version is published, whether the file that was downloaded is the right one and is intact.
+
+* **The versions file.** `deployed-versions.txt` is a plain text file that says what the site runs today, one product
+  a line (`PuTTY = 0.83`, a note after `#`). `deployed-versions.example.txt` is the list to start from. Notepad works
+  on the same file. The file is the site's own: it is git-ignored.
+* **The page starts with a choice**: *Open versions file* carries on with the file there is; *Start a new list* gives
+  the list the Download Toolkit itself starts with. There are no rows before that, so a list filled in beside an
+  existing file is not saved over it by mistake - a new list saved under the name of an existing file replaces it.
+* **The Settings tab** says what the site runs, as ticks: the Windows Server versions, the .NET Framework versions in
+  use, the SQL Server versions and Management Studio, the software the page knows. A tick adds the rows of its
+  product and taking it away removes them (after a Yes, when a row holds a version or a note). *Software of this
+  site* takes anything else, with the page it is published on and its release notes when it has them; the file keeps
+  those links on the product's line, between `<` and `>`. *Save* writes the file.
+* **Open and Save.** *Open versions file* reads the file and *Save* writes it back: Edge and Chrome in place, other
+  browsers as a download to put in place of the old file. A browser does not let a page choose the folder its file
+  dialog starts in, so the first time the file is found by hand - or dragged from its folder onto the page, which
+  needs no dialog. After that the page remembers the file: *Open versions file* opens the same one again (the
+  browser asks whether it may), and the dialog starts in its folder.
+* **Where the next version is published.** Every product the page knows has its links: the Update Catalog searched
+  for the product, Microsoft's release list, the vendor's download page, the release notes. The catalogue search
+  names no month, so it lists every release of the product with the newest first and never comes back empty (a
+  month without a release - .NET Framework has such months - would).
+* **Latest at the source, and the Status column.** *Check sources* reads the newest version where the vendor lets a
+  page read its list - WinSCP, Wireshark, Notepad++, OpenSSH, Firefox ESR; the same addresses and patterns as
+  `data\products.psd1`. The Update Catalog, Microsoft Edge, PuTTY, VMware Tools and the others do not let a page read
+  them: there the newest version is typed in from the link. The *Status* column compares it with the *Deployed*
+  column: *Up to date* (green), or *Update* when the source has a newer one.
+* **.NET Framework** has a row for each .NET version on each server version (4.8 and 4.8.1 on Server 2022), and each
+  row's search names its version. The catalogue then lists two rows a month: the update for that version (*"3.5 and
+  4.8.1"*) and one that names two versions (*"3.5, 4.8 and 4.8.1"*), which holds the files of both. The first is the
+  one to take.
+* **SQL Server** has a row for each version (2016 to 2025) and one for Management Studio; the Download Toolkit does
+  not fetch these. The catalogue lists a version's Cumulative Updates and its Security Updates together: the
+  Cumulative Update, or the Security Update of the branch the servers are on (*CU* where a cumulative update has
+  been installed, *GDR* where only security updates have).
+* **A check of the downloaded file.** *Check a file* (or the file dropped on its row) reads the version of the file
+  and says what the file is next to the deployed version: *Deployed* (green), *Newer*, *Older*. The version comes
+  from the file name, and from inside the file as its Properties show it (*In the file*): the ProductVersion of an
+  `.msi` - for Microsoft Edge and Google Chrome the version in its Comments - and the Product version of an `.exe`.
+  Only the few places that hold it are read. Where the name carries no version the one inside is taken. A .NET
+  Framework file names its .NET version (`ndp48`, `ndp481`, `ndp472`) and a SQL Server file its SQL Server version:
+  on the row of another version it is a *Wrong file* (red). *Set as deployed* writes the file's version into the
+  *Deployed* column once it is installed.
+* **The file's hash against the source.** The page works out the file's SHA256 and SHA1. An Update Catalog file
+  carries the catalogue's SHA1 in its name, and the page compares the two by itself. For the other files, *Read from
+  the source* asks the vendor's own list for the SHA256 where a page may read it (WinSCP, Wireshark, Notepad++,
+  OpenSSH), and *Published hashes* opens the vendor's list for the rest (PuTTY, Firefox ESR, Microsoft Edge, Splunk).
+  Such a list holds many hashes, and the page does the searching: Ctrl+A and Ctrl+C on the list, then *Search the
+  copied list* (or the list pasted into the box, or its file dropped on the box or the row). The page looks for the
+  file's own SHA256 in it and says what the list names beside it: the file, and its version where the list gives one
+  (Microsoft's Edge list does). A hash that does not match, or a list without it, makes the row *Mismatch* (red).
+  *Save CHECKSUMS.txt* writes the SHA256 of every file checked, to carry across with the files.
+
+What the page does not do: find the newest Windows, .NET or SQL Server update by itself, download, read a file's
+Authenticode signature (open the file's Properties, *Digital Signatures*: the row names who the signer must be),
+keep the library or run on a schedule. Those stay with the Download Toolkit on a PC where it runs.
 
 ## Requirements
 

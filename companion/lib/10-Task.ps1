@@ -8,7 +8,9 @@
 #  the days of the Settings tab, as the operator who registers it.  The
 #  tab watches it: the task's own state and last result from the Task
 #  Scheduler, and the outcome of the last run from settings\last-run.json,
-#  which every run writes.  Nothing here changes the library.
+#  which every run writes.  Nothing here changes the library.  The task
+#  starts the tool the way the session that registers it was started: as
+#  a file, or from text where PowerShell refuses the file.
 # =====================================================================
 
 # keyed by the code as text: the Task Scheduler's codes run past what an Int32 holds
@@ -35,8 +37,39 @@ function Get-TaskResultText {
 
 function Get-TaskLauncherPath { return (Join-Path $script:RootFolder 'Start-DownloadToolkit.ps1') }
 
+function Get-SingleQuoted {
+    # A path as a PowerShell single-quoted string: a quote inside it is doubled.
+    param([string]$Text)
+    return ("'" + ($Text -replace "'", "''") + "'")
+}
+
 function Get-TaskArguments {
+    # The task starts the tool the way this session was started.  As a file: the launcher with -File.  From text - the
+    # operator's answer to an execution policy that refuses the unsigned file, and it would refuse the task's file just
+    # the same - the task reads the launcher and runs it as text, from this folder.
+    param([bool]$FromText = [bool]$script:StartedFromText)
+    if ($FromText) {
+        return ('-NoProfile -WindowStyle Hidden -Command "Set-Location -LiteralPath {0}; & ([scriptblock]::Create([System.IO.File]::ReadAllText({1}))) -Unattended"' -f (Get-SingleQuoted $script:RootFolder), (Get-SingleQuoted (Get-TaskLauncherPath)))
+    }
     return ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Unattended' -f (Get-TaskLauncherPath))
+}
+
+function Get-TaskCommandFacts {
+    # What a task's arguments say: does it start THIS copy, and as a file or from text.
+    param([string]$Arguments)
+    $launcher = Get-TaskLauncherPath
+    $here = $false
+    foreach ($form in @($launcher, ($launcher -replace "'", "''"))) { if ($Arguments.IndexOf($form, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { $here = $true } }
+    return [pscustomobject]@{ PointsHere = $here; FromText = ($Arguments -match '(?i)(^|\s)-Command\s' -and $Arguments -notmatch '(?i)(^|\s)-File\s') }
+}
+
+function Get-TaskSilentFailureText {
+    # The task ended with 1 and the tool recorded no run since the task started: PowerShell never got to run the tool.
+    # (A run that fails writes settings\last-run.json first and ends with 1 after that.)  Both times: yyyy-MM-dd HH:mm:ss.
+    param($Code, [string]$State, [string]$TaskLastRun, [string]$ToolLastRun)
+    if ($null -eq $Code -or [int64]$Code -ne 1 -or $State -eq 'Running' -or -not $TaskLastRun) { return '' }
+    if ($ToolLastRun -and [string]::CompareOrdinal($ToolLastRun, $TaskLastRun) -ge 0) { return '' }
+    return 'the task ended with 1 and the tool recorded no run after it started: PowerShell did not get to run the tool - most often an execution policy that refuses the file ("is not digitally signed"). Start the launcher by hand to read the message'
 }
 
 function Get-TaskScheduleText {
@@ -59,7 +92,7 @@ function Read-LastRun {
 function Get-DownloadTaskState {
     # Everything the Schedule tab shows about the task and the last run.
     $t = Get-DownloadTask
-    $o = [ordered]@{ Registered = $false; Name = ($script:Config.TaskFolder + $script:Config.TaskName); State = 'not registered'; LastRun = ''; LastResult = ''; LastResultCode = $null; NextRun = ''; RunsAs = ''; Logon = ''; Trigger = ''; Command = ''; PointsHere = $false; Author = ''; Enabled = $false; Problems = @() }
+    $o = [ordered]@{ Registered = $false; Name = ($script:Config.TaskFolder + $script:Config.TaskName); State = 'not registered'; LastRun = ''; LastResult = ''; LastResultCode = $null; NextRun = ''; RunsAs = ''; Logon = ''; Trigger = ''; Command = ''; PointsHere = $false; FromText = $false; Author = ''; Enabled = $false; Problems = @() }
     if ($t) {
         $o.Registered = $true; $o.State = [string]$t.State; $o.Author = [string]$t.Author; $o.Enabled = ($t.Settings.Enabled -ne $false)
         try { $o.RunsAs = [string]$t.Principal.UserId; $o.Logon = [string]$t.Principal.LogonType } catch { }
@@ -75,11 +108,15 @@ function Get-DownloadTaskState {
             $o.Trigger = ('{0} at {1}{2}' -f $days, $start, $(if ($tr.Enabled -eq $false) { ' (trigger disabled)' } else { '' })).Trim()
         } else { $o.Trigger = 'no trigger'; $o.Problems += 'the task has no trigger: it never runs by itself' }
         $acts = @($t.Actions)
-        if ($acts.Count -gt 0) { $o.Command = ('{0} {1}' -f $acts[0].Execute, $acts[0].Arguments).Trim(); $o.PointsHere = ([string]$acts[0].Arguments -like ('*"' + (Get-TaskLauncherPath) + '"*')) }
+        if ($acts.Count -gt 0) { $o.Command = ('{0} {1}' -f $acts[0].Execute, $acts[0].Arguments).Trim(); $facts = Get-TaskCommandFacts -Arguments ([string]$acts[0].Arguments); $o.PointsHere = $facts.PointsHere; $o.FromText = $facts.FromText }
         if ($o.Registered -and -not $o.PointsHere) { $o.Problems += ('the task runs another copy: ' + $o.Command + ' - register again from here to point it at this folder') }
+        # this session was started from text because PowerShell refused the file: a task that starts the file is refused too
+        if ($o.PointsHere -and $script:StartedFromText -and -not $o.FromText) { $o.Problems += 'the task starts the launcher as a file, and this session was started from text: an execution policy that refuses the file refuses the task too - register again from here and the task starts from text as well' }
         if (-not $o.Enabled) { $o.Problems += 'the task is disabled in the Task Scheduler' }
     }
     $o.LastRunFile = Read-LastRun
+    $silent = Get-TaskSilentFailureText -Code $o.LastResultCode -State $o.State -TaskLastRun $o.LastRun -ToolLastRun $(if ($o.LastRunFile) { [string]$o.LastRunFile.When } else { '' })
+    if ($silent) { $o.Problems += $silent }
     return [pscustomobject]$o
 }
 
@@ -110,6 +147,7 @@ function Register-DownloadTask {
     Write-PatchLog ("TASK REGISTERED {0}{1} by {2}: {3}, as {4} ({5})" -f $script:Config.TaskFolder, $script:Config.TaskName, (Get-OperatorIdentity), (Get-TaskScheduleText), $task.Principal.UserId, $logon) 'OK'
     if ($logon -eq 'S4U') { Write-PatchLog 'S4U: the task runs whether or not you are logged on and stores no password, but it has no network credentials - a proxy that asks for a password, or a library on a network drive, needs Interactive (Settings tab)' 'WHY' }
     else { Write-PatchLog 'Interactive: the task runs only while you are logged on at its start time, with your full session (the proxy and network drives work); it needs no extra right' 'WHY' }
+    if ($script:StartedFromText) { Write-PatchLog 'Started from text: the task reads the launcher and runs it as text too, as this session was started - an execution policy that refuses the file would refuse the task''s file the same way' 'WHY' }
     return $task
 }
 

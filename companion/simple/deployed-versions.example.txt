@@ -1,0 +1,18 @@
+# Deployed versions - what this site runs today.
+# One product a line:   Name = version      a note may follow after #
+# Software of the site's own may name the page it is published on, and its release notes:   Name = version <https://...> <https://...>
+# The Settings tab of Simple-Companion.html adds and removes the lines. So does Notepad.
+
+Windows Server 2019 cumulative update =
+Windows Server 2019 .NET Framework 4.8 cumulative update =
+Windows Server 2022 cumulative update =
+Windows Server 2022 .NET Framework 4.8 cumulative update =
+Windows Server 2022 .NET Framework 4.8.1 cumulative update =
+VMware Tools =
+Microsoft Edge =
+PuTTY =
+WinSCP =
+Wireshark =
+Notepad++ =
+Firefox ESR =
+Splunk Universal Forwarder =

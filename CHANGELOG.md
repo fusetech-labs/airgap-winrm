@@ -3,6 +3,60 @@
 All notable changes to this project are recorded here. The format follows Keep a Changelog
 (https://keepachangelog.com/en/1.1.0/).
 
+The Airgap Download Toolkit in `companion\`, for the side that has internet, carries a version number of its own; its
+entries are headed *Download Toolkit*.
+
+## Download Toolkit [1.1] - 2026-11-18
+
+### Added
+
+- **The simple companion** (`companion\simple\Simple-Companion.html`): one page for a browser, for an internet-side PC
+  where the Download Toolkit cannot run - application control (AppLocker, WDAC and similar) holds PowerShell in
+  ConstrainedLanguage mode, or scripts are blocked altogether. A browser is all it needs; nothing is installed.
+  - A plain text file, `deployed-versions.txt` (`Name = version`, a note after `#`), holds what the site has
+    deployed. The page opens it, remembers it and saves it in place (Microsoft Edge, Google Chrome); the file is
+    git-ignored and `deployed-versions.example.txt` is the list to start from.
+  - A **Settings** tab says what the site runs, as ticks - the Windows Server versions, the .NET Framework versions,
+    SQL Server 2016 to 2025 and Management Studio, the software - and each tick adds or removes rows. Software of the
+    site's own is added with the page it is published on and its release notes.
+  - Every product links the place it is published: the Update Catalog searched for the product (no month in the
+    search, so a month without a release still lists the earlier ones, newest first), Microsoft's release list, the
+    vendor's page, the release notes. .NET Framework has a row for each .NET version, and its search names it.
+  - **Latest at the source** and a **Status** column (*Up to date*, *Update*): **Check sources** reads the newest
+    version where the vendor lets a page read its list (WinSCP, Wireshark, Notepad++, OpenSSH, Firefox ESR - the
+    addresses and patterns of `data\products.psd1`); elsewhere it is typed in from the link.
+  - **Check a file** compares a downloaded file with the deployed version (*Deployed*, *Newer*, *Older*). The version
+    is read from the file name and from inside the file as its Properties show it (an `.msi`'s ProductVersion or the
+    version in its Comments, an `.exe`'s Product version). The page works out the SHA256 and SHA1, compares the SHA1
+    in an Update Catalog file name, reads the vendor's published SHA256 where a page may (**Read from the source**),
+    and searches a vendor's whole list of hashes for the file's own (**Search the copied list**, a paste, or the
+    list's file dropped on the row). A .NET Framework or SQL Server file on the row of another version is a
+    *Wrong file*; a hash that does not match is a *Mismatch*.
+- **Start from text**, for a PC whose execution policy refuses the unsigned launcher (*"... is not digitally
+  signed"*) while the language mode is FullLanguage: the launcher is read and run as text, reads its building blocks
+  the same way, says so in the log and on the About tab, and a task registered from such a session starts the same
+  way. No elevation and no signing; `companion\README.md`, *Where PowerShell refuses the file*.
+- Schedule tab: a *Problem* row when the task ended with 1 and the tool recorded no run after it started (PowerShell
+  did not get to run the tool), and when the task starts the launcher as a file although the session had to be
+  started from text.
+
+### Changed
+
+- The launcher's message in ConstrainedLanguage mode, its header, the About page and the manuals name the simple
+  companion as the way to work on such a PC. `companion\README.md` has a table of which one to use.
+- The main manual describes the internet side (*The internet side: the Download Toolkit and the simple companion*).
+
+## Download Toolkit [1.0] - 2026-11-17
+
+### Added
+
+- First release of the Airgap Download Toolkit (`companion\Start-DownloadToolkit.ps1`): on the side that has
+  internet it finds the newest appropriate Windows and .NET Framework cumulative updates in the Microsoft Update
+  Catalog, VMware Tools and the software installed offline, fetches each file, checks it (size, the hash the source
+  publishes, the Authenticode signature, a SHA256 of its own) and keeps the library in the folders the WinRM toolkit
+  reads, by hand or as a scheduled task. It runs as an ordinary user. See `companion\README.md` and
+  `companion\SOURCES.md`.
+
 ## [2.2.0] - 2026-11-08
 
 ### Added

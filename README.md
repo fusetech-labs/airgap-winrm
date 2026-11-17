@@ -28,6 +28,11 @@ PowerShell set-up and the code signature of every script.
 The window title and the O/S Patching banner carry the operator's name (`OperatorName`, default `sys-admin`; on the
 Settings tab).
 
+The toolkit itself never goes online. The update files and installers it works with are fetched on the side that has
+internet, and `companion\` holds two helpers for that side: the **Airgap Download Toolkit**, which finds, fetches and
+verifies them by itself, and the **simple companion**, one page for a browser, for a PC where PowerShell is held in
+ConstrainedLanguage mode or scripts are blocked. See *The internet side* below.
+
 ## Folder layout
 
 | Path | Purpose |
@@ -72,6 +77,8 @@ Settings tab).
 | `logs\` | `Patcher-YYYYMMDD.log`, one file per day. Git-ignored. |
 | `signing\` | Code-signing requests made on the About tab (`.req` for your certificate authority, `.txt` saying what to ask for). Git-ignored. |
 | `images\*.png` | The eleven Code Tour pictures, and the screenshots of the consoles shown in this manual (`screen-*.png`). |
+| `companion\` | The Airgap Download Toolkit, for the side that has internet: it fetches and verifies the update files and installers this toolkit installs. A tool of its own (`Start-DownloadToolkit.ps1`, version 1.1) with its own manual, `companion\README.md`. See The internet side. |
+| `companion\simple\` | The simple companion: `Simple-Companion.html`, one page for a browser, for an internet-side PC where PowerShell is held in ConstrainedLanguage mode or scripts are blocked. |
 | `Sign-Toolkit.ps1` | Signs the launcher, `lib\` and itself with your code-signing certificate, or reports their signatures (`-Check`). See Code signing. |
 | `README.txt` | Plain text, for when the tool will not start: how to launch it, unblock it and sign it with commands typed at the PowerShell prompt. |
 | `PatchGroup-A/B/C.txt` | Sample server lists. One name per line, `#` for comments. |
@@ -1129,6 +1136,30 @@ reads it. Logs, reports and the change log stay in the copy, so bring the change
 record. The hub's vetting caches (`patches\_info`, `software\_info`) are read and trusted, so the first load on the
 server does not read every update file over the share; what the copy vets itself it keeps under its own root and
 never writes into the hub's folders. The window title says SPOKE and the computer's name.
+
+## The internet side: the Download Toolkit and the simple companion
+
+The update files in `patches\` and the installers in `software\` come from the internet, and this toolkit never goes
+there. `companion\` is for the PC that does. It holds two things, and which one is used depends on what that PC lets
+PowerShell do.
+
+* **The Airgap Download Toolkit** (`companion\Start-DownloadToolkit.ps1`) is the full tool, for a PC where PowerShell
+  scripts run. It finds the newest appropriate update of every product - the Windows and .NET Framework cumulative
+  updates of the builds the site runs, VMware Tools, the software installed offline - fetches each file, checks it
+  (size, the hash the source publishes, the Authenticode signature, a SHA256 of its own) and keeps the library in the
+  very folders this toolkit reads, by hand or as a scheduled task. It runs as an ordinary user: nothing is installed,
+  nothing asks for elevation. Where the execution policy refuses the unsigned file it can be started from text.
+* **The simple companion** (`companion\simple\Simple-Companion.html`) is for a PC where that tool cannot run:
+  application control (AppLocker, WDAC and similar) holds PowerShell in ConstrainedLanguage mode, or scripts are
+  blocked altogether. It is one page, opened in a browser, and a browser is all it needs. It keeps a plain text file
+  of the versions the site has deployed, links every product to the place it is published (the Update Catalog
+  searched for the product, the vendor's page), says whether the source has something newer, and checks each file
+  fetched by hand: its version, from its name and from inside the file, against the deployed one, and its SHA256
+  against what the source publishes. Finding and fetching by itself, and the schedule, stay with the full tool.
+
+Both are described in `companion\README.md`. Either way the files arrive in `patches\` and `software\` as if they
+had been placed by hand: **Reload lists + patches** shows them, and this toolkit vets every file again before it
+installs it.
 
 ## Keeping the catalogues current without internet
 
