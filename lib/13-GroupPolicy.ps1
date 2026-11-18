@@ -73,6 +73,9 @@ $script:RemoteGpoScript = {
 
     # every client-side extension's last run; {00000000-...} is the core of Group Policy: its end time = the last refresh
     $exts = @(); $last = ''; $ageHours = ''
+    # an extension by its name (Security, Group Policy Registry ...), else by its identifier; the administrative
+    # templates' own extension is part of Windows and registers no name
+    $extName = { param($id) $n = ''; try { $n = [string](Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\GPExtensions\$id" -ErrorAction Stop).'(default)' } catch { }; if (-not $n -and [string]$id -ieq '{35378EAC-683F-11D2-A89A-00C04FBBCFA2}') { $n = 'Registry (Administrative Templates)' }; if (-not $n) { $n = [string]$id }; return ($n -replace '\|', '/') }
     try {
         foreach ($k in @(Get-ChildItem -LiteralPath "$state\Extension-List" -ErrorAction Stop)) {
             $p = Get-ItemProperty -LiteralPath $k.PSPath
@@ -83,12 +86,27 @@ $script:RemoteGpoScript = {
                 if ($end) { $last = $end.ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture); $ageHours = [math]::Round(((Get-Date) - $end).TotalHours, 1) }
                 continue
             }
-            $name = ''
-            try { $name = [string](Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\GPExtensions\$guid" -ErrorAction Stop).'(default)' } catch { }
-            if (-not $name) { $name = $guid }
-            $exts += '{0}|{1}|{2}|{3}' -f ($name -replace '\|', '/'), $guid, (& $u32 $p.Status), $(if ($end) { $end.ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) } else { '' })
+            $exts += '{0}|{1}|{2}|{3}' -f (& $extName $guid), $guid, (& $u32 $p.Status), $(if ($end) { $end.ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) } else { '' })
         }
     } catch { if ($joined) { $errors += 'extension list: ' + $_.Exception.Message } }
+    # ... and where Windows Server keeps them today: the list above holds the core entry only, each extension's last
+    # result is under Status\GPExtensions (Status, and LastPolicyTime = minutes since 1980-01-01 UTC, the last time the
+    # extension had policy to apply - a GPO that has not changed since is not applied again)
+    try {
+        $statusKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Status\GPExtensions'
+        if (Test-Path -LiteralPath $statusKey) {
+            $listed = @{}; foreach ($x in $exts) { $listed[(($x -split '\|')[1]).ToLower()] = $true }
+            $epoch = New-Object System.DateTime 1980, 1, 1, 0, 0, 0, ([System.DateTimeKind]::Utc)
+            foreach ($k in @(Get-ChildItem -LiteralPath $statusKey -ErrorAction Stop)) {
+                $guid = $k.PSChildName
+                if ($listed.ContainsKey($guid.ToLower())) { continue }
+                $p = Get-ItemProperty -LiteralPath $k.PSPath
+                $ran = ''
+                if ($null -ne $p.LastPolicyTime) { try { $ran = $epoch.AddMinutes([double](& $u32 $p.LastPolicyTime)).ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) } catch { } }
+                $exts += '{0}|{1}|{2}|{3}' -f (& $extName $guid), $guid, (& $u32 $p.Status), $ran
+            }
+        }
+    } catch { if ($joined) { $errors += 'extension status: ' + $_.Exception.Message } }
 
     # Group Policy errors and warnings in the window: the System log, then the Group Policy log (that one needs an administrator)
     $events = @()
@@ -101,8 +119,13 @@ $script:RemoteGpoScript = {
         } catch { if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { $errors += ('{0} log: {1}' -f $pair[0], $_.Exception.Message) } }
     }
 
+    # the secure channel to the domain.  Not on the domain controller that holds the PDC emulator role (DomainRole 5): it
+    # is the domain's end of every such channel and has none of its own, and Windows answers the test there with "the
+    # specified domain either does not exist or could not be contacted"
     $sc = ''
-    if ($joined) { try { $sc = [string](Test-ComputerSecureChannel -ErrorAction Stop) } catch { $sc = 'ERROR: ' + $_.Exception.Message } }
+    $role = -1; if ($joinedKnown) { try { $role = [int]$cs.DomainRole } catch { } }
+    if ($role -eq 5) { $sc = 'not tested (PDC emulator)' }
+    elseif ($joined) { try { $sc = [string](Test-ComputerSecureChannel -ErrorAction Stop) } catch { $sc = 'ERROR: ' + $_.Exception.Message } }
 
     # the Resultant Set of Policy: which GPO sets which value (winning setting only: precedence 1)
     $rsop = New-Object System.Collections.Generic.List[string]
@@ -158,9 +181,11 @@ function Get-ServerGpo {
         if ($null -eq $r.Joined) { return ('domain membership could not be read: ' + (@($r.Errors) -join '; ')) }
         if (-not $r.Joined) { return 'not a domain member - local policy only' }
         $applied = @(Get-GpoRows -Result $r | Where-Object { $_.Applied -and $_.GPO -ne 'Local Group Policy' }).Count
-        $failed = @($r.Extensions | Where-Object { ($_ -split '\|')[2] -ne '0' }).Count
+        # failing and stale as the check and the page tell them apart (Get-GpoExtensionRows): the log says what they say
+        $ext = @(Get-GpoExtensionRows -Result $r)
+        $failed = @($ext | Where-Object { $_.Failed }).Count; $stale = @($ext | Where-Object { $_.Stale }).Count
         $rs = 'RSoP: ' + @($r.Rsop).Count + ' setting(s)'; if ($r.RsopError) { $rs = 'RSoP not readable (' + $r.RsopError + ')' }
-        return ('{0} GPO(s) applied, {1} extension(s) failing, last refresh {2}, secure channel {3}; {4}' -f $applied, $failed, $r.LastRefresh, $r.SecureChannel, $rs)
+        return ('{0} GPO(s) applied, {1} extension(s) failing{5}, last refresh {2}, secure channel {3}; {4}' -f $applied, $failed, $r.LastRefresh, $r.SecureChannel, $rs, $(if ($stale -gt 0) { ", $stale with an old failed result and not run since" } else { '' }))
     }
     return (Invoke-Collector -Name 'Gpo' -ScriptBlock $script:RemoteGpoScript -ComputerName $ComputerName -ArgumentList @([int]$script:Config.EventWindowHours, [int]$script:Config.MaxRsopSettings) -Summary $summary)
 }
@@ -199,14 +224,23 @@ function Format-GpoStatus {
 }
 
 function Get-GpoExtensionRows {
-    # One server's client-side extensions: Extension, Result, LastRun, Failed.
-    param([string]$Server)
-    $g = Get-CollectorResult -Name 'Gpo' -Server $Server
-    if (-not $g -or -not $g.Reachable) { return @() }
+    # One server's client-side extensions: Extension, Result, LastRun, Failed, Stale.
+    # Failed = its last run failed, and that run belongs to the last refresh.  Stale = its last run failed more than a
+    # day before the last refresh: an extension is run again at every refresh for as long as it fails, so this one has
+    # had nothing to apply since - a result left behind, named in amber and not counted as failing now.
+    # -Result takes a collector answer as it comes in (the collector's own log line), before it is stored.
+    param([string]$Server = '', $Result = $null)
+    $g = $Result
+    if (-not $g) { $g = Get-CollectorResult -Name 'Gpo' -Server $Server; if (-not $g -or -not $g.Reachable) { return @() } }
+    $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+    $refresh = $null
+    if (([string]$g.LastRefresh).Length -ge 19) { try { $refresh = [datetime]::ParseExact(([string]$g.LastRefresh).Substring(0, 19), 'yyyy-MM-dd HH:mm:ss', $invariant) } catch { } }
     return @(foreach ($line in @($g.Extensions)) {
         $f = [string]$line -split '\|'
         if ($f.Count -lt 4) { continue }
-        [pscustomobject]@{ Extension = $f[0]; Result = (Format-GpoStatus $f[2]); LastRun = $f[3]; Failed = ($f[2] -ne '0'); Guid = $f[1] }
+        $bad = ($f[2] -ne '0'); $stale = $false
+        if ($bad -and $refresh -and ([string]$f[3]).Length -ge 19) { try { $stale = ($refresh - [datetime]::ParseExact(([string]$f[3]).Substring(0, 19), 'yyyy-MM-dd HH:mm:ss', $invariant)).TotalHours -gt 24 } catch { } }
+        [pscustomobject]@{ Extension = $f[0]; Result = (Format-GpoStatus $f[2]) + $(if ($stale) { ' - at its last run, and not run since' } else { '' }); LastRun = $f[3]; Failed = ($bad -and -not $stale); Stale = $stale; Guid = $f[1] }
     })
 }
 
@@ -334,7 +368,7 @@ function Get-GpoServerRows {
         $ev = @(Get-GpoEventRows -Server $s)
         $gpos = @(Get-GpoRows -Server $s)
         $note = ''
-        if ($null -eq $g.Joined) { $note = 'domain membership could not be read' } elseif (-not $g.Joined) { $note = 'not a domain member: local policy only' } elseif ($g.RsopError) { $note = 'RSoP not readable: ' + $g.RsopError }
+        if ($null -eq $g.Joined) { $note = 'domain membership could not be read' } elseif (-not $g.Joined) { $note = 'not a domain member: local policy only' } elseif ($g.RsopError) { $note = 'RSoP not readable: ' + $g.RsopError; $rights = Get-UnelevatedNote -Result $g; if ($rights) { $note += ' (' + $rights + ')' } }
         [pscustomobject]@{
             Server = $s; Light = (Get-WorstLight -Rows $rows); Domain = $(if ($g.Joined) { $g.Domain } elseif ($null -eq $g.Joined) { 'not read' } else { 'workgroup' }); Site = $g.Site
             'Last refresh' = $(if ($g.LastRefresh) { '{0} ({1} h ago)' -f $g.LastRefresh, $g.RefreshAgeHours } else { '' })
@@ -353,9 +387,9 @@ function Get-GpoDetailsSections {
     $head = 'not a domain member: only the local policy applies'
     if ($g.Joined) { $head = 'domain {0}, site {1}; last refresh {2} ({3} h ago); secure channel {4}{5}' -f $g.Domain, $g.Site, $g.LastRefresh, $g.RefreshAgeHours, $g.SecureChannel, $(if ($g.DN) { '; ' + $g.DN } else { '' }) }
     $gpoNote = 'The computer part of the last policy run, in the order the GPOs were applied (a later one wins). "Not applied: security filtering" is often deliberate (the GPO is meant for other computers or for users only).'
-    if ($g.RsopError) { $gpoNote += ' The settings each GPO makes (RSoP) could not be read: ' + $g.RsopError }
+    if ($g.RsopError) { $gpoNote += ' The settings each GPO makes (RSoP) could not be read: ' + $g.RsopError; $rights = Get-UnelevatedNote -Result $g; if ($rights) { $gpoNote += ' (' + $rights + ')' } }
     return @(
         @{ Heading = 'Group Policy: GPOs'; Note = ($head + '. ' + $gpoNote); Rows = @(Get-GpoRows -Server $Server); Columns = @('Order', 'GPO', 'Status', 'LinkedAt', 'Version') },
-        @{ Heading = 'Group Policy: client-side extensions (last run)'; Rows = @(Get-GpoExtensionRows -Server $Server | ForEach-Object { $_ | Add-Member -NotePropertyName Light -NotePropertyValue $(if ($_.Failed) { 'Red' } else { 'Green' }) -PassThru -Force }); Columns = @('Light', 'Extension', 'Result', 'LastRun'); Note = 'Each extension applies one kind of setting (Registry = administrative templates, Security, Audit Policy Configuration, Group Policy Preferences ...). A failed one leaves its settings as they were.' },
+        @{ Heading = 'Group Policy: client-side extensions (last run)'; Rows = @(Get-GpoExtensionRows -Server $Server | ForEach-Object { $_ | Add-Member -NotePropertyName Light -NotePropertyValue $(if ($_.Failed) { 'Red' } elseif ($_.Stale) { 'Amber' } else { 'Green' }) -PassThru -Force }); Columns = @('Light', 'Extension', 'Result', 'LastRun'); Note = 'Each extension applies one kind of setting (Registry = administrative templates, Security, Audit Policy Configuration, Group Policy Preferences ...). A failed one leaves its settings as they were.' },
         @{ Heading = 'Group Policy: errors and warnings'; Rows = @(Get-GpoEventRows -Server $Server); Columns = @('Log', 'Id', 'Level', 'Time', 'Message'); Note = ('System log (source GroupPolicy) and the Group Policy log, last {0} h.' -f $script:Config.EventWindowHours) })
 }

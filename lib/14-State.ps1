@@ -481,6 +481,8 @@ function Get-SelfCheckSteps {
         @{ Name = 'SecurityPolicy'; Run = { param($n) Get-ServerSecurityPolicy -ComputerName $n } }
         @{ Name = 'Gpo';            Run = { param($n) Get-ServerGpo -ComputerName $n } }
         @{ Name = 'Licensing';      Run = { param($n) Get-ServerLicensing -ComputerName $n } }
+        @{ Name = 'Roles';          Run = { param($n) Get-ServerRoles -ComputerName $n } }       # SQL Server and Certificate Services, where the server has them (49-ServerRoles.ps1)
+        @{ Name = 'Directory';      Run = { param($n) Get-ServerDirectory -ComputerName $n } }   # a domain controller: itself and, on the PDC emulator, its domain (48-Directory.ps1); after Settings, which says what this computer is
     )
 }
 
@@ -546,7 +548,8 @@ function New-SelfCheckPackage {
         '#  it there as an administrator:',
         '#      powershell.exe -ExecutionPolicy Bypass -File .\Run-SelfCheck.ps1',
         '#  It runs every check of the toolkit on the computer it is on - status, inventory, software state, health, agents,',
-        '#  settings, configuration points, security policy, Group Policy - over no network, and writes ONE results file,',
+        '#  settings, configuration points, security policy, Group Policy, licensing and, on a domain controller, the',
+        '#  directory (dcdiag, replication, the domain''s accounts and groups) - over no network, and writes ONE results file,',
         '#  <computer name>.xml, into the results folder below.  The hub shows that file in every console after',
         '#  "Import results" (O/S Patching tab), or at its next Reload when the results folder is the hub''s own',
         '#  state\servers share.  INSTRUCTIONS.txt beside this file has the steps and a scheduled-task line.',
@@ -704,7 +707,8 @@ function New-ServerCopy {
         '   The start asks for two folders and offers these answers (settings\spoke.json):',
         ('       Hub folder (patches\ and software\ are read from here):   {0}' -f $HubFolder),
         ('       Results folder (this server''s results file goes here):    {0}' -f $resultsText),
-        '   The account running the copy must read the hub folder and write to the results folder. Where the server cannot',
+        '   The account running the copy must read the hub folder and write to the results folder. A folder on the hub is',
+        '   reached as a share: SMB, TCP 445, from this server to the hub - the only connection this copy makes to it. Where the server cannot',
         '   reach the hub''s folder, copy the hub''s patches\ and software\ into this folder and give this folder as the hub',
         '   folder; give an empty results folder to keep the results file in this copy''s state\servers\ and carry it back.',
         '',
@@ -832,11 +836,11 @@ function Show-SpokeSetupDialog {
     $intro.Text = 'This copy checks and patches this computer only, from the hub''s folders. Nothing goes to any other server.'
     $l1 = New-Object System.Windows.Forms.Label; $l1.AutoSize = $true; $l1.MaximumSize = $wide; $l1.Text = 'Hub folder (holds patches\ and software\):'
     $hubBox = New-Object System.Windows.Forms.TextBox; $hubBox.Size = New-Object System.Drawing.Size(620, 24); $hubBox.Text = $HubFolder; $hubBox.Name = 'HubBox'
-    $b1 = New-Object System.Windows.Forms.Button; $b1.Text = 'Browse...'; $b1.Size = New-Object System.Drawing.Size(95, 27)
+    $b1 = New-Object System.Windows.Forms.Button; $b1.Text = 'Browse...'; $b1.Size = New-Object System.Drawing.Size(95, 27); Set-ButtonFace -Button $b1
     $b1.Add_Click({ $fb = New-Object System.Windows.Forms.FolderBrowserDialog; $fb.Description = 'The toolkit folder of the hub (holds patches\ and software\)'; $fb.ShowNewFolderButton = $false; if ($fb.ShowDialog($this.FindForm()) -eq 'OK') { $this.FindForm().Controls['HubBox'].Text = $fb.SelectedPath } })
     $l2 = New-Object System.Windows.Forms.Label; $l2.AutoSize = $true; $l2.MaximumSize = $wide; $l2.Text = 'Results folder (this computer''s results file; empty = this copy''s own state\servers):'
     $resBox = New-Object System.Windows.Forms.TextBox; $resBox.Size = New-Object System.Drawing.Size(620, 24); $resBox.Text = $ResultsFolder; $resBox.Name = 'ResultsBox'
-    $b2 = New-Object System.Windows.Forms.Button; $b2.Text = 'Browse...'; $b2.Size = New-Object System.Drawing.Size(95, 27)
+    $b2 = New-Object System.Windows.Forms.Button; $b2.Text = 'Browse...'; $b2.Size = New-Object System.Drawing.Size(95, 27); Set-ButtonFace -Button $b2
     $b2.Add_Click({ $fb = New-Object System.Windows.Forms.FolderBrowserDialog; $fb.Description = 'The folder the results file is written to'; if ($fb.ShowDialog($this.FindForm()) -eq 'OK') { $this.FindForm().Controls['ResultsBox'].Text = $fb.SelectedPath } })
     $note = New-Object System.Windows.Forms.Label; $note.AutoSize = $true; $note.MaximumSize = $wide; $note.ForeColor = 'DimGray'
     $note.Text = 'Kept in settings\spoke.json and offered again next time. Logs, reports and the change log stay in this copy.'

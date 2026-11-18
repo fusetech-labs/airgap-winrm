@@ -430,7 +430,7 @@ function New-SecurityDashboard {
     $bar = New-Object System.Windows.Forms.Panel; $bar.Dock = 'Top'; $bar.Height = 40; $bar.BackColor = 'WhiteSmoke'
     $title = New-Object System.Windows.Forms.Label; $title.Text = 'COMPLIANCE'; $title.Location = New-Object System.Drawing.Point(6, 11); $title.AutoSize = $true
     $title.Font = New-Object System.Drawing.Font('Segoe UI', 9.5, [System.Drawing.FontStyle]::Bold)
-    $exec = New-GuiButton -Text 'Executive summary report...' -X 110 -Y 5 -W 210 -H 30 -Colour 'LightSteelBlue' -ReadOnly -Tip 'A plain-language report for management: the charts first, then the main gaps, the risk decisions and a line per server - reports\Security-Summary-<date>.html' -OnClick {
+    $exec = New-GuiButton -Text 'Executive summary report...' -X 110 -Y 5 -W 210 -H 30 -Colour 'LightSteelBlue' -ReadOnly -Tip 'A plain-language report for management, charts first' -OnClick {
         Invoke-GuiAction -Name 'Executive summary' -ReadOnly -Action {
             $scope = [string]$script:Gui['SecurityGroupCombo'].SelectedItem
             if (-not $scope -or $scope -eq '(all groups)') { $scope = 'all groups' } else { $scope = 'group ' + $scope }
@@ -441,8 +441,8 @@ function New-SecurityDashboard {
     $pies = New-Object System.Windows.Forms.FlowLayoutPanel; $pies.Dock = 'Left'; $pies.Width = 520; $pies.WrapContents = $false; $pies.AutoScroll = $true; $pies.BackColor = 'White'
     $e8 = New-Object System.Windows.Forms.PictureBox; $e8.Size = New-Object System.Drawing.Size(250, 342); $e8.SizeMode = 'Normal'
     $ism = New-Object System.Windows.Forms.PictureBox; $ism.Size = New-Object System.Drawing.Size(250, 342); $ism.SizeMode = 'Normal'
-    $script:Gui['Tips'].SetToolTip($e8, 'Essential Eight controls at or below the maturity target (Security profile) on the servers shown')
-    $script:Gui['Tips'].SetToolTip($ism, 'Every ISM control that applies at the network classification (Security profile) on the servers shown')
+    $script:Gui['Tips'].SetToolTip($e8, 'Essential Eight controls at or below the maturity target')
+    $script:Gui['Tips'].SetToolTip($ism, 'Every ISM control that applies at the classification')
     $pies.Controls.AddRange(@($e8, $ism))
     $right = New-Object System.Windows.Forms.Panel; $right.Dock = 'Fill'
     $groups = New-ConsoleGrid -NoCheckBoxes -Columns @(@{ Name = 'Group'; Width = 150 }, @{ Name = 'Servers'; Width = 110 }, @{ Name = 'Essential Eight'; Width = 130 }, @{ Name = 'ISM'; Width = 130 }, @{ Name = 'By tailoring'; Width = 80 }, @{ Name = 'Not compliant'; Width = 90 }, @{ Name = 'Overdue reviews'; Width = 100 }, @{ Name = 'Not read'; Width = 70; Fill = $true })
@@ -450,8 +450,8 @@ function New-SecurityDashboard {
         # show that group in the grid and the charts (the Group picker of the toolbar)
         if ($this.SelectedItems.Count -gt 0) { $name = $this.SelectedItems[0].Text; $combo = $script:Gui['SecurityGroupCombo']; if ($combo.Items.Contains($name)) { $combo.SelectedItem = $name } }
     })
-    # no explainer text under the grid: the colours and what is counted are the heading's tool tip
-    $gh = New-GridHeader -Heading 'BY GROUP' -Detail '' -Tip ("Percent compliant (met / counted): compliant + compliant by tailoring, of every counted control, rounded down.`nGreen = compliant; blue = compliant by tailoring (a recorded risk acceptance, or an approved value that is met) - a group row is blue when every counted control is met that way; red = not compliant (an acceptance past its review date counts here).`nLeft out: not applicable at this classification, not assessable from a server, values that could not be read.`nDouble-click a group to show it.")
+    # no explainer text under the grid, and a tool tip of a few words: the manual says what is counted and what the colours mean
+    $gh = New-GridHeader -Heading 'BY GROUP' -Detail '' -Tip 'Percent compliant per group; double-click a group to show it'
     $right.Controls.AddRange(@($groups, $gh.Panel)); $groups.BringToFront()
     $Panel.Controls.AddRange(@($right, $pies, $bar)); $right.BringToFront()
     $script:Gui['SecDashPies'] = $pies; $script:Gui['SecDashE8'] = $e8; $script:Gui['SecDashIsm'] = $ism; $script:Gui['SecDashGroups'] = $groups; $script:Gui['SecDashInfo'] = $info

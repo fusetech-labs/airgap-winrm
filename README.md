@@ -10,8 +10,8 @@ prompt and kept in memory. Every change to a server asks for a change record fir
 |---|---|---|
 | **O/S Patching** | Reads the update files in `patches\`, asks every server for its build, hotfixes, update history, pending reboot, free disk, the Trellix Solidcore mode and the Trellix Agent services, shows **Installed / READY / Blocked: why** per server and file, and installs the ticked Windows and .NET updates after the plan, a change record and the pre-action confirmations (VMware snapshot, Trellix Solidcore Update Mode ... - set on the Settings tab). After a failure, **Analyse a failure** reads the server's own logs and says where it broke. Shows roles, software currency (Current / Behind / Stale / Ageing / End of life) and SQL / Exchange patch levels. | Yes: install and reboot |
 | **Software** | Deploys and updates third-party software from a catalogue (data\software-packages.psd1, installers in software\), VMware Tools first, with the reboot suppressed so it is taken with the OS patches. Stages installers ahead of the window. Removes old or dormant products, never protected ones or what the server's SOE standard requires. | Yes: install, update, removal |
-| **Health** | Automatic services not running, scheduled tasks with a failing last result, failed logons (4625) and account lockouts (4740), dormant software, disk, uptime, event-log errors, time sync, expiring certificates, memory, the agents every server should run. **Group Policy**: which GPOs apply where, failed policy extensions and errors, the last refresh, the trust with the domain. **SOE standards** you compose yourself and compare the fleet against. | No |
-| **Security** | An ISM audit: audit policy and local security policy (auditpol, secedit), hardening settings, application control, antivirus and EDR, firewall, LAPS, local administrators, logging, patch timeframes. A **security profile** (classification, Essential Eight maturity target) plus per-server internet-facing marks on the group-file lines, **tailoring** (recorded risk decisions) and Red / Amber / Green / Grey lights per server and per control. **GPO recommendations**: what Group Policy is missing or sets too weakly, the value today, which GPO to put each setting in, and - checked on each server - whether applying it would break something in use (impact found / check first / no impact found). | No |
+| **Health** | Automatic services not running, scheduled tasks with a failing last result, failed logons (4625) and account lockouts (4740), local accounts that are locked out or cannot log on any more, dormant software, disk, uptime, event-log errors, time sync, expiring certificates, memory, the agents every server should run. **Group Policy**: which GPOs apply where, failed policy extensions and errors, the last refresh, the trust with the domain. **SOE standards** you compose yourself and compare the fleet against. | No |
+| **Security** | An ISM audit: audit policy and local security policy (auditpol, secedit), hardening settings, application control, antivirus and EDR, firewall, LAPS, local administrators, the local users and groups (Guest and the other default accounts, accounts nobody uses, old administrator passwords, who is in the privileged groups), logging, patch timeframes. A **security profile** (classification, Essential Eight maturity target) plus per-server internet-facing marks on the group-file lines, **tailoring** (recorded risk decisions) and Red / Amber / Green / Grey lights per server and per control. **GPO recommendations**: what Group Policy is missing or sets too weakly, the value today, which GPO to put each setting in, and - checked on each server - whether applying it would break something in use (impact found / check first / no impact found). | No |
 | **Commands** | One PowerShell command on the ticked servers, every server's answer underneath - for an investigation, one step at a time. A **cheat sheet** of one-line commands (services, processes, disks, event logs, software, reboots, network, accounts) puts a command in the box with its `<placeholder>` ready to type over. | Only a command that may change one: change record and confirmation first |
 
 Long button and page names are shortened in this manual: **Report** stands for "Report (HTML + CSV)", **AUDIT** for
@@ -54,12 +54,14 @@ ConstrainedLanguage mode or scripts are blocked. See *The internet side* below.
 | `lib\14-State.ps1` | Saved results: every collector's last result per server in `state\servers\`, loaded at the next start; the **Last checked** cell and its age colours; the self-check (`-SelfCheck`) and the spoke (`-Spoke`) for a server the toolkit cannot reach over WinRM; Import results. See Saved results below. |
 | `lib\20-Console-Patching.ps1` | The O/S Patching tab: grid, inventory, software currency, report. |
 | `lib\21-Patching-Analysis.ps1` | The O/S Patching tab's **Analyse a failure**: the server's logs read after a failed install, weighed into findings and a timeline. |
-| `lib\30-Console-Health.ps1` | The Health tab: collectors, eighteen checks, the summary under the grid (processor, memory and disk dials, what needs attention), SOE standards, the Group Policy page. |
-| `lib\31-Health-Scripts.ps1` | The Health tab's **Scripts and tasks (ticked)**: the scheduled tasks and PowerShell scripts of a server, read with a bounded walk and the parser, never run; the Scripts report. |
-| `lib\40-Console-Security.ps1` | The Security tab: audit-policy collector, 118 checks, profile, tailoring, six views. |
+| `lib\30-Console-Health.ps1` | The Health tab: collectors, twenty checks, the summary under the grid (processor, memory and disk dials, what needs attention), SOE standards, the Group Policy page. |
+| `lib\31-Health-Scripts.ps1` | The Health tab's **Scripts and tasks audit (ticked)**: the scheduled tasks and PowerShell scripts of a server, read with a bounded walk and the parser, never run; the Scripts report. |
+| `lib\40-Console-Security.ps1` | The Security tab: audit-policy collector, 180 checks (37 of them in `48-Directory.ps1`, 13 in `49-ServerRoles.ps1`), profile, tailoring, six views. |
 | `lib\45-Security-Gpo.ps1` | The Security tab's GPO recommendations: the impact checks run on the servers, the gap per setting, the GPO plan. |
 | `lib\46-Security-Compliance.ps1` | The Security tab's compliance dashboard (Essential Eight and ISM charts, by group) and the executive summary report. |
 | `lib\47-Licensing.ps1` | The Licensing collector (hardware, OS edition, Windows and Office activation, KMS hosts, RD Licensing CALs, RD Session Host licensing), the licensing models and totals of the Software report and the Licensing page, and the SEC-LIC checks. |
+| `lib\48-Directory.ps1` | Domain controllers and the domain: the Directory collector (ADSI, the registry, WMI and `dcdiag.exe` on the domain controller itself - no PowerShell module), ten Health checks (H-AD) and 37 Security checks (SEC-ADC, SEC-AD), each with its ISM control. |
+| `lib9-ServerRoles.ps1` | SQL Server and Certificate Services: the Roles collector (the registry, the services, folder access lists, the Application log - no connection to a database instance), six Health checks (H-SQL, H-CA) and 13 Security checks (SEC-SQL, SEC-CA), each with its ISM control. |
 | `lib\50-Console-Software.ps1` | The Software tab: package vetting, verdicts, staging, install / update / removal as tasks on the server, report. |
 | `lib\60-Console-Settings.ps1` | The Settings tab: confirmations, change records, the running log, thresholds. |
 | `lib\70-Console-About.ps1` | The About tab: version, GitHub link, this copy, the code signature of every script. |
@@ -116,6 +118,12 @@ Show-ToolkitGui                         # open the window whenever you like
 
 Run the tool as the account that is a local administrator on the target servers. It never elevates itself. The
 Security console's `auditpol` and `secedit` collectors need that administrator right; without it their rows say so.
+When the PC the tool runs on is itself in a group file, start PowerShell with *Run as administrator* first: that PC
+is read by the window itself, and without it Windows refuses part of what the checks read there (see *Health*).
+A window without those rights says so: **NOT ELEVATED** stands in the top right corner of every console. Click it
+for the page of what is not read and not done on this PC, whether that concerns it today (it does only when the PC
+is in a group file, or the window is the copy on a server), and how to start with the rights. Every other server is
+read and worked on in full either way.
 The PowerShell console stays open behind the window and shows the same log in colour.
 
 ## Code signing
@@ -444,9 +452,11 @@ one's reboot flag. The red and amber findings also go to the running log.
 
 **Inventory (roles + software)** rides along with every status check: it reads installed products, roles and features, .NET, SQL Server instances (version,
 patch level, edition), Exchange, services, processes and scheduled tasks. The grid gains Roles and Software columns,
-and the software grid underneath shows every product with a verdict against `data\known-apps.psd1` and the rest of
-the fleet: **Current**, **Behind** (a newer version is known or runs elsewhere), **Stale** (old install, nothing newer
-anywhere), **Ageing**, **End of life**, **Unknown**. A product the catalogue does not know is judged by age alone:
+and the software grid underneath shows every product with a verdict against `data\known-apps.psd1`, the software
+library and the rest of the fleet: **Current**, **Behind** (a newer version is known, is in the library or runs
+elsewhere), **Stale** (old install, nothing newer anywhere), **Ageing**, **End of life**, **Unknown**. A product that a
+registered package of the Software console covers is judged against the newest installer in `software\`: registering
+the package is enough, the catalogue need not name the product. A product neither of them knows is judged by age alone:
 Stale after 6 months (updates are likely waiting) and Ageing after 12 (updates probably waiting, or the product is no
 longer maintained, which is a cessation risk); both thresholds are on the Settings tab (Health warning thresholds). Keep the catalogue's dates
 fresh by hand.
@@ -498,6 +508,33 @@ untick Uninstall only for a product that must never be removed. Registration is 
 it decides which signer is trusted and what runs as SYSTEM on the servers. Later versions dropped into the same folder
 are picked up by the file pattern. Other file types (.msp, .zip, .iso) are listed as not usable.
 
+**The silent switches of an `.exe`.** An `.msi` needs none: Windows Installer runs it. An `.exe` is a setup program
+of its own, and each kind has its own switches. The form reads the kind from the file, says so in its preview (*Built
+with*), and starts a new registration with that kind's usual switches; where the vendor documents others, type those.
+
+| Setup program | How the file shows it | Usual silent switches |
+|---|---|---|
+| Inno Setup | its manifest names `JR.Inno.Setup` | `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG={log}` |
+| WiX / Burn bundle | the program has a `.wixburn` section | `/quiet /norestart /log {log}` |
+| InstallShield with an MSI inside | its resources say InstallShield | `/s /v"/qn REBOOT=R /l*v {log}"` |
+| NSIS (Nullsoft) | its manifest names `Nullsoft.NSIS.exehead` | none the tool accepts: silent with `/S`, but no switch holds back a restart - take the vendor's `.msi` |
+
+No installer restarts a server; reboots come from the Reboot button only. So an NSIS `.exe` is refused whatever is typed
+in the argument boxes (**Blocked: file**): a `/norestart` typed for it would be ignored by the installer and promise
+what nothing delivers. A file that shows none of these marks is a launcher of the vendor's own or a self-extracting
+archive: use the switches the vendor documents. The same table is behind **Help** on the Software tab.
+
+**Match, and a copy from another installer.** Match is what says "installed": the name Programs and Features shows.
+A copy from a vendor's `.exe` installer is often listed under another name than the `.msi` gives (**Wireshark 4.4.2
+x64** against **Wireshark**), so the form starts Match wide enough for the names the inventory lists the product
+under (`Wireshark*`), never wide enough to take in another product, and its preview warns when Match leaves one of
+those names out - such a server would read INSTALL instead of UPDATE. An `.msi` does not always take over the `.exe`
+installer's copy either. Where the `.msi` says so itself - Wireshark's carries a launch condition that names that
+copy - the tool reads the rule from the file and the cell reads **Remove 4.4.2 first**. Remove that copy: tick it in
+the inventory list and **UNINSTALL** where its Removal column offers it, by hand on the server where it reads **by
+hand** (the copy a Wireshark `.exe` leaves is such a one: see *Removing software*). Check again, then **INSTALL**.
+From then on the `.msi` updates its own installs.
+
 **Changing a registration.** Every row of the installer list has its own **Edit...** button: the same form, filled from
 the package's entry. **Save changes** rewrites that entry only; its comments and any field the form does not show are
 kept, and nothing else in the file changes.
@@ -526,7 +563,8 @@ Tools itself.
 2. Pick a group, press **Check software (all shown)**: status, inventory and the software state (hardware, staged installers,
    toolkit tasks, the server's own change record).
 3. The grid has one column per package shown: **INSTALL** / **UPDATE -> version**, **Installed**, **Newer**,
-   **N/A (hardware)**, **Blocked: file**, **Task running**. "(staged)" means the installer is already on the server.
+   **N/A (hardware)**, **Blocked: file**, **Remove ... first**, **Task running**. "(staged)" means the installer is
+   already on the server.
    Each cell is coloured on its own: green where that version (or a newer one) is installed, yellow where INSTALL /
    UPDATE would act, pink where the installer is blocked. The row is yellow when anything is still to install or
    update, so an installed package stays green inside a yellow row.
@@ -549,8 +587,16 @@ unreadably wide or the list endless:
   the servers shown: how many to update, to install, already current, not checked, and the newest version deployed -
   yellow where the library holds a newer version than some servers have (or a new install), green where everything
   checked is current, red where the installer is blocked; most to do first, with a filter. Tick the packages to show;
-  **Most needed** ticks those with the most to do. The choice is kept in `settings\software-shown.json`.
+  **Tick most to do** ticks the ones with the most servers to update or install, as many as the console shows.
+  **OK** shows the ticked packages in the console and closes the window; **Cancel** leaves the console as it was.
+  The choice is kept in `settings\software-shown.json`.
 * A tick on an installer of a package that is no longer shown is dropped: INSTALL never acts on a tick you cannot see.
+* **Remove package...** in that window takes the selected package out of the library - no edit of
+  `data\software-packages.psd1` by hand. It asks first, then asks separately whether the package's installer files
+  under `software\` are to be deleted too (No keeps them; without a package they show as **\* NEW** again). The
+  removed entry is written to the log, so a removal made by mistake can be pasted back. Nothing changes on a server:
+  a product that is installed stays installed, and **UNINSTALL** is still the way to take it off a server. A package
+  without Uninstall protects its product; the question says so when that protection would go with it.
 * Verdicts are worked out once per server check and reused, so the All packages column and the library window stay
   quick with many packages and many servers. The report always covers every package.
 * Each installer is vetted (SHA256, signature, version) once and the result kept in `software\_info\vetting-cache.json`
@@ -588,18 +634,18 @@ unticked, only those needing attention (Behind, Stale, Ageing, End of life) or *
 |---|---|
 | MSI | `msiexec /x {product code} /qn /norestart REBOOT=ReallySuppress` |
 | quiet string | the product's own QuietUninstallString, with its no-restart switches added by the tool: msiexec `/norestart REBOOT=ReallySuppress`, Inno Setup (`unins000.exe`) `/NORESTART /SUPPRESSMSGBOXES`, WiX bundles `/norestart` |
-| quiet (may restart) | the product's own QuietUninstallString from an uninstaller with no known no-restart switch: it may restart the server by itself - the plan and the last confirmation say so |
-| by hand | no silent uninstall known: the tool will not guess one |
+| by hand | the tool will not remove it: no silent uninstall is known, or its uninstaller has no known no-restart switch (NSIS, InstallShield and others) and could restart the server by itself - such a one is never run. Remove it on the server (Programs and Features) in a reboot window |
 | Protected | `ProtectedProducts`, or a package without `Uninstall` in its modes (VMware Tools) |
 | SOE | the server's SOE standard requires it (a required software item, or a required agent's product) |
 
 Tick products and press **UNINSTALL**: the plan, the change record, the pre-action confirmations, then a last
-confirmation that names every product and flags the ones in use and any whose uninstaller may restart the server,
-then a re-check against a fresh inventory. A removal counts as done only when the inventory read straight afterwards
-agrees: an uninstaller that exits 0 while the product is still installed is reported **NOT REMOVED**.
+confirmation that names every product and flags the ones in use, then a re-check against a fresh inventory. A
+removal counts as done only when the inventory read straight afterwards agrees: an uninstaller that exits 0 while
+the product is still installed is reported **NOT REMOVED**.
 
-**A removal never reboots on purpose.** The reboot is the operator's own step (**Reboot (ticked)**, its own
-change record). But an uninstaller often leaves something for the next start - a service marked for deletion, files
+**A removal never restarts a server.** The tool runs an uninstaller only where it knows the switch that holds a
+restart back, and adds that switch; any other reads **by hand** and is not run, on the operator PC and again on the
+server. The reboot is the operator's own step (**Reboot (ticked)**, its own change record). But an uninstaller often leaves something for the next start - a service marked for deletion, files
 that were in use - so after any removal the server's Pending reboot reads **advised: removed <product>** until it
 restarts. Advised is not required: nothing is blocked, the row is not pink, and Reboot (ticked) asks about these
 servers separately, with No as the default. It clears itself at the next boot.
@@ -674,9 +720,11 @@ The record is kept in two places so it stays with the servers:
 
 *The Health console: the checks per server, and under the grid the three dials and the Needs attention list.*
 
-**Check health (ticked or all)** runs every collector at once: Status, Inventory, Health, Agents, Settings (112 facts per
-server: OS, RDP, SMB, TLS, UAC, firewall, Defender, PowerShell logging, AppLocker, LAPS, event-log sizes and more), the
-configuration points (registry values and config-file lines, see SOE standards below) and Group Policy. The checks,
+**Check health (ticked or all)** runs every collector at once: Status, Inventory, Health, Agents, Settings (over 120 facts per
+server: OS, RDP, SMB, TLS, UAC, firewall, Defender, PowerShell logging, AppLocker, LAPS, the local users and groups,
+event-log sizes and more), the
+configuration points (registry values and config-file lines, see SOE standards below), Group Policy, the server's roles (SQL Server and Certificate Services, see *Database servers and certification authorities* below) and, on a domain
+controller, the Directory collector (see *Domain controllers and the domain* below). The checks,
 with their thresholds from `lib\01-Config.ps1`:
 
 | Check | What it reads | Lights |
@@ -685,6 +733,12 @@ with their thresholds from `lib\01-Config.ps1`:
 | Scheduled tasks succeeded | tasks run within `TaskFailDays` whose last result is not in `TaskOkCodes` | Amber if any |
 | Failed logons (4625) | Security log, last `LogonFailWindowHours`, grouped by account and source | Amber at `LogonFailWarn`, Red at `LogonFailFail` |
 | Account lockouts (4740) | Security log, same window | Amber if any |
+| Local accounts: locked out, password expired | every enabled local user account (read through ADSI, no module loaded): locked out, password expired, or expiring within `LocalPasswordExpiryWarnDays` (14) | Amber if any; not applicable on a domain controller |
+| Services on local accounts | every service that runs as a local user account, against the list of local users | Amber when the account is gone, disabled or locked out, or its password has expired: the service would not start again |
+| Domain controller (H-AD-01..05) | on a domain controller: dcdiag, inbound replication, SYSVOL and NETLOGON, the directory's services, the five operations master roles | Red when a test, a replication link, a share, a service or a role holder fails; not applicable on any other server |
+| SQL Server (H-SQL-01..03) | on a server with SQL Server, per instance and without connecting to it: its engine and Agent services, its errors in the Application log, its backups as that log records them (`SqlBackupMaxDays`, 7) | Red when an engine that starts by itself is down, on a damaged-page error (823, 824, 825) or a failed backup; Amber for other errors or no backup on record; not applicable on any other server |
+| Certification authority (H-CA-01..03) | on a certification authority: Certificate Services running, the next revocation list not overdue, the authority's own certificate (named from six times `CertExpiryDays` on) | Red when the service is down, the list is overdue or the certificate has expired; not applicable on any other server |
+| Domain (H-AD-06..10) | once per domain, on its PDC emulator: the last backup of the directory, the RID pool, the forest's time source, the domain functional level, the Recycle Bin | Red when the backup is older than the tombstone lifetime or the RID pool is nearly used up, else Amber |
 | Dormant software | products installed longer ago than `DormantMonths` with no service, process or task using them | Amber, verify with the owner |
 | Disk space | every fixed volume with a drive letter; one smaller than `DiskSmallVolumeGB` (2 GB - a recovery or system partition given a letter) is listed, not judged | Amber below `DiskWarnPercent` free, Red when also below `DiskFailGB` - a small volume is judged by its percentage, a large one is not red while it still holds the GB |
 | Uptime and pending reboot | last boot, reboot flags | Amber over `UptimeWarnDays` or pending |
@@ -696,12 +750,30 @@ with their thresholds from `lib\01-Config.ps1`:
 | Hardware fit for patching | logical processors, memory, the processor model and clock, the machine model, and a one-thread speed score: four million integers sorted again and again for about a second on one processor, in millions sorted a second (a 3.2 GHz Xeon E5 v4 core scores about 12) | Amber below `MinLogicalProcessors` (4), `MinMemoryGB` (8) or `MinCpuScore` (6; 0 = shown, not judged). Microsoft's minimum installs Windows; it does not patch it in a sensible time |
 | Group Policy applies without errors | every client-side extension's last result, and Group Policy errors and warnings in the System and Group Policy logs within `EventWindowHours` | Red on a failed extension or an error, Amber on warnings; not applicable on a workgroup server |
 | Group Policy refreshed recently | the end of the last computer policy run | Amber over `GpoStaleHours` (24), Red over 7 x that |
-| Trust with the domain | `Test-ComputerSecureChannel` | Red when the secure channel is broken |
+| Trust with the domain | `Test-ComputerSecureChannel` | Red when the secure channel is broken; not applicable on the PDC emulator of a domain, which has no secure channel of its own to test |
 | SOE standard | every rule of the standard the server's group names (see below) | Red when a required rule differs, Amber for optional ones, Grey when no standard applies |
 | Collector errors | every query the Health collector could not run, with the reason | Amber |
 
 Everything is read-only. A query that fails on a server (no right to read the Security log, for example) shows up
-as a reason, never as a clean result. Double-click a server for every check with its evidence and fix. The grid's
+as a reason, never as a clean result. Double-click a server for every check with its evidence and fix.
+
+**The computer the toolkit runs on** is read by the window itself, with the rights the window has. Started without
+*Run as administrator*, Windows refuses it the Security log (failed logons, lockouts), the policy results (RSoP),
+the audit policy, the user rights and a few settings - on that computer only; every other server is read in full
+over WinRM. The **NOT ELEVATED** mark in the top right corner of the console says so while the window is open (click
+it for the list); the row's Worst text then begins with *NOT ALL READ (not run as administrator)*, the checks concerned
+name the reason, and the log says it at every check. Start the toolkit from a PowerShell opened with *Run as
+administrator* to read them. The same holds for the copy run on a server that refuses WinRM.
+
+A **domain controller** has no column of its own in the grid: its directory checks count in Red, Amber and Green like
+any other. Double-click its row: the page says `dcdiag 29/29` (and names what else is red or amber) at its head, and
+lists, after the checks, its place in the domain, dcdiag test by test (a failed one with what dcdiag printed), every
+inbound replication link, the role holders, the directory's services and the domain's domain controllers. The Health
+report carries the same as three tables.
+
+The Group Policy part of a server's page lists each client-side extension (Security, Registry, Group Policy
+Preferences ...) with its last result and when it last had policy to apply. *Check health* runs a status check first,
+and a status check clears the toolkit's own finished patch tasks from the server, as every status check does. The grid's
 Hardware and Speed columns show what each server runs on and how fast one of its processors is; CPU and RAM used show
 the last reading next to the fullest disk. After a few checks the Speed column says what the fleet scores: set
 `MinCpuScore` on the Settings tab at the line where patching became too slow (2 vCPUs on a 2 GHz host, scoring well
@@ -709,7 +781,8 @@ under 6, spent a whole patch window at 100% in the field).
 
 ### Scripts and scheduled tasks
 
-**Scripts and tasks (ticked)** answers "what runs on this server by itself, from where, and what does it do?" for
+**Scripts and tasks audit (ticked)** - the one plum button of the window, in bold, at the right of the Health
+toolbar - answers "what runs on this server by itself, from where, and what does it do?" for
 the ticked servers, then writes `reports\Scripts-<date>.html` (and CSV files). On each server, read-only:
 
 * every scheduled task outside `\Microsoft\` and not the OS's own: state, author, the account and run level, each
@@ -754,8 +827,12 @@ Below the server grid, behind a divider you can drag, the servers shown at a gla
   most servers; checks that could not run at all are one line. Where names the servers, critical ones first - hover a
   line for all of them, however many. Double-click a line for every server it is on, what was found and how to fix it. The Health report lists the same, with every server named, and the ranges in its notes.
 
-The processor figure is a few seconds averaged at the check: check again before acting on a single busy reading. What the
-grid's row colours and SOE column mean is on the tooltip of the row count above the grid.
+The processor figure is a few seconds averaged at the check: check again before acting on a single busy reading.
+
+A row takes the colour of its worst check: red = a failure (services, logons, disk, memory, processor, time ...) or a
+required SOE item that differs, amber = a warning, green = all clear, grey = not checked. Each cell that stands for a
+check carries that check's own colour, so a green or amber cell shows inside a red row. In the SOE column *none* means
+that no standard applies to the server (see *SOE standards*). Tool tips are a few words; this manual has the rest.
 
 ### Group Policy
 
@@ -814,22 +891,195 @@ control page and security report carries it as a fact. The release comes from `d
 means a new catalogue and code updates for the checks it adds or changes.
 
 **AUDIT** runs the Status, Inventory, Agents, Settings, SecurityPolicy (`auditpol /get /category:* /r` and
-`secedit /export`, both read-only, both needing an administrator) and Group Policy collectors and evaluates 118 checks:
+`secedit /export`, both read-only, both needing an administrator) and Group Policy collectors - and, on a domain controller, the Directory collector, and on every server the Roles collector (SQL Server, Certificate Services) - and evaluates 180 checks:
 
 * 89 expected values from `data\security-settings.psd1`: audit policy subcategories, account policy, security
   options, user rights, operating-system hardening, platform protection, PowerShell logging, removable media,
   event-log sizes, remote access (RDP, WinRM, TLS, LLMNR, NetBIOS). Each entry names the key, the operator, the
   expected value, the ISM control, the Essential Eight maturity level, the severity and the fix.
-* 29 checks in code: application control (AppLocker / WDAC) and its logging, antivirus and EDR agents, the firewall
-  profiles, LAPS, local Administrators membership, the built-in Administrator account, services on plain domain
-  accounts, event forwarding, the time service, OS support and release, Internet Explorer 11, the patch timeframe
-  against `data\product-patches.psd1`, and seven controls that cannot be assessed from a server (SIEM, jump servers,
-  privileged operating environments, software register, backups, vulnerability scanning) which stay Grey so they are
-  not forgotten.
+* 76 checks in code, 35 of them for domain controllers and the domain (their own section below). The other 41: application control (AppLocker / WDAC) and its logging, antivirus and EDR agents, the firewall
+  profiles, LAPS, local Administrators membership, the built-in Administrator account, the local users and groups
+  (eight checks, below), services on plain domain accounts, event forwarding, the time service, OS support and
+  release, Internet Explorer 11, the patch timeframe against `data\product-patches.psd1`, the cryptography and radio
+  checks for SECRET and above, Windows activation and Remote Desktop licensing, and seven controls that cannot be
+  assessed from a server (SIEM, jump servers, privileged operating environments, software register, backups,
+  vulnerability scanning) which stay Grey so they are not forgotten.
+
+**Local users and groups.** The Settings collector lists every local user account and local group of a server and
+the checks judge them. It reads them through ADSI (the WinNT provider): plain .NET, no PowerShell module is loaded.
+A domain controller has no local accounts, so the checks are not applicable there; a list that could not be read is
+Amber with the reason, never a pass.
+
+| Check | What it looks for | ISM |
+|---|---|---|
+| SEC-CRD-03 | the built-in Administrator enabled - found by identifier, so its name does not matter: a renamed one is still the built-in account. Local administration runs on an account of your own | ISM-0383 |
+| SEC-ACC-01 | Guest, DefaultAccount or WDAGUtilityAccount enabled (found by identifier, so a renamed one is found too) | ISM-0383 |
+| SEC-ACC-02 | an enabled account marked "password not required": it may have an empty password | ISM-0421, ISM-1557, ISM-0422 |
+| SEC-ACC-03 | an enabled local administrator account not logged on for `LocalAccountInactiveDays` (45) | ISM-1648 |
+| SEC-ACC-04 | any other enabled local account not logged on for that long | ISM-1404 |
+| SEC-ACC-05 | enabled local accounts without administrator rights on a domain member: shared accounts, each needs an owner | ISM-0415 |
+| SEC-ACC-06 | the password of any enabled local administrator account, whatever it is called, older than `LocalAdminPasswordMaxAgeDays` (365): not rotated, so not a managed one | ISM-1685 |
+| SEC-ACC-07 | Backup Operators, Power Users, Hyper-V Administrators and their like with members, or open to nearly everybody; who is in Remote Desktop Users and Remote Management Users | ISM-1508, ISM-1852 |
+| SEC-ACC-08 | a group member shown only as an identifier: an account that no longer exists | ISM-0430 |
+
+SEC-CRD-03 was there before, and is stricter from 2.3: an enabled built-in Administrator is a failure whatever it is
+called, where a renamed one used to pass. The ISM has default accounts changed, disabled or removed (ISM-0383), and a
+rename does not change which account it is. On a domain controller the account is the domain's break glass account,
+and renamed is still enough there: a domain controller has no local accounts, so the check reads it from the
+directory, on the domain's PDC emulator (the other domain controllers say where it is judged). Whether LAPS is configured is SEC-CRD-01. The thresholds are on the Settings tab.
+An account kept on purpose - a break glass account, every domain user in Remote Desktop Users on a session host - is recorded in the
+tailoring, with its reason and review date.
+
+**Domain controllers and the domain.** On a domain controller the Health check and the Security audit run one more
+collector, **Directory**. It reads the directory on the server it runs on with what every domain controller has:
+ADSI (LDAP), the registry, WMI and `dcdiag.exe`. No PowerShell module is loaded - not the ActiveDirectory one, not
+any other - and nothing is written. On any other server the 47 checks read *not a domain controller*. What it
+read shows on the Health tab: double-click the domain controller for the dcdiag, replication, role and service
+sections of its page; the Health report has the same as tables.
+
+* **Every domain controller** is judged on its own: its dcdiag tests, its inbound replication (as the directory
+  itself records it, partner by partner and partition by partition), SYSVOL and NETLOGON, the directory's services,
+  the five operations master roles as this server knows them, LDAP signing, the Print Spooler, the other roles
+  installed beside the directory, certificate mapping.
+* **The domain is read and judged once**, on the domain controller that holds its **PDC emulator** role: accounts,
+  groups, delegation, trusts, permissions, Group Policy Preferences. On the other domain controllers those checks
+  read *judged once for the domain, on ...* and name it. Check the PDC emulator of each domain to get them.
+* **The forest** - the Recycle Bin, the time source, the certificate templates the certification authorities
+  publish - is judged on the PDC emulator of its root domain.
+* **A domain controller that refuses WinRM** (`winrm: no`) is read by its own local copy of the toolkit, like every
+  other collector: the self-check and the local window run Directory there, and the results file written into the
+  hub's `state\servers\` share carries these checks into the hub's consoles (see *Saved results, servers without WinRM, the self-check and the spoke*).
+
+| Check | What it looks for | ISM |
+|---|---|---|
+| H-AD-01 | dcdiag on the domain controller (the System event log test left out): every test passes. The three event log tests are Amber, the others Red | - |
+| H-AD-02 | every inbound replication link: failures in a row, hours since the last success (`DirectoryReplicationMaxHours`, 24) | - |
+| H-AD-03 | SYSVOL and NETLOGON shared, SYSVOL ready, DFS Replication normal; still on FRS is Amber | - |
+| H-AD-04 | NTDS, Netlogon and the Kerberos key distribution centre running, and DNS, DFSR, W32Time, ADWS where they start by themselves | - |
+| H-AD-05 | each of the five operations master roles has a holder that still exists | - |
+| H-AD-06 | the directory's own record of the last backup of the domain partition (`DirectoryBackupMaxDays`, 7; Red beyond the tombstone lifetime) | - |
+| H-AD-07 | the RID pool: Amber from 80 % issued, Red from 95 % | - |
+| H-AD-08 | the PDC emulator of the forest root takes its time from named time servers, not from its own clock | - |
+| H-AD-09 | the domain functional level is Windows Server 2012 R2 or later (Protected Users needs it) | - |
+| H-AD-10 | the Active Directory Recycle Bin is enabled | - |
+| SEC-ADC-01 | LDAP signing required on the domain controller (channel binding is shown beside it) | ISM-1929 |
+| SEC-ADC-02 | the Print Spooler disabled on the domain controller | ISM-1828 |
+| SEC-ADC-03 | other server roles on the domain controller (IIS, DHCP, a certification authority, Remote Desktop ...) | ISM-1926 |
+| SEC-ADC-04 | strong certificate mapping enforced | ISM-1943 |
+| SEC-AD-01 | enabled accounts that need no Kerberos pre-authentication | ISM-1836 |
+| SEC-AD-02 | passwords stored with reversible encryption, by the policy or on an account | ISM-1840 |
+| SEC-AD-03 | enabled accounts marked "password not required" | ISM-0421, ISM-1557, ISM-0422 |
+| SEC-AD-04 | accounts with a value in userPassword or unixUserPassword | ISM-1838 |
+| SEC-AD-05 | accounts whose description, notes or comment mention a password (to read) | ISM-1839 |
+| SEC-AD-06 | user accounts that carry a service principal name (to confirm as service accounts) | ISM-1832, ISM-1932 |
+| SEC-AD-07 | such accounts not set for AES | ISM-2010 |
+| SEC-AD-08 | a service principal name registered on two accounts | ISM-1834 |
+| SEC-AD-09 | user accounts trusted for unconstrained delegation (Red when one has no service principal name) | ISM-1843 |
+| SEC-AD-10 | computers besides the domain controllers trusted for unconstrained delegation | ISM-1935 |
+| SEC-AD-11 | computers besides the domain controllers trusted for delegation to services | ISM-1844 |
+| SEC-AD-12 | accounts with a SID history | ISM-1936, ISM-1937 |
+| SEC-AD-13 | how many enabled accounts are in Domain Admins, Enterprise Admins, Schema Admins and Administrators, members of members included (`DomainAdminsMax`, 5) | ISM-1939 |
+| SEC-AD-14 | service accounts among them | ISM-1940 |
+| SEC-AD-15 | computer accounts in a privileged group; the Domain Computers group nested in one | ISM-1941, ISM-1942 |
+| SEC-AD-16 | privileged accounts not in Protected Users (the built-in Administrator, the break glass account, is left out) | ISM-1620 |
+| SEC-AD-17 | privileged accounts that may be delegated | ISM-1835 |
+| SEC-AD-18 | privileged accounts not logged on for `DomainAccountInactiveDays` (45) | ISM-1648 |
+| SEC-AD-19 | any other enabled account not logged on for that long | ISM-1404 |
+| SEC-AD-20 | disabled accounts that are still members of groups | ISM-1845 |
+| SEC-AD-21 | user accounts, Everyone or Anonymous Logon in Pre-Windows 2000 Compatible Access | ISM-1846 |
+| SEC-AD-22 | ms-DS-MachineAccountQuota above 0: every account may add computers | ISM-1841 |
+| SEC-AD-23 | a trust to another forest without SID filtering | ISM-1931 |
+| SEC-AD-24 | the KRBTGT password older than `KrbtgtPasswordMaxAgeDays` (180) | ISM-1847 |
+| SEC-AD-25 | the domain's built-in Administrator password older than `LocalAdminPasswordMaxAgeDays` (365); Amber when the account is disabled | ISM-1953 |
+| SEC-AD-26 | enabled computer accounts whose password is older than `ComputerPasswordMaxAgeDays` (30) | ISM-1955 |
+| SEC-AD-27 | who may replicate the directory's secrets (DCSync) besides the domain controllers and the administrators' groups; Red for an account with a service principal name | ISM-1934, ISM-1933 |
+| SEC-AD-28 | write permissions of the Domain Computers group on the domain, its organisational units, Builtin and AdminSDHolder | ISM-1938 |
+| SEC-AD-29 | a password (cpassword) in a Group Policy Preferences file in SYSVOL | ISM-1829, ISM-1930 |
+| SEC-AD-30 | a published certificate template that lets any account name the subject of a logon certificate, without approval | ISM-1945, ISM-1948 |
+| SEC-AD-31 | a certificate template that Everyone, Authenticated Users, Domain Users or Domain Computers may change | ISM-1946 |
+| SEC-AD-32 | the published certificate templates whose certificates are good for logon (client authentication, smart card logon, any purpose): a list to go through, Amber | ISM-1947 |
+| SEC-AD-33 | the certificate templates changed in the last 90 days: the ones to review, Amber | ISM-2131 |
+
+What to know before relying on them:
+
+* **Rights.** dcdiag and the registry need an administrator of the domain controller. The directory reads work for
+  any account that can read the domain, replication and the backup stamp included.
+* **dcdiag over WinRM.** Two of its tests reach the operations masters. From a WinRM session that can fail for want
+  of a second hop; the check then says so, and the local copy on the server settles it. Every other read stays on
+  the server it runs on.
+* **Time and size.** dcdiag takes about a minute. The domain may be any size: each sweep asks the domain controller
+  for the objects that match - the accounts without pre-authentication, not every account - and reads at most
+  `DirectoryMaxObjects` (20,000) of those. A sweep that stops there judges what it read and says so (*there may be
+  more*); with nothing found up to there it is Amber, not a pass. One sweep, for duplicate service principal names,
+  reads every object that has one, and every computer account does: in a domain of more than 20,000 computer
+  accounts raise the setting. The collector allows itself four minutes and marks what it did not reach as not read -
+  Amber, never a pass.
+* **Your security monitoring** may report the sweeps as directory enumeration: every user, every service principal
+  name, the permissions of the domain. They come from the domain controller itself, under the operator's account.
+* **The last logon** the directory keeps is exact to within two weeks, so 45 days means 45 to 59.
+* **Not judged:** what cannot be read from a server - dedicated administrator accounts (ISM-1827), least privilege
+  (ISM-1833), who may log on to a domain controller and how its backups are kept (ISM-1927, ISM-1928). The
+  certification authority's own flags and web enrolment (ISM-1944, ISM-2130) are read on the authority itself: see
+  *Database servers and certification authorities* below. Where the ISM asks for a review
+  every so many months (ISM-1843, ISM-1934, ISM-1937, ISM-2131) the check gives the list to review, not proof
+  that it was reviewed.
+* **A server in another language:** dcdiag's text is translated, so H-AD-01 reads *not understood* there (Amber).
+  Everything else is read as numbers and names.
+
+**Database servers and certification authorities.** Every Health check and every Security audit runs one more
+collector on every server, **Roles**. It looks for two roles and reads each from the server itself: the registry,
+the services, the access lists of folders, the Application log, the certificate store, the web server's
+configuration file. Nothing is written, no module is loaded, and **no connection is made to a database instance**.
+A server with neither role answers at once and its 19 checks read *not applicable*. A server that refuses WinRM is
+read by its own local copy, like every other collector.
+
+| Check | What it looks for | ISM |
+|---|---|---|
+| H-SQL-01 | each instance's engine running, and its Agent where it starts by itself; a service set to Disabled is left alone | - |
+| H-SQL-02 | the instance's errors in the Application log within `EventWindowHours`; Red for damaged pages (errors 823, 824, 825) | - |
+| H-SQL-03 | a database backup on record in the Application log within `SqlBackupMaxDays` (7); Red when a backup failed | - |
+| SEC-SQL-01 | the engine and Agent run as accounts of their own: not LocalSystem, not a member of the local Administrators group | ISM-1249, ISM-1250 |
+| SEC-SQL-02 | how each instance listens: Named Pipes on, or the SQL Server Browser running beside a lone default instance, is Amber | ISM-1247 |
+| SEC-SQL-03 | Force Encryption on, with a certificate of the server's own that is valid, SHA-2 and at least 2048 bits | ISM-1277 |
+| SEC-SQL-04 | the data, log and backup folders are closed to Everyone, Authenticated Users, Users and Domain Users | ISM-1256 |
+| SEC-SQL-05 | no Web Server (IIS) role on a server that holds an instance | ISM-1269 |
+| SEC-SQL-06 | Windows logons only; in mixed mode the check says that `sa` and the SQL logins are not read | ISM-1260 |
+| SEC-SQL-07 | logon auditing: failed and successful; the default (failed only) is Amber, none is a failure | ISM-1537 |
+| H-CA-01 | Certificate Services is running | - |
+| H-CA-02 | the next revocation list is not overdue (and the next delta list, where delta lists are published) | - |
+| H-CA-03 | the authority's own certificate: Amber from six times `CertExpiryDays` (180 days) before its end | - |
+| SEC-CA-01 | `EDITF_ATTRIBUTESUBJECTALTNAME2` is not set on the authority | ISM-1944 |
+| SEC-CA-02 | the authority's key is not held by one of Windows' own software providers | ISM-1957 |
+| SEC-CA-03 | web enrolment is absent, or demands HTTPS with Extended Protection required | ISM-2130 |
+| SEC-CA-04 | the authority's audit filter covers every kind of event, and the audit policy passes them on | ISM-2132 |
+| SEC-CA-05 | who may manage the authority or issue and manage its certificates, besides the administrators | ISM-1508 |
+| SEC-CA-06 | requests must come encrypted (`IF_ENFORCEENCRYPTICERTREQUEST`) | ISM-1246 |
+
+What to know before relying on them:
+
+* **Inside the instance is not read.** Who is a sysadmin, whether `sa` is disabled or renamed, what the logins'
+  passwords are, which features are switched on, what the server audit covers, when each database was last backed
+  up or checked: all of that needs a logon to the instance, and the toolkit makes none. The checks say so where it
+  matters (SEC-SQL-06, SEC-SQL-07).
+* **Backups are read from the Application log**, where SQL Server records each one (and each failure). An instance
+  told not to log them (trace flag 3226), or a log that reaches back less than the days asked for, shows *no backup
+  on record* - the check then says how far back the log reaches.
+* **The key of a certification authority.** SEC-CA-02 fails on Windows' own software providers and names any other;
+  that the other one is your hardware security module's is yours to confirm.
+* **Certificate Services is read as its configuration is documented.** No certification authority was at hand when
+  these checks were written: try them on yours, and compare what the server's page shows with the Certification
+  Authority console.
+* **Not judged:** whether an instance that only programs on the server itself use listens on the network at all
+  (ISM-1272; the server's page shows where each instance listens), the network segment a database server sits in
+  (ISM-1270, ISM-1271), development and production
+  kept apart (ISM-1273, ISM-1274), the classification of a database's contents (ISM-0393), a database register
+  (ISM-1243) and how software talks to a database (ISM-1275, ISM-1276, ISM-1278, ISM-1536).
+* The grid has no column for a role. Double-click the server on the Health tab: the page lists its instances, their
+  services, folders, errors and backups, or its certification authority; the Health report has both as tables.
 
 The **Security profile** page sets the classification (Non-classified, OFFICIAL, OFFICIAL: Sensitive, PROTECTED, SECRET, TOP SECRET;
 it decides which ISM controls apply, the rest go Grey), the Essential Eight maturity target (a failed Essential Eight
-control at or below it is Red) and which servers face the internet (ML2 application control, two-week patch timeframe): a tick per server, saved onto the server's line in its group file as `; class: internet-facing`.
+control at or below it is Red) and which servers face the internet (ML2 application control, two-week patch timeframe): a tick per server, saved onto the server's line in its group file as `; class: internet-facing`. A server unticked there that its group file marks with `# class: internet-facing` gets `; class: member`; the Class column on the Servers page shows what is in force.
 
 **Tailoring (risk decisions)** records exceptions the way OpenSCAP tailoring does: a rule names the check, the scope
 (all, `group:<name>` or `server:<name>`), the action (**disable** = risk accepted, the row goes Grey with the reason;
@@ -848,6 +1098,10 @@ Tailoring is visible where the results are: the **Servers** page has a **Tailori
 | Amber | any other failure, every warning (including "not collected" with the reason), a downgraded Red, an overdue acceptance, a check that could not run |
 | Green | pass |
 | Grey | not applicable at this classification or for this server type, not assessable from the server, risk accepted |
+
+The **pass rate** of a server is Green of (Red + Amber + Green): Grey rows are left out, and a value that could not
+be read counts against it. The compliance figures under the grid count differently (see *Compliance dashboard and executive summary*): there
+a risk-accepted control counts as compliant and an unread one is left out.
 
 Six pages: **Servers** (one row per server with lights, counts, the pass rate and the top red controls; double-click for
 every check with its evidence, the ISM wording and the fix; the compliance dashboard below it), **Controls** (one row per check across the servers
@@ -870,7 +1124,7 @@ the servers in red.*
 server.*
 
 The classification on the **Security profile** page decides which controls apply: every check cites ISM controls, and a
-check whose controls the ISM does not ask for at that classification is grey ("not applicable"). Most of the 118 checks
+check whose controls the ISM does not ask for at that classification is grey ("not applicable"). Most of the 180 checks
 apply from Non-classified upwards; the ones the ISM asks for on **SECRET** and **TOP SECRET** systems only come into force
 there and are grey below:
 
@@ -1118,7 +1372,10 @@ so the spoke's start on the server offers them. `INSTRUCTIONS.txt` in the copy h
 the self-check script* adds `Run-SelfCheck.ps1`, a two-line launcher of the self-check with the results folder
 baked in, plus a `schtasks` line for a nightly run. The self-check's exit code is 0 when every collector answered
 and the file was written, so a scheduled task can report it. Nothing flows into such a server over WinRM: results
-flow out, like log forwarding.
+flow out, like log forwarding. Where the copy uses a share of this PC - to write its results file, or to read
+`patches\` and `software\` - that is SMB, TCP 445, from the server to this PC: the one port of the toolkit besides
+WinRM, and optional. Carry the copy and its results file by hand and no port is used at all. This PC never opens SMB
+to a server.
 
 **The spoke.** To patch such a server as well, run the window on it:
 
@@ -1228,6 +1485,9 @@ the log window drops its oldest half past 1.5 MB (the log file keeps everything)
 
 * Windows PowerShell 5.1 on the machine running the tool.
 * WinRM reachable on TCP 5985 on the targets, with the operator's account in the local Administrators group.
+* No other port. The one exception is optional and runs the other way: a server marked `winrm: no` whose own copy
+  of the toolkit uses a share of this PC reaches it over SMB, TCP 445 (see *Saved results, servers without WinRM,
+  the self-check and the spoke*).
 * **The toolkit PC itself** can be in a group file too (its name, its FQDN or `localhost`). The tool recognises it and
   runs every step for it here - the checks as a local background job, the staging copy as a plain file copy, the
   install launch, the Trellix Agent services and the reboot in its own process - with no WinRM call to itself, so the
@@ -1265,7 +1525,8 @@ variable names are case-insensitive: `$s` and `$S` in one function are the same 
 ## Code review
 
 `CODE-REVIEW.md` records the independent reviews (version 1: 34 findings; version 2: 38 and then 64 findings across correctness,
-security and operational safety, each with what was done). It is kept with the owner's working copy and is not part of
+security and operational safety; version 2.3: 18 findings, then 16 on its ISM citations and pop-up windows, and 9 at
+the last review before release - each with what was done). It is kept with the owner's working copy and is not part of
 the published repository, which is why the REVIEW RECORD blocks refer to it as an internal record. Every `.ps1` starts
 with such a block, with space for the human reviewer's name, date, verdict and comments. Fill those in by hand and keep
 them in the files.

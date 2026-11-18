@@ -40,7 +40,7 @@ if (-not $script:RootFolder) { $script:RootFolder = (Get-Location).Path }
 $script:Config = @{
     # ---- Identity ----
     ToolName       = 'Sysadmin WinRM Toolkit'   # banner, window title, reports
-    ToolVersion    = '2.2'
+    ToolVersion    = '2.3'
     SourceUrl      = 'https://github.com/fusetech-labs/airgap-winrm'   # the About tab shows it to copy; the tool never opens it
     Author         = 'Chris Fryer'                       # the About tab
     SupportEmail   = 'products@fusetech.com.au'          # the About tab shows it to copy; the tool sends no mail
@@ -136,6 +136,17 @@ $script:Config = @{
     DormantMonths        = 12      # software installed longer ago than this, with nothing using it
     UnknownStaleMonths   = 6       # a product NOT in known-apps.psd1, installed longer ago than this: updates are likely waiting (Stale)
     UnknownAgeingMonths  = 12      # ... and longer ago than this: probably unmaintained or unsupported, a cessation risk (Ageing)
+    LocalAccountInactiveDays     = 45    # an enabled local account not logged on for this long is inactive (ISM-1404, ISM-1648)
+    LocalAdminPasswordMaxAgeDays = 365   # a local administrator's password older than this is not a managed one (ISM-1685; LAPS changes it every 30 days)
+    LocalPasswordExpiryWarnDays  = 14    # Health: a local account whose password expires within this many days is named
+    DirectoryMaxObjects          = 20000 # a domain controller: no read of the directory takes in more objects than this (a result says when it stopped there)
+    DirectoryReplicationMaxHours = 24    # Health: a replication partner not heard from for longer than this is named (H-AD-02)
+    DirectoryBackupMaxDays       = 7     # Health: the domain partition is expected to be backed up within this many days (H-AD-06)
+    SqlBackupMaxDays             = 7     # Health: a SQL Server instance is expected to have a database backup on record within this many days (H-SQL-03)
+    DomainAccountInactiveDays    = 45    # an enabled domain account not logged on for this long is inactive (ISM-1404, ISM-1648)
+    DomainAdminsMax              = 5     # more enabled accounts than this in the groups that own a domain are to confirm (ISM-1939)
+    KrbtgtPasswordMaxAgeDays     = 180   # the KRBTGT password is changed within this many days (ISM-1847: six months)
+    ComputerPasswordMaxAgeDays   = 30    # an enabled computer account whose password is older than this is named (ISM-1955)
     CertExpiryDays       = 30
     TimeOffsetFailSec    = 5
     MemoryWarnPercent    = 10      # free physical memory below this percent = Warn

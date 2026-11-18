@@ -7,7 +7,10 @@
     #  the AsOf date in the grid and the report so a stale table is
     #  visible.  Leave "Latest" empty when you do not track a product;
     #  the fleet itself still acts as a baseline (a newer version seen
-    #  on any server flags the older ones as Behind).
+    #  on any server flags the older ones as Behind).  So does the
+    #  software library: a product that a registered package of the
+    #  Software console covers is Behind as soon as software\ holds a
+    #  newer installer, whether or not it is listed here.
     #
     #  Match          wildcard against the product's DisplayName
     #  Latest         version string that counts as current ('' = unknown)
@@ -21,6 +24,8 @@
         @{ Match = 'PuTTY*';                 Latest = '0.83';    CadenceMonths = 12; EOL = $false; Note = 'putty.org' }
         @{ Match = 'Notepad++*';             Latest = '8.7';     CadenceMonths = 3;  EOL = $false; Note = 'notepad-plus-plus.org' }
         @{ Match = 'WinSCP*';                Latest = '6.3';     CadenceMonths = 4;  EOL = $false; Note = 'winscp.net' }
+        # the 2.x line only ("KeePass Password Safe 2.58"): 1.x is a line of its own with its own versions
+        @{ Match = 'KeePass Password Safe 2*'; Latest = '2.62';  CadenceMonths = 4;  EOL = $false; Note = 'keepass.info - 2.62 of 2026-11-04 (checked 2026-11-19)' }
         @{ Match = 'VLC media player*';      Latest = '3.0.21';  CadenceMonths = 12; EOL = $false; Note = 'videolan.org' }
         @{ Match = 'Google Chrome*';         Latest = '';        CadenceMonths = 1;  EOL = $false; Note = 'monthly releases - compare within the fleet' }
         @{ Match = 'Microsoft Edge*';        Latest = '';        CadenceMonths = 1;  EOL = $false; Note = 'monthly releases - compare within the fleet' }

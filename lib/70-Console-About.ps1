@@ -595,11 +595,11 @@ function Update-AboutPage {
 #  (the action rebuilds the page).
 # ---------------------------------------------------------------------
 $script:AboutActions = @(
-    @{ Id = 'act-unblock'; Text = 'Unblock the scripts'; Tip = 'Removes the "downloaded from the internet" mark from the tool''s scripts (after a Yes). The files themselves do not change.' }
-    @{ Id = 'act-selfsign'; Text = 'Self-sign on this PC...'; Tip = 'Makes a code-signing certificate on this PC with the key and hash you choose against the ISM, trusts it here, signs every script and deletes its private key.' }
-    @{ Id = 'act-request'; Text = 'Create a signing request...'; Tip = 'A key on this PC and a request file (signing\*.req), with the key and hash you choose against the ISM and a note of what to ask your certificate authority for. Nothing is sent anywhere.' }
-    @{ Id = 'act-install'; Text = 'Install the CA certificate...'; Tip = 'The certificate your CA returned for that request: joined to its key in your Personal store.' }
-    @{ Id = 'act-sign'; Text = 'Sign with a certificate...'; Tip = 'Signs every script the tool loads with a code-signing certificate on this PC that holds its key, its key and hash shown against the ISM.' })
+    @{ Id = 'act-unblock'; Text = 'Unblock the scripts'; Tip = 'Removes the "downloaded from the internet" mark (asks first)' }
+    @{ Id = 'act-selfsign'; Text = 'Self-sign on this PC...'; Tip = 'A code-signing certificate made on this PC; signs every script' }
+    @{ Id = 'act-request'; Text = 'Create a signing request...'; Tip = 'A key on this PC and a request file for your CA; nothing is sent' }
+    @{ Id = 'act-install'; Text = 'Install the CA certificate...'; Tip = 'Joins the certificate your CA returned to its key' }
+    @{ Id = 'act-sign'; Text = 'Sign with a certificate...'; Tip = 'Signs every script with a code-signing certificate on this PC' })
 
 function Get-AboutActionsHtml {
     $css = '<style>.acts{margin:2px 0 12px 0;padding:8px 10px 2px 10px;background:#f4f7fb;border-left:4px solid #1f4e79}.act{font-family:"Segoe UI",Arial,sans-serif;font-size:9pt;padding:6px 14px;margin:0 8px 6px 0;border:1px solid #1f4e79;border-radius:3px;background:#ffffff;color:#1f4e79;cursor:pointer}.act:hover{background:#1f4e79;color:#ffffff}</style>'
@@ -707,7 +707,7 @@ function New-SigningRequestForm {
         $dlg.Controls.Add($l); $dlg.Controls.Add($box); $fields[$spec[0]] = $box
         $y += 32
     }
-    $script:Gui['Tips'].SetToolTip($fields['Template'], 'The certificate template your CA issues code-signing certificates from (an AD CS enterprise CA: often CodeSigning). Empty: the CA decides.')
+    $script:Gui['Tips'].SetToolTip($fields['Template'], 'Your CA''s code-signing template; empty = the CA decides')
     $cls = ''; $key = 0; $hash = ''
     if ($Last) { $cls = [string]$Last['Classification']; $key = [int]$Last['KeyBits']; $hash = [string]$Last['Hash'] }
     Add-CodeSigningPanel -Dialog $dlg -Top ($y + 8) -HashNote 'asked of the CA' -Classification $cls -KeyBits $key -Hash $hash
@@ -835,9 +835,9 @@ function Add-CodeSigningPanel {
     $l3 = New-Object System.Windows.Forms.Label; $l3.Text = 'Certificate hash:'; $l3.AutoSize = $true; $l3.Location = New-Object System.Drawing.Point(555, ($y + 3))
     $hashBox = New-Object System.Windows.Forms.ComboBox; $hashBox.DropDownStyle = 'DropDownList'; $hashBox.Location = New-Object System.Drawing.Point(660, $y); $hashBox.Width = 100
     $l4 = New-Object System.Windows.Forms.Label; $l4.Text = 'Script signatures: SHA-256'; $l4.AutoSize = $true; $l4.Location = New-Object System.Drawing.Point(785, ($y + 3))
-    $script:Gui['Tips'].SetToolTip($cls, 'Picks the ISM controls that apply (data\ism-catalogue.psd1). It starts at the Security profile''s classification; changing it here changes only this choice.')
-    $script:Gui['Tips'].SetToolTip($l4, 'Windows PowerShell 5.1 signs a script with SHA-256 whatever hash is asked for (tested): shown, and judged against the ISM, but not a choice.')
-    if ($HashNote -eq 'asked of the CA') { $script:Gui['Tips'].SetToolTip($hashBox, 'Signs the request; the .txt for the CA asks for the certificate to be signed with it too (the CA signs the certificate).') }
+    $script:Gui['Tips'].SetToolTip($cls, 'Picks the ISM controls that apply; changes only this choice')
+    $script:Gui['Tips'].SetToolTip($l4, 'PowerShell 5.1 always signs scripts with SHA-256')
+    if ($HashNote -eq 'asked of the CA') { $script:Gui['Tips'].SetToolTip($hashBox, 'Signs the request; the CA is asked to sign with it too') }
     $grid = New-Object System.Windows.Forms.ListView; $grid.View = 'Details'; $grid.FullRowSelect = $true; $grid.GridLines = $true; $grid.HeaderStyle = 'Nonclickable'; $grid.ShowItemToolTips = $true
     $grid.Location = New-Object System.Drawing.Point(12, ($y + 34)); $grid.Size = New-Object System.Drawing.Size(($width - 24), 124)
     foreach ($col in @(@('Control', 78), @('Applies to', 235), @('Choice', 215), @('Verdict', ($width - 24 - 78 - 235 - 215 - 6)))) { [void]$grid.Columns.Add($col[0], $col[1]) }
@@ -970,7 +970,7 @@ function New-AboutConsole {
         Invoke-GuiAction -Name 'Copy GitHub link' -ReadOnly -Action { [System.Windows.Forms.Clipboard]::SetText([string]$script:Config.SourceUrl); Write-PatchLog "Copied to the clipboard: $($script:Config.SourceUrl)" 'OK' } }))
     $toolbar.Controls.Add((New-GuiButton -Text 'Copy support email' -X 153 -Y 10 -W 150 -H 36 -ReadOnly -Tip $script:Config.SupportEmail -OnClick {
         Invoke-GuiAction -Name 'Copy support email' -ReadOnly -Action { [System.Windows.Forms.Clipboard]::SetText([string]$script:Config.SupportEmail); Write-PatchLog "Copied to the clipboard: $($script:Config.SupportEmail)" 'OK' } }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Check signatures again' -X 308 -Y 10 -W 170 -H 36 -Colour 'Gainsboro' -ReadOnly -Tip 'Reads the code signature of every script again (after Sign-Toolkit.ps1, say)' -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'Check signatures again' -X 308 -Y 10 -W 170 -H 36 -Colour 'Gainsboro' -ReadOnly -Tip 'Reads the code signature of every script again' -OnClick {
         Invoke-GuiAction -Name 'Check signatures' -ReadOnly -Action { Update-AboutPage -Recheck } }))
     $toolbar.Controls.Add((New-GuiButton -Text 'Save page as HTML...' -X 483 -Y 10 -W 160 -H 36 -Colour 'Gainsboro' -ReadOnly -Tip 'This page as one HTML file' -OnClick {
         Invoke-GuiAction -Name 'Save About page' -ReadOnly -Action {

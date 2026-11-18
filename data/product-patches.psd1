@@ -7,7 +7,7 @@
     #    .NET      the LCU article's ".NET Framework updates" section
     #    SQL       learn.microsoft.com/sql/.../latest-updates-for-microsoft-sql-server
     #    Exchange  learn.microsoft.com/exchange/new-features/build-numbers-and-release-dates
-    #  The Security console's patch-timeframe check (ISM-1877/1694/1695/1696)
+    #  The Security console's patch-timeframe check (ISM-1694 and ISM-1695)
     #  uses the Windows entries: days between "Released" and today, compared
     #  with what the server has installed.  Empty or missing = "no reference".
     # =================================================================

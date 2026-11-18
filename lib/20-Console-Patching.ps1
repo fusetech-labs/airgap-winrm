@@ -136,7 +136,7 @@ function Update-ServerList {
             [void]$item.SubItems.Add(''); [void]$item.SubItems.Add('')
             $item.BackColor = 'White'
             if ($flag) { $item.BackColor = $(if ([string]$flag.State -eq 'unknown') { 'Thistle' } else { 'LightCyan' }) }
-            if ($offline) { $item.ToolTipText = "marked 'winrm: no' in the group file: never called over WinRM. Run the copy of the toolkit on the server (Copy for a server) and press Import results." }
+            if ($offline) { $item.ToolTipText = "marked 'winrm: no': run its copy of the toolkit, then Import results" }
         } elseif (-not $s.Reachable) {
             [void]$item.SubItems.Add((Format-LastChecked $s.Checked))
             [void]$item.SubItems.Add('FAILED')
@@ -572,7 +572,7 @@ $script:RemoteInventoryScript = {
         $installed = ''
         if ([string]$k.InstallDate -match '^(\d{4})(\d{2})(\d{2})$') { $installed = '{0}-{1}-{2}' -f $Matches[1], $Matches[2], $Matches[3] }
         # the quiet uninstall: '0' none; else the kind of uninstaller whose no-restart switches the tool knows
-        # ('msiexec', 'Inno Setup', 'WiX bundle'), or '1' = one that may restart the server by itself
+        # ('msiexec', 'Inno Setup', 'WiX bundle'), or '1' = one that could restart the server by itself (UNINSTALL never runs it)
         $quiet = '0'
         if ($k.QuietUninstallString) {
             $qs = [string]$k.QuietUninstallString; $qe = ''; $qa = ''
@@ -616,7 +616,7 @@ $script:RemoteInventoryScript = {
     $inst = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL' -ErrorAction SilentlyContinue
     if ($inst) {
         foreach ($p in $inst.PSObject.Properties) {
-            if ($p.Name -like 'PS*') { continue }
+            if (@('PSPath', 'PSParentPath', 'PSChildName', 'PSDrive', 'PSProvider') -contains $p.Name) { continue }   # the five PowerShell adds, by name: an instance may be called PS-something
             $setup = Get-ItemProperty -Path ("HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\{0}\Setup" -f $p.Value) -ErrorAction SilentlyContinue
             $sql += '{0}|{1}|{2}|{3}' -f $p.Name, $setup.Version, $setup.PatchLevel, $setup.Edition
         }
@@ -707,6 +707,9 @@ function Get-SoftwareRows {
     #   Current / Behind (known latest or a newer version seen in the fleet) / Stale (old install, nothing newer anywhere;
     #   an unknown product after UnknownStaleMonths) / Ageing (an unknown product after UnknownAgeingMonths: probably
     #   unmaintained) / End of life / Unknown (not in known-apps.psd1 and recent).  Each row also carries its Light.
+    # The software library is a reference too (Get-SoftwareLibraryReference, 50-Console-Software.ps1): a product a
+    # registered package covers is Behind when the library holds a newer installer, and Current when it does not -
+    # registering a package is enough, known-apps.psd1 need not name the product.
     # The whole fleet's verdicts are computed once and cached (the fleet comparison needs every server anyway); the
     # cache is dropped with the check-row cache whenever a collector stores new results, so a 500-server refresh costs
     # a filter, not a recomputation.  Inside the computation the rule lookup and every version comparison are
@@ -716,9 +719,13 @@ function Get-SoftwareRows {
     if ($script:Results.ContainsKey('Inventory')) { $invKeys = @($script:Results['Inventory'].Keys | Sort-Object) }
     # the stamp: every inventory's time, the catalogue (a re-read one is a new object) and the two age thresholds of the Settings
     # tab, which the verdicts below bake in - a saved change re-judges at the next repaint instead of waiting for a new inventory
-    $stamp = (($invKeys | ForEach-Object { $_ + '=' + [string]$script:Results['Inventory'][$_].Checked.Ticks }) -join ';') + '|' + [string](Get-KnownApps).AsOf + '|' + [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode((Get-KnownApps)) + '|' + [string]$script:Config.UnknownStaleMonths + '|' + [string]$script:Config.UnknownAgeingMonths
+    # ... and the library: a package registered, edited, or a newer installer dropped in re-judges as well
+    $library = Get-SoftwareLibraryReference
+    $stamp = (($invKeys | ForEach-Object { $_ + '=' + [string]$script:Results['Inventory'][$_].Checked.Ticks }) -join ';') + '|' + [string](Get-KnownApps).AsOf + '|' + [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode((Get-KnownApps)) + '|' + [string]$script:Config.UnknownStaleMonths + '|' + [string]$script:Config.UnknownAgeingMonths + '|' + [string]$library.Stamp
     if (-not $script:SoftwareRowCache -or $script:SoftwareRowCache.Stamp -ne $stamp) {
         $known = Get-KnownApps
+        $libPackages = @($library.Packages)
+        $packageFor = @{}
         $all = @(Get-ProductRows -Servers $invKeys)
         $cmpCache = @{}
         $cmp = { param($a, $r) $k = "$a|$r"; if (-not $cmpCache.ContainsKey($k)) { $cmpCache[$k] = Compare-VersionRule -Actual $a -Rule $r }; $cmpCache[$k] }
@@ -748,22 +755,51 @@ function Get-SoftwareRows {
                 $ruleFor[$r.Product] = $found
             }
             $rule = $ruleFor[$r.Product]
+            # the library's package for this product: its Match covers the name, or its .msi names this very Uninstall key
+            # as the copy of another installer - the package's version is at hand either way.  Held = this copy is such
+            # a one: the .msi does not run over it (Get-SoftwareVerdict reads 'Remove x first' on that server)
+            $pk = $null
+            if ($libPackages.Count -gt 0) {
+                $pkKey = $r.Product + '|' + $r.KeyName + '|' + $r.Hive
+                if (-not $packageFor.ContainsKey($pkKey)) {
+                    $hit = $null
+                    foreach ($lp in $libPackages) {
+                        $named = $false
+                        if ($r.KeyName) { foreach ($rk in @($lp.Keys)) { if ([string]$r.KeyName -ieq [string]$rk.Key -and (-not $r.Hive -or -not $rk.Hive -or [string]$r.Hive -eq [string]$rk.Hive)) { $named = $true; break } } }
+                        if ($named -or ($lp.Match -and $r.Product -like $lp.Match)) { $hit = @{ Package = $lp; Held = $named }; break }
+                    }
+                    $packageFor[$pkKey] = $hit
+                }
+                $pk = $packageFor[$pkKey]
+            }
+            # compared only where the installed version is a version number: "build 7" against 12.1 is not "behind", it cannot
+            # be compared - the rule the Software console's own verdict keeps (Get-SoftwareVerdict)
+            $libState = ''; if ($pk -and [string]$r.Version -match '^\s*[vV]?\d') { $libState = [string](& $cmp $r.Version ('>= ' + $pk.Package.Version)) }
+            $libBehind = ''
+            if ($libState -eq 'Below') { $libBehind = ("the software library holds {0} (package '{1}'){2}" -f $pk.Package.Version, $pk.Package.Id, $(if ($pk.Held) { ' - its .msi does not run over this copy: remove it first, then install' } else { '' })) }
             $verdict = 'Unknown'; $reason = 'not in data\known-apps.psd1'
             $fleetBest = $fleet[$r.Product.ToLower()]
             $behindFleet = ($fleetBest -and $fleetBest -ne $r.Version -and (& $cmp $r.Version ('>= ' + $fleetBest)) -eq 'Below')
             if ($rule) {
                 if ($rule.EOL) { $verdict = 'End of life'; $reason = "marked end of life in known-apps.psd1 ($($rule.Note))" }
+                # behind both references: the reason names the newer one (the installer at hand, unless the catalogue knows a later version)
+                elseif ($libBehind -and (-not $rule.Latest -or (& $cmp $pk.Package.Version ('>= ' + $rule.Latest)) -eq 'Compliant')) { $verdict = 'Behind'; $reason = $libBehind }
                 elseif ($rule.Latest -and (& $cmp $r.Version ('>= ' + $rule.Latest)) -eq 'Below') { $verdict = 'Behind'; $reason = "latest known $($rule.Latest) (as of $($known.AsOf))" }
+                elseif ($libBehind) { $verdict = 'Behind'; $reason = $libBehind }
                 elseif ($behindFleet) { $verdict = 'Behind'; $reason = "a newer version ($fleetBest) is installed elsewhere in the fleet" }
                 else {
-                    $verdict = 'Current'; $reason = $(if ($rule.Latest) { 'at or above the latest known version' } else { 'no reference version in known-apps.psd1; nothing newer in the fleet' })
+                    $verdict = 'Current'; $reason = $(if ($rule.Latest) { 'at or above the latest known version' } elseif ($libState -eq 'Compliant') { "at or above the software library's version ($($pk.Package.Version), package '$($pk.Package.Id)')" } else { 'no reference version in known-apps.psd1; nothing newer in the fleet' })
                     if ($rule.CadenceMonths -and $hasDate) {
                         $age = ($now - $instDate).TotalDays / 30.4
-                        if ($age -gt $rule.CadenceMonths -and -not $rule.Latest) { $verdict = 'Stale'; $reason = ('installed {0:N0} months ago, product updates about every {1} months, no reference version to compare' -f $age, $rule.CadenceMonths) }
+                        if ($age -gt $rule.CadenceMonths -and -not $rule.Latest -and $libState -ne 'Compliant') { $verdict = 'Stale'; $reason = ('installed {0:N0} months ago, product updates about every {1} months, no reference version to compare' -f $age, $rule.CadenceMonths) }
                     }
                 }
+            } elseif ($libBehind) {
+                $verdict = 'Behind'; $reason = $libBehind
             } elseif ($behindFleet) {
                 $verdict = 'Behind'; $reason = "a newer version ($fleetBest) is installed elsewhere in the fleet"
+            } elseif ($libState -eq 'Compliant') {
+                $verdict = 'Current'; $reason = "at or above the software library's version ($($pk.Package.Version), package '$($pk.Package.Id)')"
             } elseif ($hasDate) {
                 # the blanket rule for products the catalogue does not know: age alone says whether updates are likely waiting
                 $age = ($now - $instDate).TotalDays / 30.4
@@ -907,10 +943,10 @@ function New-PatchingConsole {
 
     # software grid underneath the server grid
     $softPanel = New-Object System.Windows.Forms.Panel; $softPanel.Dock = 'Fill'
-    $softHead = New-GridHeader -Heading 'SOFTWARE ON THE SERVERS SHOWN' -Detail 'nothing collected yet - a status check lists every product and its currency' -Tip ('Verdicts against data\known-apps.psd1 and the rest of the fleet: Current / Behind / Stale / Ageing / End of life / Unknown. A product the table does not know counts as Stale after {0} months and Ageing after {1} (updates waiting, or unmaintained). Tick servers above to narrow the list; hover a row for the reason; the server''s page (double-click above) has its full list.' -f $script:Config.UnknownStaleMonths, $script:Config.UnknownAgeingMonths)
+    $softHead = New-GridHeader -Heading 'SOFTWARE ON THE SERVERS SHOWN' -Detail 'nothing collected yet - a status check lists every product and its currency' -Tip 'Currency verdicts against data\known-apps.psd1 and the fleet'
     # placed while the strip is still 200 px wide and anchored Right, so it keeps that distance from the right edge as the strip grows
     $showAll = New-Object System.Windows.Forms.CheckBox; $showAll.Text = 'Show all verdicts'; $showAll.AutoSize = $true; $showAll.Location = New-Object System.Drawing.Point(10, 4); $showAll.Anchor = 'Top, Right'
-    $script:Gui['Tips'].SetToolTip($showAll, 'Unticked: only products needing attention (Behind, Stale, Ageing, End of life). Ticked: Current and Unknown rows too.')
+    $script:Gui['Tips'].SetToolTip($showAll, 'Unticked: only products needing attention')
     $showAll.Add_CheckedChanged({ Update-SoftwareGrid })
     $softHead.Panel.Controls.Add($showAll); $script:Gui['SoftwareShowAll'] = $showAll
     # the detail text stops short of the tick box (a long line ran under it) and ends in "..." when it is cut
@@ -952,7 +988,7 @@ function New-PatchingConsole {
         Invoke-GuiAction -Name 'Open log' -ReadOnly -Action {
             if (-not (Test-Path -LiteralPath (Get-PatchLogPath))) { Write-PatchLog 'Log file created' 'INFO' }
             Start-Process notepad.exe -ArgumentList ('"{0}"' -f (Get-PatchLogPath)) } }))
-    $right.Controls.Add((New-GuiButton -Text 'Where do I get patches?' -X 240 -Y 236 -W 165 -ReadOnly -Tip 'Update history page -> KB number -> Microsoft Update Catalog -> \patches' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Where do I get patches?' -X 240 -Y 236 -W 165 -ReadOnly -Tip 'KB number -> Microsoft Update Catalog -> \patches' -OnClick {
         Invoke-GuiAction -Name 'Patch how-to' -ReadOnly -Action {
             if (-not (Test-GuiDialogAllowed 'The how-to window')) { return }
             $page = New-DetailsHtml -Title 'Where do I get patches?' -Subtitle 'do this on a machine that has internet, then copy the files into the patches sub-folders' -Console 'Patching' -Sections @(@{ Heading = ''; Html = (ConvertTo-HtmlFromNotes -Text $script:PatchHowTo) })
@@ -962,10 +998,10 @@ function New-PatchingConsole {
     # tasks on the servers.  The controls are placed after they are on the panel, so their widths (and the display scaling)
     # are known: a fixed position put the box over the text on a scaled screen.
     $auto = New-Object System.Windows.Forms.CheckBox; $auto.Text = 'Auto-check status every'; $auto.AutoSize = $true; $auto.Checked = [bool]$script:Config.AutoCheckInstalls
-    $script:Gui['Tips'].SetToolTip($auto, 'Ticked: after PATCH IT! the tool asks the installing servers at this interval and records each result as it lands. Unticked (now or later): the servers install on their own as SYSTEM tasks, their rows say INSTALLING, and "Check status" records the results whenever you come back - today or tomorrow, also after restarting the tool. Ticked again: the servers still INSTALLING are watched again.')
+    $script:Gui['Tips'].SetToolTip($auto, 'Ticked: the tool keeps asking the installing servers for results')
     $auto.Add_Click({ if ($this.Checked) { Request-PatchWatch } })   # a click only: the Settings tab setting the box starts nothing
     $every = New-Object System.Windows.Forms.NumericUpDown; $every.Minimum = 10; $every.Maximum = 3600; $every.Value = [math]::Min(3600, [math]::Max(10, [int]$script:Config.ProgressEverySec)); $every.Width = 64
-    $script:Gui['Tips'].SetToolTip($every, 'Seconds between checks - change it any time, also while a run is being watched. The default is ProgressEverySec (lib\01-Config.ps1).')
+    $script:Gui['Tips'].SetToolTip($every, 'Seconds between checks; can be changed while watching')
     $everyUnit = New-Object System.Windows.Forms.Label; $everyUnit.Text = 'seconds'; $everyUnit.AutoSize = $true
     $right.Controls.AddRange(@($auto, $every, $everyUnit))   # the 'come back later' part is the tool tip and the Help page: the row has no room for it
     # the window's font first: the panel is not under the form yet while the console is built, and a width measured
@@ -979,9 +1015,9 @@ function New-PatchingConsole {
     # them on each server before the install; the two wheat buttons under the Reboot row start or stop them by hand
     $agentBox = New-Object System.Windows.Forms.CheckBox; $agentBox.Text = 'Stop the Trellix Agent services first'; $agentBox.AutoSize = $true; $agentBox.Checked = [bool]$script:Config.StopTrellixAgentForInstall
     $agentBox.Font = $script:Gui['Form'].Font; $agentBox.Location = New-Object System.Drawing.Point(10, 314)
-    $script:Gui['Tips'].SetToolTip($agentBox, 'Ticked (the default): PATCH IT! sets the Trellix Agent services masvc and macmnsvc to Disabled and stops them on each server before the install, under the install''s change record - the field test saw installs fail and roll back with the agent running. A server where that fails is not installed. The Trellix Agent column then shows STOPPED (Disabled) in orange: after the reboot, press "Start Trellix Agent (ticked)". Unticked: the services are left as they are.')
+    $script:Gui['Tips'].SetToolTip($agentBox, 'Ticked: the Trellix Agent services are stopped before the install')
     $right.Controls.Add($agentBox); $script:Gui['TrellixStopBoxPatching'] = $agentBox
-    $btnPatch = New-GuiButton -Text 'PATCH IT!  (ticked KBs, ticked servers)' -X 10 -Y 342 -W 395 -H 50 -Colour 'Tomato' -Tip 'Runs the pre-flight, shows the plan, asks for the change record, then the pre-action confirmations (Settings tab)' -OnClick {
+    $btnPatch = New-GuiButton -Text 'PATCH IT!  (ticked KBs, ticked servers)' -X 10 -Y 342 -W 395 -H 50 -Colour 'Tomato' -Tip 'Pre-flight, the plan, the change record, then the confirmations' -OnClick {
         Invoke-GuiAction -Name 'Install' -Action {
             $servers = Get-CheckedServers; $patches = Get-CheckedPatches
             if ($servers.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server first.' -Icon 'Warning'; return }
@@ -994,7 +1030,7 @@ function New-PatchingConsole {
     $btnPatch.Font = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
     $right.Controls.Add($btnPatch)
 
-    $right.Controls.Add((New-GuiButton -Text 'STAGE ONLY  (ticked)' -X 10 -Y 400 -W 195 -H 34 -Colour 'LightSteelBlue' -Tip 'Copies the ticked patch files to C:\PatchStaging on the ticked servers ahead of the window and verifies them (SHA256). Nothing is installed; the cells then say READY (staged) and PATCH IT! skips the copy.' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'STAGE ONLY  (ticked)' -X 10 -Y 400 -W 195 -H 34 -Colour 'LightSteelBlue' -Tip 'Copies and verifies the ticked patches; nothing is installed' -OnClick {
         Invoke-GuiAction -Name 'Stage patches' -Action {
             $servers = Get-CheckedServers; $patches = Get-CheckedPatches
             if ($servers.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server first.' -Icon 'Warning'; return }
@@ -1002,35 +1038,35 @@ function New-PatchingConsole {
             $null = Copy-PatchToServers -ComputerName $servers -Patches $patches
         }
     }))
-    $right.Controls.Add((New-GuiButton -Text 'Reboot (ticked)' -X 210 -Y 400 -W 195 -H 34 -Colour 'Khaki' -Tip 'Fresh status first; only servers PENDING a reboot by default; refused while DISM is running.' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Reboot (ticked)' -X 210 -Y 400 -W 195 -H 34 -Colour 'Khaki' -Tip 'Fresh status first; only servers pending a reboot by default' -OnClick {
         Invoke-GuiAction -Name 'Reboot' -Action {
             $servers = Get-CheckedServers
             if ($servers.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server first.' -Icon 'Warning'; return }
             Restart-PatchedServers -ComputerName $servers
         }
     }))
-    $right.Controls.Add((New-GuiButton -Text 'Start Trellix Agent (ticked)' -X 10 -Y 440 -W 195 -H 30 -Colour 'Wheat' -Tip 'After the patching and the reboot: sets the Trellix Agent services masvc and macmnsvc to Automatic and starts them on the ticked servers - fresh status, a Yes/No naming the servers, the change record. The agent reports to ePO again from then on.' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Start Trellix Agent (ticked)' -X 10 -Y 440 -W 195 -H 30 -Colour 'Wheat' -Tip 'Sets masvc and macmnsvc to Automatic and starts them' -OnClick {
         Invoke-GuiAction -Name 'Trellix Agent start' -Action {
             $servers = Get-CheckedServers
             if ($servers.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server first.' -Icon 'Warning'; return }
             $null = Set-TrellixAgentOnServers -ComputerName $servers -Mode start
         }
     }))
-    $right.Controls.Add((New-GuiButton -Text 'Stop Trellix Agent (ticked)' -X 210 -Y 440 -W 195 -H 30 -Colour 'Wheat' -Tip 'By hand, what the box above PATCH IT! does before an install: sets the Trellix Agent services masvc and macmnsvc to Disabled and stops them on the ticked servers - fresh status, a Yes/No naming the servers, the change record. ePO hears nothing from them until they are started again.' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Stop Trellix Agent (ticked)' -X 210 -Y 440 -W 195 -H 30 -Colour 'Wheat' -Tip 'Sets masvc and macmnsvc to Disabled and stops them' -OnClick {
         Invoke-GuiAction -Name 'Trellix Agent stop' -Action {
             $servers = Get-CheckedServers
             if ($servers.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server first.' -Icon 'Warning'; return }
             $null = Set-TrellixAgentOnServers -ComputerName $servers -Mode stop
         }
     }))
-    $right.Controls.Add((New-GuiButton -Text 'Test WinRM port (ticked)' -X 10 -Y 476 -W 195 -H 30 -Colour 'LightSkyBlue' -ReadOnly -Tip ('Test-WSMan on the ticked servers: is {0} open and answering? Needs no credentials. Works during an install.' -f (Get-WinRMPortText)) -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Test WinRM port (ticked)' -X 10 -Y 476 -W 195 -H 30 -Colour 'LightSkyBlue' -ReadOnly -Tip ('Test-WSMan: is {0} answering? No credentials needed' -f (Get-WinRMPortText)) -OnClick {
         Invoke-GuiAction -Name 'WinRM test' -ReadOnly -Action {
             $servers = Get-CheckedServers
             if ($servers.Count -eq 0) { Show-GuiNotice 'Tick at least one server first.'; return }
             foreach ($s in $servers) { Test-ServerWinRM -ComputerName $s | Out-Null }
         }
     }))
-    $right.Controls.Add((New-GuiButton -Text 'Analyse a failure (ticked)' -X 210 -Y 476 -W 195 -H 30 -Colour 'LightSkyBlue' -ReadOnly -Tip 'After a failed or rolled-back install: reads the server''s own logs (result files, DISM, CBS, Setup events, update history, boot events, Solidcore) and says what they point at. Read-only.' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Analyse a failure (ticked)' -X 210 -Y 476 -W 195 -H 30 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Reads the server''s own logs after a failed install (read-only)' -OnClick {
         Invoke-GuiAction -Name 'Failure analysis' -ReadOnly -Action {
             $servers = Get-CheckedServers
             if ($servers.Count -eq 0) { Show-GuiNotice 'Tick the server(s) whose install failed first.'; return }
@@ -1042,7 +1078,7 @@ function New-PatchingConsole {
     }))
     $right.Controls.Add((New-GuiButton -Text 'Open reports folder' -X 210 -Y 512 -W 195 -H 30 -ReadOnly -OnClick { Invoke-GuiAction -Name 'Open reports folder' -ReadOnly -Action { Open-ReportFolder } }))
 
-    $right.Controls.Add((New-GuiButton -Text 'Change log' -X 10 -Y 548 -W 195 -H 30 -ReadOnly -Tip 'Every install, removal and reboot with its change record (changes\change-log.csv), newest first' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Change log' -X 10 -Y 548 -W 195 -H 30 -ReadOnly -Tip 'Every install, removal and reboot with its change record' -OnClick {
         Invoke-GuiAction -Name 'Change log' -ReadOnly -Action { Show-ChangeLogWindow } }))
     $right.Controls.Add((New-GuiButton -Text 'Help' -X 210 -Y 548 -W 195 -H 30 -ReadOnly -Tip 'A page with an example of every row colour, column, KB cell and button' -OnClick {
         Invoke-GuiAction -Name 'Patching help' -ReadOnly -Action { Show-ConsoleHelp -Console 'Patching' -Html (Get-PatchingHelpHtml) } }))
@@ -1083,19 +1119,19 @@ function New-PatchingConsole {
     }))
     # the saved data of the ticked servers, wiped (Remove-ServerResults): every collector's result and the results file - the
     # consoles show them as not checked until the next check
-    $toolbar.Controls.Add((New-GuiButton -Text 'Clear saved data (ticked)' -X 702 -Y 13 -W 170 -H 30 -Tip 'Forgets everything held here for the ticked servers (every result and the state file); the servers are not touched.' -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'Clear saved data (ticked)' -X 702 -Y 13 -W 170 -H 30 -Tip 'Forgets the saved results of the ticked servers' -OnClick {
         Invoke-GuiAction -Name 'Clear saved data' -Action { Clear-ServerResultsDialog } }))
     $toolbar.Controls.Add((New-GuiButton -Text 'Tick all' -X 900 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['ServerList'] -Checked $true }))
     $toolbar.Controls.Add((New-GuiButton -Text 'Untick all' -X 975 -Y 8 -W 75 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['ServerList'] -Checked $false }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Set credentials' -X 1055 -Y 8 -W 105 -Tip 'Foreground Get-Credential prompt. Only needed if your login is refused.' -OnClick { Invoke-GuiAction -Name 'Set credentials' -Action { Get-PatcherCredential -Reason 'alternate account for WinRM' | Out-Null } }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Set credentials' -X 1055 -Y 8 -W 105 -Tip 'Only needed if your login is refused' -OnClick { Invoke-GuiAction -Name 'Set credentials' -Action { Get-PatcherCredential -Reason 'alternate account for WinRM' | Out-Null } }))
     $toolbar.Controls.Add((New-GuiButton -Text 'Clear credentials' -X 1165 -Y 8 -W 115 -OnClick { Invoke-GuiAction -Name 'Clear credentials' -Action { Clear-PatcherCredential } }))
     # servers the hub cannot reach over WinRM (winrm: no): a small block of their own at the end of the row, in the order
     # of the work - mark them, write the copy they run themselves, take their results in (fits the 1600 px window)
-    $toolbar.Controls.Add((New-GuiButton -Text 'Mark winrm: no (ticked)' -X 1290 -Y 5 -W 255 -H 22 -Colour 'LightGreen' -Tip 'Writes "; winrm: no" on the ticked servers'' lines: never called over WinRM again. All ticked already marked: the mark comes off.' -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'Mark winrm: no (ticked)' -X 1290 -Y 5 -W 255 -H 22 -Colour 'LightGreen' -Tip 'Writes "; winrm: no" on the ticked servers'' lines, or takes it off' -OnClick {
         Invoke-GuiAction -Name 'Mark winrm: no' -Action { Set-RemoteDisabledMarkDialog } }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Copy for a server' -X 1290 -Y 31 -W 150 -H 22 -Colour 'LightGreen' -Tip 'One ready-to-carry copy of this toolkit per ticked server marked "winrm: no" (nothing ticked = every marked server), in state\server-copies\<server>-local-winrm; it starts as the spoke by itself.' -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'Copy for a server' -X 1290 -Y 31 -W 150 -H 22 -Colour 'LightGreen' -Tip 'A ready-to-carry copy of the toolkit per marked server' -OnClick {
         Invoke-GuiAction -Name 'Copy for a server' -Action { New-ServerCopyDialog } }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Import results' -X 1445 -Y 31 -W 100 -H 22 -Colour 'LightGreen' -Tip 'Takes results files written by such copies (state\servers\<computer>.xml) into every console.' -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'Import results' -X 1445 -Y 31 -W 100 -H 22 -Colour 'LightGreen' -Tip 'Takes the results files such copies wrote into every console' -OnClick {
         Invoke-GuiAction -Name 'Import results' -Action { Import-ResultsFilesDialog } }))
     # the row count sits above the grid (see the Panel1 block): on the toolbar it was clipped at the default window width
 

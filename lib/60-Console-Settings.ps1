@@ -234,9 +234,9 @@ function Add-SettingRows {
     $colW = 510
     $i = 0
     foreach ($s in $Specs) {
-        # the row carries a short label; the longer explanation (a spec's Tip) goes in the tool tip, so nothing wraps or is cut
-        $tipText = ('{0}  ({1} in lib\01-Config.ps1)' -f $s.Label, $s.Key)
-        if ($s.Tip) { $tipText = ('{0}  ({1} in lib\01-Config.ps1)' -f $s.Tip, $s.Key) }
+        # the row carries a short label; its tool tip adds a few words (a spec's Tip) and the setting's name - the manual explains each
+        $tipText = ('{0}  ({1})' -f $s.Label, $s.Key)
+        if ($s.Tip) { $tipText = ('{0}  ({1})' -f $s.Tip, $s.Key) }
         if ($s.Type -eq 'list' -and ($i % 2) -eq 1) { $i++ }   # a list setting takes a row of its own: a wide box for its items
         $x = 10 + ($i % 2) * $colW; $y = $Top + [math]::Floor($i / 2) * 30
         if ($s.Type -eq 'bool') {
@@ -329,7 +329,7 @@ function New-SettingsConsole {
     $l = New-Object System.Windows.Forms.Label; $l.Text = 'Change management system:'; $l.Location = New-Object System.Drawing.Point(12, 31); $l.AutoSize = $true; $l.Font = $regular; $b2.Controls.Add($l)
     $combo = New-Object System.Windows.Forms.ComboBox; $combo.DropDownStyle = 'DropDown'; $combo.Location = New-Object System.Drawing.Point(200, 28); $combo.Width = 200; $combo.Font = $regular; $combo.MaxLength = 60
     $combo.Add_TextChanged({ Set-SettingsDirty })
-    $script:Gui['Tips'].SetToolTip($combo, 'Written into every change record, so it is not picked each time. Empty = typed or picked in the form.')
+    $script:Gui['Tips'].SetToolTip($combo, 'Written into every change record; empty = picked in the form')
     $b2.Controls.Add($combo); $script:Gui['SettingsSystemCombo'] = $combo
     $l = New-Object System.Windows.Forms.Label; $l.Text = 'Systems offered in the form (; between):'; $l.Location = New-Object System.Drawing.Point(430, 31); $l.AutoSize = $true; $l.Font = $regular; $b2.Controls.Add($l)
     $sys = New-Object System.Windows.Forms.TextBox; $sys.Location = New-Object System.Drawing.Point(680, 28); $sys.Width = 345; $sys.Font = $regular
@@ -370,9 +370,9 @@ function New-SettingsConsole {
 
     # ---- toolbar ----
     $toolbar = New-ConsoleToolbar -Tab $tab -Height 70
-    $toolbar.Controls.Add((New-GuiButton -Text 'Save settings' -X 8 -Y 8 -W 130 -H 34 -Colour 'LightGreen' -Tip 'Shows what changes, then saves it in settings\settings.json and uses it at once' -OnClick { Invoke-GuiAction -Name 'Save settings' -Action { Invoke-SettingsSave } }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Save settings' -X 8 -Y 8 -W 130 -H 34 -Colour 'LightGreen' -Tip 'Shows what changes, then saves and applies it' -OnClick { Invoke-GuiAction -Name 'Save settings' -Action { Invoke-SettingsSave } }))
     $toolbar.Controls.Add((New-GuiButton -Text 'Undo unsaved changes' -X 143 -Y 8 -W 165 -H 34 -ReadOnly -Tip 'The page shows the settings in use again' -OnClick { Invoke-GuiAction -Name 'Undo settings changes' -ReadOnly -Action { Set-SettingsForm -Values (Get-SettingsLive) } }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Restore defaults...' -X 313 -Y 8 -W 140 -H 34 -Tip 'Fills the page with the defaults of lib\01-Config.ps1 - saved only with Save settings' -OnClick { Invoke-GuiAction -Name 'Restore default settings' -Action { Restore-SettingsDefaults } }))
+    $toolbar.Controls.Add((New-GuiButton -Text 'Restore defaults...' -X 313 -Y 8 -W 140 -H 34 -Tip 'Fills the page with the defaults; saved only with Save settings' -OnClick { Invoke-GuiAction -Name 'Restore default settings' -Action { Restore-SettingsDefaults } }))
     $toolbar.Controls.Add((New-GuiButton -Text 'Open settings folder' -X 458 -Y 8 -W 150 -H 34 -ReadOnly -Tip 'settings\ in Explorer' -OnClick {
         Invoke-GuiAction -Name 'Open settings folder' -ReadOnly -Action {
             $folder = Split-Path -Path $script:Config.SettingsFile -Parent

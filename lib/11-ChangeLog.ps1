@@ -247,7 +247,7 @@ function Request-ChangeRecord {
         if ($policy -eq 'Maintenance') {
             $maint = New-Object System.Windows.Forms.CheckBox
             $maint.Text = 'Maintenance activity - no change required'; $maint.AutoSize = $true
-            if ($script:Gui['Tips']) { $script:Gui['Tips'].SetToolTip($maint, 'Recorded as MAINTENANCE: no change reference needed; the other fields marked * still are') }
+            if ($script:Gui['Tips']) { $script:Gui['Tips'].SetToolTip($maint, 'Recorded as MAINTENANCE: no change reference needed') }
             $maint.Location = New-Object System.Drawing.Point(270, ($y + 40)); $maint.Tag = $fields['Ref']
             $maint.Add_CheckedChanged({ $this.Tag.Enabled = -not $this.Checked })
             if ($last -and $last.Maintenance) { $maint.Checked = $true }

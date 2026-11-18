@@ -542,7 +542,9 @@ function New-ConsoleToolbar {
 }
 
 function New-DialogButtonBar {
-    # A bottom bar with right-aligned buttons.  $Buttons: @{ Text; Result (optional); Width (optional) }, left to right.
+    # A bottom bar with right-aligned buttons.  $Buttons: @{ Text; Result (optional); Width, Colour (optional) }, left to right.
+    # Each wears the same flat face as the buttons of the tabs (grey unless a colour is asked for): left to the Windows
+    # theme, a button of a pop-up window can draw as bare text and read as a label.
     param($Dialog, [object[]]$Buttons, [int]$Height = 44, [string]$Hint = '')
     $bar = New-Object System.Windows.Forms.Panel
     $bar.Dock = 'Bottom'; $bar.Height = $Height; $bar.Width = $Dialog.ClientSize.Width
@@ -559,6 +561,8 @@ function New-DialogButtonBar {
         $x -= $w
         $b = New-Object System.Windows.Forms.Button
         $b.Text = [string]$spec.Text; $b.Size = New-Object System.Drawing.Size($w, 30); $b.Location = New-Object System.Drawing.Point($x, 7); $b.Anchor = 'Top,Right'
+        $face = [string]$spec.Colour; if (-not $face) { $face = 'Gainsboro' }
+        Set-GuiButtonColour -Button $b -Colour $face
         if ($spec.Result) { $b.DialogResult = [string]$spec.Result }
         $bar.Controls.Add($b)
         $made = @($b) + $made

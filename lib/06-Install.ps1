@@ -777,7 +777,7 @@ function Watch-PatchRuns {
         return $results
     }
     $button = $script:Gui['StopButton']
-    if ($button) { $script:Gui['StopOwner'] = 'install watch'; $script:Gui['StopRequested'] = $false; $button.Enabled = $true; $button.Text = 'Let the servers go'; $button.ToolTipText = 'Stop watching: the servers keep installing, their rows say INSTALLING, and a later status check records the results'; $button.Visible = $true }
+    if ($button) { $script:Gui['StopOwner'] = 'install watch'; $script:Gui['StopRequested'] = $false; $button.Enabled = $true; $button.Text = 'Let the servers go'; $button.ToolTipText = 'Stop watching: the servers keep installing'; $button.Visible = $true }
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     $lastPoll = -100000; $lastDetail = 0
     try {
@@ -813,7 +813,7 @@ function Watch-PatchRuns {
             if ($script:Gui['Form']) { [System.Windows.Forms.Application]::DoEvents() }
             Start-Sleep -Milliseconds 300
         }
-    } finally { $script:Gui['StopOwner'] = $null; if ($button) { $button.Visible = $false; $button.Text = 'Stop waiting'; $button.ToolTipText = 'Give up on the servers that have not answered yet (read-only checks only; nothing is changed on them)' } }
+    } finally { $script:Gui['StopOwner'] = $null; if ($button) { $button.Visible = $false; $button.Text = 'Stop waiting'; $button.ToolTipText = 'Stop waiting for the servers that have not answered (read-only)' } }
     if ($open.Count -gt 0 -and $watch.Elapsed.TotalMinutes -ge $script:Config.InstallTimeoutMin) { Write-PatchLog ("Stopped watching after {0} min: {1} server(s) still installing - their rows say INSTALLING; 'Check status' finishes the record later" -f $script:Config.InstallTimeoutMin, $open.Count) 'WARN' }
     return $results
 }

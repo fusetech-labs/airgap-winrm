@@ -43,7 +43,8 @@ function New-Check {
         [Parameter(Mandatory = $true)][scriptblock]$Test,    # param($c) -> a verdict object (see Pass / Fail ...)
         [string]$Fix = '',
         [string]$Why = '',
-        [string]$Applies = 'all',                            # 'all', 'dc', 'member', 'internet-facing' (NotApplicable otherwise)
+        [string]$Applies = 'all',                            # 'all', 'dc', 'member', 'internet-facing' (NotApplicable otherwise); 'domain' and 'forest' =
+                                                             # once per domain or forest, on the domain controller that holds its PDC emulator role
         $Data = $null                                        # anything the -Test block needs to know about itself: it reads $c.Check.Data
     )
     # A duplicate id would let one definition silently replace another (a data-file entry could shadow a code
@@ -93,6 +94,15 @@ function Test-UnreadEvidence {
     return ([string]$Evidence -match 'not collected|could not( be)? read|not readable|\bnot read\b')
 }
 
+function Test-BroadPrincipalSid {
+    # Does this identifier stand for nearly everybody?  Everyone, Authenticated Users, Anonymous, INTERACTIVE, NETWORK,
+    # BUILTIN\Users and Guests, a domain's Domain Users, Guests and Computers.  By identifier, because a name is translated
+    # on a server in another language.  The collectors that run on a server carry the same list themselves (Settings,
+    # Directory, Roles - a script block sent to a server cannot call this function): the five copies are held equal.
+    param([string]$Sid)
+    return (@('S-1-1-0', 'S-1-5-11', 'S-1-5-7', 'S-1-5-4', 'S-1-5-2', 'S-1-5-32-545', 'S-1-5-32-546') -contains $Sid -or $Sid -match '^S-1-5-21-.+-(513|514|515)$')
+}
+
 function Invoke-Checks {
     # Runs all checks of one console for one server.
     #   $Resolve (optional) is called with each finished row and may change Verdict / Light / Note
@@ -107,27 +117,40 @@ function Invoke-Checks {
     # Check = the check being run (so a data-driven test can read its own definition from $c.Check.Data).
     # Tests are plain script blocks on purpose: a closure (GetNewClosure) runs in its own module scope and
     # cannot see the toolkit's functions, so a check must get what it needs through $c instead.
-    $c = [pscustomobject]@{ Server = $Server; Status = $null; Inventory = $null; Health = $null; Agents = $null; Settings = $null; SecurityPolicy = $null; Gpo = $null; Impact = $null; Licensing = $null; S = @{}; Check = $null }
-    foreach ($name in 'Status', 'Inventory', 'Health', 'Agents', 'Settings', 'SecurityPolicy', 'Gpo', 'Impact', 'Licensing') {
+    $c = [pscustomobject]@{ Server = $Server; Status = $null; Inventory = $null; Health = $null; Agents = $null; Settings = $null; SecurityPolicy = $null; Gpo = $null; Impact = $null; Licensing = $null; Directory = $null; Roles = $null; S = @{}; Check = $null }
+    foreach ($name in 'Status', 'Inventory', 'Health', 'Agents', 'Settings', 'SecurityPolicy', 'Gpo', 'Impact', 'Licensing', 'Directory', 'Roles') {
         $c.$name = Get-CollectorResult -Name $name -Server $Server
     }
     $sets = @()
     if ($c.Settings -and $c.Settings.Reachable) { $sets += , @($c.Settings.Lines) }
     if ($c.SecurityPolicy -and $c.SecurityPolicy.Reachable) { $sets += , @($c.SecurityPolicy.Lines) }
+    if ($c.Directory -and $c.Directory.Reachable) { $sets += , @($c.Directory.Lines) }   # the "AD." keys of a domain controller (48-Directory.ps1)
+    if ($c.Roles -and $c.Roles.Reachable) { $sets += , @($c.Roles.Lines) }               # the "SQL." and "CA." keys of a server's roles (49-ServerRoles.ps1)
     if ($sets.Count -gt 0) { $c.S = ConvertTo-SettingsTable -LineSets $sets }
     $class = Get-ServerAttribute -Name $Server -Key 'class'   # "; class: ..." on the server's line, else the group's "# class:"
     # The Security console can also mark groups as internet-facing in its profile.
     if (Get-Command -Name Get-ServerClass -ErrorAction SilentlyContinue) { $class = Get-ServerClass -Name $Server }
-    # Domain controller?  The Settings collector says so directly (Win32_ComputerSystem.DomainRole); the
-    # Inventory's feature list is the fallback when only that collector has run.
-    $isDc = ([string]$c.S['IsDomainController'] -eq 'True')
-    if (-not $isDc -and $c.Inventory -and $c.Inventory.Reachable) { $isDc = @($c.Inventory.Features -match '^AD-Domain-Services\|').Count -gt 0 }
+    # Domain controller?  The Settings collector says so directly (Win32_ComputerSystem.DomainRole), and so does the
+    # Directory collector (it reads a domain controller only); the Inventory's feature list is the fallback when only
+    # that collector has run.  $dcKnown = one of them has answered.
+    $adRead = [string]$c.S['AD.Read']
+    $isDc = ([string]$c.S['IsDomainController'] -eq 'True') -or ($adRead -and $adRead -ne 'NotDomainController')
+    # (@() round the list first: -match on a single string answers True or False, and @($false) counts as one)
+    # The Inventory says it only when its feature list was read: an empty one, or one that failed, says nothing either way
+    # (the rule of Test-DomainControllerKnown, 48-Directory.ps1) - "not known" must not read as "not a domain controller".
+    $invKnown = [bool]($c.Inventory -and $c.Inventory.Reachable -and @($c.Inventory.Features).Count -gt 0 -and @(@($c.Inventory.Features) -match '^ERROR\|').Count -eq 0)
+    if (-not $isDc -and $invKnown) { $isDc = @(@($c.Inventory.Features) -match '^AD-Domain-Services\|').Count -gt 0 }
+    $dcKnown = [bool]($c.S.ContainsKey('IsDomainController') -or $adRead -or $invKnown)
 
     foreach ($chk in (Get-Checks -Console $Console)) {
         $verdict = 'Error'; $evidence = ''; $items = @()
         $c.Check = $chk
         $missing = @($chk.Needs | Where-Object { $r = $c.$_; (-not $r) -or (-not $r.Reachable) })
-        if ($missing.Count -gt 0) {
+        $dcOnly = @('dc', 'domain', 'forest') -contains $chk.Applies
+        if ($dcOnly -and $dcKnown -and -not $isDc) {
+            # known not to be a domain controller: said as such, whether or not the check's own collector was asked there
+            $verdict = 'NotApplicable'; $evidence = 'not a domain controller'
+        } elseif ($missing.Count -gt 0) {
             $never = @($missing | Where-Object { -not $c.$_ })
             if ($never.Count -eq $missing.Count) {
                 # never asked on this server (another console's check filled the rest of the table): no verdict and grey -
@@ -138,8 +161,13 @@ function Invoke-Checks {
                 $r0 = $c.($missing[0])
                 if ($r0 -and $r0.Error) { $evidence += " ($($r0.Error))" }
             }
-        } elseif ($chk.Applies -eq 'dc' -and -not $isDc) {
+        } elseif ($dcOnly -and -not $isDc) {
             $verdict = 'NotApplicable'; $evidence = 'not a domain controller'
+        } elseif ($chk.Applies -ne 'dc' -and $dcOnly -and [string]$c.S['AD.IsPdc'] -eq 'False') {
+            # the domain (and the forest) is read and judged once, not once per domain controller
+            $verdict = 'NotApplicable'; $evidence = ('judged once for the domain, on the domain controller that holds its PDC emulator role ({0})' -f $(if ($c.S['AD.Pdc']) { [string]$c.S['AD.Pdc'] } else { 'not named' }))
+        } elseif ($chk.Applies -eq 'forest' -and [string]$c.S['AD.IsRootDomain'] -eq 'False') {
+            $verdict = 'NotApplicable'; $evidence = ('judged once for the forest, on the PDC emulator of its root domain ({0})' -f $(if ($c.S['AD.ForestRoot']) { [string]$c.S['AD.ForestRoot'] } else { 'not named' }))
         } elseif ($chk.Applies -eq 'member' -and $isDc) {
             $verdict = 'NotApplicable'; $evidence = 'domain controller'
         } elseif ($chk.Applies -eq 'internet-facing' -and $class -ne 'internet-facing') {

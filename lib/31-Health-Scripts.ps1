@@ -3,7 +3,7 @@
 #  Airgap WinRM Toolkit  -  Copyright Fusetech
 #  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # ---------------------------------------------------------------------
-#  "Scripts and tasks (ticked)" on the Health console runs the Scripts collector on the ticked servers.  On each
+#  "Scripts and tasks audit (ticked)" on the Health console runs the Scripts collector on the ticked servers.  On each
 #  server, read-only: every scheduled task outside \Microsoft\ (state, author, the account and run level, the
 #  triggers in words, the action, the script it runs, last run and result), and every PowerShell script (.ps1,
 #  .psm1) under the folders named on the Settings tab (every fixed drive when none is named).  Each script is parsed

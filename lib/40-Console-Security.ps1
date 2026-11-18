@@ -280,6 +280,8 @@ function Invoke-SecurityAudit {
     Get-ServerSecurityPolicy -ComputerName $ComputerName | Out-Null
     Get-ServerGpo -ComputerName $ComputerName | Out-Null   # which GPO sets what: the GPO recommendations page (45-Security-Gpo.ps1)
     Get-ServerLicensing -ComputerName $ComputerName | Out-Null   # activation, KMS, RD Licensing CALs, RD Session Hosts: the SEC-LIC checks (47-Licensing.ps1; reported by the Software console)
+    Get-ServerRoles -ComputerName $ComputerName | Out-Null       # SQL Server and Certificate Services, where a server has them: the SEC-SQL and SEC-CA checks (49-ServerRoles.ps1)
+    Get-ServerDirectory -ComputerName $ComputerName | Out-Null   # the domain controllers among them, and the domain on its PDC emulator: the SEC-ADC and SEC-AD checks (48-Directory.ps1)
     Clear-SecurityRowCache
 }
 
@@ -563,13 +565,13 @@ New-Check -Id 'SEC-CRD-01' -Console 'Security' -Group 'Credentials' -Title 'Loca
     -Test { param($c) if ([string]$c.S['LAPS.Managed'] -eq 'True') { return (Pass "LAPS: Windows LAPS backup directory $($c.S['LAPS.Windows.BackupDirectory']) / legacy AdmPwd $($c.S['LAPS.Legacy.Enabled'])") }; return (Fail 'neither Windows LAPS nor legacy LAPS is configured') } `
     -Fix 'Deploy Windows LAPS (GPO: System > LAPS > Configure password backup directory = Active Directory) so every local administrator password is unique and rotated (ISM-1685).'
 
-New-Check -Id 'SEC-CRD-02' -Console 'Security' -Group 'Credentials' -Title 'Local Administrators group membership' -Ism 'ISM-0445', 'ISM-1508' -ML 1 -Severity 'High' -Needs 'Settings' `
+New-Check -Id 'SEC-CRD-02' -Console 'Security' -Group 'Credentials' -Title 'Local Administrators group membership' -Ism 'ISM-1508' -ML 3 -Severity 'High' -Needs 'Settings' `
     -Test {
         param($c)
         $raw = [string]$c.S['LocalAdmins']
         if ($raw -like 'ERROR:*') { return (Warn ('the Administrators group could not be read - ' + $raw.Substring(7).Trim())) }
         $members = @(($raw -split ';') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-        if ($members.Count -eq 0) { return (Warn 'no member of the Administrators group was read (the group always holds at least the built-in Administrator)') }
+        if ($members.Count -eq 0) { return (Warn 'the members of the Administrators group could not be read (the group always holds at least the built-in Administrator)') }   # "could not be read": kept out of the compliance figures (Test-UnreadEvidence)
         # judged on the name after the last backslash: net.exe prints NT AUTHORITY\Authenticated Users, CORP\Domain Computers ...
         $broad = @('Everyone', 'Authenticated Users', 'Users', 'Domain Users', 'Domain Computers', 'INTERACTIVE', 'NETWORK', 'ANONYMOUS LOGON', 'Guests', 'Domain Guests')
         $bad = @($members | Where-Object { $broad -contains ($_ -split '\\')[-1] })
@@ -578,15 +580,40 @@ New-Check -Id 'SEC-CRD-02' -Console 'Security' -Group 'Credentials' -Title 'Loca
         return (Pass "$($members.Count) members: $($members -join ', ')")
     } -Fix 'Remove broad groups; keep Administrators, the domain server-admins group and the LAPS-managed local account. Use dedicated privileged accounts (ISM-0445).'
 
-New-Check -Id 'SEC-CRD-03' -Console 'Security' -Group 'Credentials' -Title 'Built-in Administrator renamed or disabled' -Ism 'ISM-0383' -Severity 'Medium' -Needs 'Settings' `
+New-Check -Id 'SEC-CRD-03' -Console 'Security' -Group 'Credentials' -Title 'Built-in Administrator is disabled (an account of your own is used instead)' -Ism 'ISM-0383' -Severity 'Medium' -Needs 'Settings' `
+    -Why 'The built-in Administrator is the same account on every Windows server - the same identifier (-500) whatever it is renamed to - so it is the first one an attacker tries. The ISM has default accounts changed, disabled or removed: local administration runs on an account of your own (its name does not matter) and the built-in one is disabled.' `
     -Test {
         param($c)
         $name = [string]$c.S['Administrator.Name']; $on = [string]$c.S['Administrator.Enabled']
-        if (-not $name) { return (Warn 'built-in Administrator (SID -500) not read') }
-        if ($on -eq 'False') { return (Pass "built-in Administrator ('$name') is disabled") }
-        if ($name -ne 'Administrator') { return (Pass "built-in Administrator renamed to '$name' (enabled)") }
-        return (Warn "built-in Administrator is enabled and still named 'Administrator'")
-    } -Fix 'GPO: Security Options > Accounts: Rename administrator account, or Accounts: Administrator account status = Disabled (LAPS can manage a renamed account).'
+        $onDc = ([string]$c.S['IsDomainController'] -eq 'True' -or [string]$c.S['LocalAccounts.Read'] -eq 'DomainController')
+        if ($onDc) {
+            # a domain controller has no local accounts: the account is the domain's own built-in Administrator, read with
+            # the domain on its PDC emulator (the Directory collector's Admin500: name|enabled|password days|logon days)
+            $a = ([string]$c.S['AD.Admin500']) -split '\|'
+            if ($a.Count -ge 2 -and $a[0] -and $a[0] -notlike 'ERROR:*') { $name = $a[0]; $on = $(if ($a[1] -eq '1') { 'True' } else { 'False' }) }
+            if (-not $name -and [string]$c.S['AD.IsPdc'] -eq 'False') { return (NotApplicable ('the domain''s built-in Administrator is judged once for the domain, on the domain controller that holds its PDC emulator role ({0})' -f $(if ($c.S['AD.Pdc']) { [string]$c.S['AD.Pdc'] } else { 'not named' }))) }
+            if (-not $name) { return (Warn 'the domain''s built-in Administrator (identifier -500) was not read - audit the domain controller again: the directory is read there from version 2.3 on') }
+        }
+        if (-not $name) { return (Warn 'built-in Administrator (identifier -500) not read') }
+        $called = "'$name'"; if ($name -ne 'Administrator') { $called = "'$name', renamed" }
+        if ($onDc) {
+            # the domain's break glass account - renamed is enough there
+            if ($on -eq 'False') { return (Pass "the domain's built-in Administrator ($called) is disabled") }
+            if ($name -ne 'Administrator') { return (Pass "the domain's built-in Administrator is renamed to '$name' (enabled)") }
+            return (Warn "the domain's built-in Administrator is enabled and still named 'Administrator'")
+        }
+        # a member or stand-alone server: enabled is the finding, whatever the account is called.  The accounts used in
+        # its place are named where the local users were read (a result from before 2.3 has no such list)
+        $instead = ''
+        $la = Get-LocalAccounts -Settings $c.S
+        if ($la.Read -eq 'OK') {
+            $own = @($la.Users | Where-Object { $_.Enabled -and $_.Admin -and [string]$_.Rid -ne '500' } | ForEach-Object { [string]$_.Name })
+            if ($own.Count -gt 0) { $instead = ('; local administrator account(s) of your own: {0}' -f ($own -join ', ')) } else { $instead = '; no other enabled local administrator account' }
+        }
+        if ($on -eq 'False') { return (Pass ("the built-in Administrator ($called) is disabled" + $instead)) }
+        if ($name -ne 'Administrator') { return (Fail ("the built-in Administrator is ENABLED under the name '$name' - a rename does not change which account it is (identifier -500)" + $instead)) }
+        return (Fail ('the built-in Administrator is ENABLED' + $instead))
+    } -Fix 'Give the server a local administrator account of your own (any name) and put it under Windows LAPS (GPO: System > LAPS > Name of administrator account to manage). Only then: GPO Security Options > Accounts: Administrator account status = Disabled. A rename alone leaves the built-in account in use. On a domain controller the account is the domain''s break glass account: rename it and keep its password managed (ISM-1953).'
 
 New-Check -Id 'SEC-CRD-04' -Console 'Security' -Group 'Credentials' -Title 'Services do not run as plain domain user accounts' -Ism 'ISM-1619' -Severity 'Low' -Needs 'Inventory' `
     -Test {
@@ -604,6 +631,161 @@ New-Check -Id 'SEC-CRD-04' -Console 'Security' -Group 'Credentials' -Title 'Serv
         return (Warn ("{0} service(s) on plain domain accounts (gMSA expected, ISM-1619)" -f $plain.Count) -Items $plain)
     } -Fix 'Create group Managed Service Accounts (New-ADServiceAccount) and point the services at them; a gMSA name ends with $ and needs no password management.'
 
+# ---------------------------------------------------------------------
+#  LOCAL ACCOUNTS (SEC-ACC-*): the server's own users and groups, as the
+#  Settings collector lists them (LocalUsers, LocalGroups - ADSI, no module
+#  loaded; Get-LocalAccounts in 30-Console-Health.ps1 makes objects of
+#  them).  Not on a domain controller: it has no local accounts, and its
+#  directory is a different audit.  The built-in Administrator itself is
+#  judged by SEC-CRD-03 (enabled = a finding, whatever it is called) and
+#  SEC-CRD-01 (LAPS); the age of its password, like that of every other
+#  local administrator account, by SEC-ACC-06.
+#  A list that was not read is never a pass (Get-LocalAccountsUnread).
+# ---------------------------------------------------------------------
+New-Check -Id 'SEC-ACC-01' -Console 'Security' -Group 'Local accounts' -Title 'Guest and the other default accounts are disabled' -Ism 'ISM-0383' -Severity 'High' -Needs 'Settings' -Applies 'member' `
+    -Why 'Guest, DefaultAccount and WDAGUtilityAccount exist on every Windows server under the same name and well-known identifier; enabled, one of them is an account nobody owns.' `
+    -Test {
+        param($c)
+        $la = Get-LocalAccounts -Settings $c.S
+        if ($la.Read -ne 'OK') { return (Get-LocalAccountsUnread $la.Read) }
+        $known = @{ '501' = 'Guest'; '503' = 'DefaultAccount'; '504' = 'WDAGUtilityAccount' }
+        $items = @(); $on = @()
+        foreach ($u in @($la.Users | Where-Object { $known.ContainsKey([string]$_.Rid) })) {
+            $what = $known[[string]$u.Rid]; $shown = [string]$u.Name
+            if ($shown -ne $what) { $shown = ('{0} (the {1} account, renamed)' -f $u.Name, $what) }
+            $items += ('{0}, identifier -{1}: {2}' -f $shown, $u.Rid, $(if ($u.Enabled) { 'ENABLED' } else { 'disabled' }))
+            if ($u.Enabled) { $on += $u.Name }
+        }
+        if ($on.Count -gt 0) { return (Fail ('enabled: {0}' -f ($on -join ', ')) -Items $items) }
+        if ($items.Count -eq 0) { return (Pass 'none of Guest, DefaultAccount and WDAGUtilityAccount is on this server') }
+        return (Pass ('{0} default account(s), each disabled' -f $items.Count) -Items $items)
+    } -Fix 'Disable the account: GPO Security Options > Accounts: Guest account status = Disabled; for the others, Computer Management > Local Users and Groups > the account > Account is disabled (a change - use a change record).'
+
+New-Check -Id 'SEC-ACC-02' -Console 'Security' -Group 'Local accounts' -Title 'Every enabled local account must have a password' -Ism 'ISM-0421', 'ISM-1557', 'ISM-0422' -Severity 'High' -Needs 'Settings' -Applies 'member' `
+    -Why 'An account marked "password not required" may have an empty password whatever the password policy says: the minimum length does not apply to it.' `
+    -Test {
+        param($c)
+        $la = Get-LocalAccounts -Settings $c.S
+        if ($la.Read -ne 'OK') { return (Get-LocalAccountsUnread $la.Read) }
+        $on = @($la.Users | Where-Object { $_.Enabled })
+        $bad = @($on | Where-Object { -not $_.PasswordRequired })
+        if ($bad.Count -eq 0) { return (Pass ('{0} enabled local account(s), each must have a password' -f $on.Count)) }
+        return (Fail ('{0} enabled local account(s) may have an empty password ("password not required")' -f $bad.Count) -Items @($bad | ForEach-Object { [string]$_.Name }))
+    } -Fix 'On the server: net user <name> /passwordreq:yes, then give the account a password that meets the policy - or disable it (a change - use a change record).'
+
+New-Check -Id 'SEC-ACC-03' -Console 'Security' -Group 'Local accounts' -Title 'Local administrator accounts are in use (an inactive one is disabled)' -Ism 'ISM-1648' -ML 2 -Severity 'Medium' -Needs 'Settings' -Applies 'member' `
+    -Why 'A local administrator account nobody logs on with is privileged access nobody would miss - or notice being used. The ISM disables privileged access after 45 days of inactivity.' `
+    -Test {
+        param($c)
+        $la = Get-LocalAccounts -Settings $c.S
+        if ($la.Read -ne 'OK') { return (Get-LocalAccountsUnread $la.Read) }
+        $days = [int]$script:Config.LocalAccountInactiveDays
+        # the built-in Administrator (-500) is not meant to be used at all: SEC-CRD-03 calls it out when it is enabled
+        $adm = @($la.Users | Where-Object { $_.Enabled -and $_.Admin -and [string]$_.Rid -ne '500' })
+        $idle = @(); $items = @()
+        foreach ($u in $adm) {
+            $why = Get-LocalAccountIdle -User $u -Days $days
+            if ($why) { $idle += $u; $items += ('{0}: {1}' -f $u.Name, $why) }
+            elseif ($null -ne $u.LastLogonDays) { $items += ('{0}: in use (last logon {1} day(s) ago)' -f $u.Name, $u.LastLogonDays) }
+            else { $items += ('{0}: new (not logged on yet, its password was set {1} day(s) ago)' -f $u.Name, $u.PasswordAgeDays) }
+        }
+        if ($adm.Count -eq 0) { return (Pass 'no enabled local administrator account besides the built-in one') }
+        if ($idle.Count -eq 0) { return (Pass ('{0} enabled local administrator account(s), each used within {1} days' -f $adm.Count, $days) -Items $items) }
+        return (Warn ('{0} of {1} enabled local administrator account(s) inactive for more than {2} days' -f $idle.Count, $adm.Count, $days) -Items $items)
+    } -Fix 'Disable the account (it can be enabled again when it is needed), or record in the tailoring why it stays: a break glass account whose password a password manager holds is such a reason.'
+
+New-Check -Id 'SEC-ACC-04' -Console 'Security' -Group 'Local accounts' -Title 'Other local accounts are in use (an inactive one is disabled)' -Ism 'ISM-1404' -Severity 'Medium' -Needs 'Settings' -Applies 'member' `
+    -Why 'An enabled local account that has not logged on for weeks is usually left over from a product, a project or a person. The ISM disables unprivileged access after 45 days of inactivity.' `
+    -Test {
+        param($c)
+        $la = Get-LocalAccounts -Settings $c.S
+        if ($la.Read -ne 'OK') { return (Get-LocalAccountsUnread $la.Read) }
+        $days = [int]$script:Config.LocalAccountInactiveDays
+        $std = @($la.Users | Where-Object { $_.Enabled -and -not $_.Admin -and [string]$_.Rid -notin '500', '501', '503', '504' })
+        $idle = @(); $items = @()
+        foreach ($u in $std) { $why = Get-LocalAccountIdle -User $u -Days $days; if ($why) { $idle += $u; $items += ('{0}: {1}' -f $u.Name, $why) } }
+        if ($std.Count -eq 0) { return (Pass 'no enabled local account besides the administrators and the built-in ones') }
+        if ($idle.Count -eq 0) { return (Pass ('{0} enabled local account(s) without administrator rights, each used within {1} days' -f $std.Count, $days)) }
+        return (Warn ('{0} of {1} enabled local account(s) inactive for more than {2} days' -f $idle.Count, $std.Count, $days) -Items $items)
+    } -Fix 'Disable the account, and delete it once nothing has missed it. An account a service runs as logs on when the service starts: one that is inactive runs nothing.'
+
+New-Check -Id 'SEC-ACC-05' -Console 'Security' -Group 'Local accounts' -Title 'No shared local accounts on a domain member' -Ism 'ISM-0415' -Severity 'Low' -Needs 'Settings' -Applies 'member' `
+    -Why 'On a domain member people and services log on with domain accounts. A local account besides the administrator ones belongs to no person: whoever knows its password is it.' `
+    -Test {
+        param($c)
+        $la = Get-LocalAccounts -Settings $c.S
+        if ($la.Read -ne 'OK') { return (Get-LocalAccountsUnread $la.Read) }
+        $extra = @($la.Users | Where-Object { $_.Enabled -and -not $_.Admin -and [string]$_.Rid -notin '500', '501', '503', '504' })
+        $names = @($extra | ForEach-Object { [string]$_.Name })
+        if ($extra.Count -eq 0) { return (Pass 'no enabled local account besides the administrators and the built-in ones') }
+        # DomainRole 2 = a stand-alone server: local accounts are all it has
+        if ([string]$c.S['DomainRole'] -eq '2') { return (Pass ('a stand-alone server with {0} enabled local account(s) - they are the only accounts it has' -f $extra.Count) -Items $names) }
+        return (Warn ('{0} enabled local account(s) without administrator rights on a domain member - each needs an owner and a reason' -f $extra.Count) -Items $names)
+    } -Fix 'Give the service a group Managed Service Account or the person a domain account, then disable the local one; or record in the tailoring who owns it and why it is local.'
+
+New-Check -Id 'SEC-ACC-06' -Console 'Security' -Group 'Local accounts' -Title 'Local administrator passwords are rotated (managed)' -Ism 'ISM-1685' -ML 2 -Severity 'High' -Needs 'Settings' -Applies 'member' `
+    -Why 'A local administrator password set years ago is known to everyone who ever held it, and is often the same on other servers. A managed one (LAPS) is changed every month. Every enabled local administrator account is judged, whatever it is called.' `
+    -Test {
+        param($c)
+        $la = Get-LocalAccounts -Settings $c.S
+        if ($la.Read -ne 'OK') { return (Get-LocalAccountsUnread $la.Read) }
+        $max = [int]$script:Config.LocalAdminPasswordMaxAgeDays
+        $adm = @($la.Users | Where-Object { $_.Enabled -and ($_.Admin -or [string]$_.Rid -eq '500') })
+        if ($adm.Count -eq 0) { return (Pass 'no enabled local administrator account (the built-in one is disabled)') }
+        $old = @(); $unknown = @(); $items = @()
+        foreach ($u in $adm) {
+            $shown = [string]$u.Name; if ([string]$u.Rid -eq '500') { $shown += ' (the built-in Administrator)' }
+            if ($null -eq $u.PasswordAgeDays) { $unknown += $u; $items += ('{0}: the age of its password was not read' -f $shown) }
+            else { $items += ('{0}: password set {1} day(s) ago' -f $shown, $u.PasswordAgeDays); if ($u.PasswordAgeDays -gt $max) { $old += $u } }
+        }
+        if ($old.Count -gt 0) { return (Fail ('{0} of {1} enabled local administrator account(s) with a password older than {2} days' -f $old.Count, $adm.Count, $max) -Items $items) }
+        if ($unknown.Count -gt 0) { return (Warn ('the password age of {0} local administrator account(s) could not be read' -f $unknown.Count) -Items $items) }
+        return (Pass ('{0} enabled local administrator account(s), each password changed within {1} days' -f $adm.Count, $max) -Items $items)
+    } -Fix 'Put the account under Windows LAPS (SEC-CRD-01): it sets a long random password per server and changes it on a schedule. Until then, change the password to a unique one of 30 characters or more (ISM-1795) and keep it in the password manager.'
+
+New-Check -Id 'SEC-ACC-07' -Console 'Security' -Group 'Local accounts' -Title 'Privileged and remote-logon local groups hold only who needs them' -Ism 'ISM-1508', 'ISM-1852' -ML 3 -Severity 'Medium' -Needs 'Settings' -Applies 'member' `
+    -Why 'Backup Operators, Power Users, Hyper-V Administrators and their like give rights close to an administrator''s, and are empty on a fresh server. Remote Desktop Users and Remote Management Users decide who may log on from the network.' `
+    -Test {
+        param($c)
+        $la = Get-LocalAccounts -Settings $c.S
+        if ($la.Read -ne 'OK') { return (Get-LocalAccountsUnread $la.Read) }
+        if (@($la.Groups).Count -eq 0) { return (Warn 'the local groups could not be read') }
+        # by identifier: the names are translated on a server in another language
+        $privileged = @('S-1-5-32-551', 'S-1-5-32-547', 'S-1-5-32-550', 'S-1-5-32-556', 'S-1-5-32-569', 'S-1-5-32-578')   # Backup Operators, Power Users, Print Operators, Network Configuration Operators, Cryptographic Operators, Hyper-V Administrators
+        $remote = @('S-1-5-32-555', 'S-1-5-32-580', 'S-1-5-32-562')                                                        # Remote Desktop Users, Remote Management Users, Distributed COM Users
+        $wideOpen = @(); $toConfirm = @(); $items = @()
+        # who stands for nearly everybody: the collector tells by identifier (LocalGroupsBroad: group SID|member), which
+        # holds on a server in any language; a result from before it did is judged by the English names
+        $broadRows = $null
+        if ($c.S.ContainsKey('LocalGroupsBroad')) { $broadRows = @(([string]$c.S['LocalGroupsBroad']) -split ';' | Where-Object { $_ }) }
+        foreach ($g in @($la.Groups | Where-Object { $privileged -contains $_.Sid -or $remote -contains $_.Sid })) {
+            $members = @($g.Members)
+            if ($members.Count -eq 0) { continue }
+            if ($null -ne $broadRows) { $broad = @($members | Where-Object { $broadRows -contains ($g.Sid + '|' + $_) }) }
+            else { $broad = @($members | Where-Object { $script:BroadPrincipals -contains ($_ -split '\\')[-1] }) }
+            $items += ('{0}: {1}' -f $g.Name, ($members -join ', '))
+            if ($privileged -contains $g.Sid) { if ($broad.Count -gt 0) { $wideOpen += ('{0} holds {1}' -f $g.Name, ($broad -join ', ')) } else { $toConfirm += ('{0} has {1} member(s)' -f $g.Name, $members.Count) } }
+            elseif ($broad.Count -gt 0) { $toConfirm += ('{0} holds {1}' -f $g.Name, ($broad -join ', ')) }
+        }
+        if ($wideOpen.Count -gt 0) { return (Fail ('a privileged group open to nearly everybody: {0}' -f ($wideOpen -join '; ')) -Items $items) }
+        if ($toConfirm.Count -gt 0) { return (Warn ('to confirm: {0}' -f ($toConfirm -join '; ')) -Items $items) }
+        if ($items.Count -eq 0) { return (Pass 'the privileged and remote-logon local groups are empty') }
+        return (Pass 'the privileged local groups are empty; the remote-logon groups hold named accounts or groups only' -Items $items)
+    } -Fix 'Take out who does not need the right (Computer Management > Local Users and Groups > Groups, or Restricted Groups in Group Policy). Every domain user in Remote Desktop Users is right for a Remote Desktop Session Host and for no other server - record it in the tailoring there.'
+
+New-Check -Id 'SEC-ACC-08' -Console 'Security' -Group 'Local accounts' -Title 'No local group member left over from a deleted account' -Ism 'ISM-0430' -Severity 'Low' -Needs 'Settings' -Applies 'member' `
+    -Why 'A member shown only as an identifier (S-1-5-21-...) is an account that no longer exists: access that was never taken away, on a list nobody has read since.' `
+    -Test {
+        param($c)
+        $la = Get-LocalAccounts -Settings $c.S
+        if ($la.Read -ne 'OK') { return (Get-LocalAccountsUnread $la.Read) }
+        if (@($la.Groups).Count -eq 0) { return (Warn 'the local groups could not be read') }
+        $items = @()
+        foreach ($g in @($la.Groups)) { foreach ($m in @($g.Members | Where-Object { $_ -match '^S-1-\d+(-\d+)+$' })) { $items += ('{0}: {1}' -f $g.Name, $m) } }
+        if ($items.Count -eq 0) { return (Pass ('{0} local group(s), every member resolves to an account' -f @($la.Groups).Count)) }
+        return (Warn ('{0} member(s) of local groups no longer exist' -f $items.Count) -Items $items)
+    } -Fix 'Remove the entry from the group (Computer Management > Local Users and Groups > Groups; a change - use a change record). While the server cannot reach its domain every domain member shows this way: check again when it can.'
+
 New-Check -Id 'SEC-LOG-01' -Console 'Security' -Group 'Logging' -Title 'Security events forwarded to a central facility' -Ism 'ISM-0582' -Severity 'High' -Needs 'Settings' `
     -Test {
         param($c)
@@ -620,7 +802,7 @@ New-Check -Id 'SEC-LOG-05' -Console 'Security' -Group 'Logging' -Title 'Time ser
     -Test { param($c) $t = [string]$c.S['Time.Type']; if ($t -in 'NT5DS', 'NTP', 'AllSync') { return (Pass "W32Time type $t, source $($c.S['Time.Source'])") }; return (Warn "W32Time type '$t' (expected NT5DS for domain members or NTP)") } `
     -Fix 'w32tm /config /syncfromflags:domhier /update ; the Health console checks the actual offset.'
 
-New-Check -Id 'SEC-PAT-01' -Console 'Security' -Group 'Patching' -Title 'Operating system patches applied within the ISM timeframe' -Ism 'ISM-1877', 'ISM-1694', 'ISM-1695', 'ISM-1696' -ML 1 -Severity 'High' -Needs 'Status' `
+New-Check -Id 'SEC-PAT-01' -Console 'Security' -Group 'Patching' -Title 'Operating system patches applied within the ISM timeframe' -Ism 'ISM-1694', 'ISM-1695' -ML 1 -Severity 'High' -Needs 'Status' `
     -Test {
         param($c)
         $parts = $c.Status.Build -split '\.'
@@ -631,8 +813,10 @@ New-Check -Id 'SEC-PAT-01' -Console 'Security' -Group 'Patching' -Title 'Operati
         if ($ubr -ge [int]$ref.UBR) { return (Pass "build $($c.Status.Build) is at or above $($ref.KB) ($($ref.Released))") }
         $days = [int]((Get-Date) - [datetime]::ParseExact($ref.Released, 'yyyy-MM-dd', $null)).TotalDays
         $class = Get-ServerClass -Name $c.Server
-        $limit = 30; $rule = 'one month (ISM-1695/1696, non-internet-facing)'
-        if ($class -eq 'internet-facing') { $limit = 14; $rule = 'two weeks (ISM-1694, internet-facing; 48 hours if an exploit exists, ISM-1877)' }
+        # the check judges the two timeframes it can tell from a date: one month and two weeks.  The 48 hours the ISM sets where
+        # the vendor rates a vulnerability critical or an exploit exists (ISM-1696, ISM-1877) need that rating: named, not judged, not cited
+        $limit = 30; $rule = 'one month (ISM-1695, non-internet-facing); the 48 hours for a critical or exploited vulnerability (ISM-1696) are not judged here'
+        if ($class -eq 'internet-facing') { $limit = 14; $rule = 'two weeks (ISM-1694, internet-facing); the 48 hours for a critical or exploited vulnerability (ISM-1877) are not judged here' }
         if ($days -gt $limit) { return (Fail "$($ref.KB) released $($ref.Released), $days days ago, not installed (build $($c.Status.Build)); limit $rule") }
         return (Warn "$($ref.KB) released $($ref.Released), $days days ago, not yet installed; limit $rule")
     } -Fix 'Install the cumulative update from the O/S Patching console; tick the server as internet-facing on the Security profile tab so the shorter timeframe applies.'
@@ -643,7 +827,7 @@ foreach ($na in @(
     @('SEC-NA-03', 'Privileged users use separate privileged operating environments', 'ISM-1380', 1),
     @('SEC-NA-04', 'Software register maintained', 'ISM-1493', 0),
     @('SEC-NA-05', 'Backups performed and retained', 'ISM-1511', 1),
-    @('SEC-NA-06', 'Vulnerability scanner used for online services and operating systems', 'ISM-1698', 1),
+    @('SEC-NA-06', 'Vulnerability scanner used for online services and operating systems', @('ISM-1698', 'ISM-1702'), 1),
     @('SEC-NA-07', 'Vulnerability scanner used for operating systems of internet-facing servers', 'ISM-1701', 1))) {
     New-Check -Id $na[0] -Console 'Security' -Group 'Not assessable from the server' -Title $na[1] -Ism $na[2] -ML $na[3] -Severity 'Low' -Needs @() `
         -Test { NotAssessable 'organisational control - record the evidence in the report or in tailoring' } `
@@ -762,6 +946,9 @@ function Get-SecuritySummaryRows {
         # the Last checked cell by its age; an audit whose latest attempt failed paints the last good one and says so first (14-State.ps1)
         $failedNow = Get-ResultFailure $set
         if ($failedNow) { $top = @(('LATEST AUDIT FAILED at ' + (Format-LastChecked $set.LastAttempt) + ': ' + $failedNow + ' - the row shows the audit of ' + (Format-LastChecked $set.Checked))) + @($top) }
+        # the policy read on the computer itself without "Run as administrator", and refused: said first, in a few words
+        $pol = Get-CollectorResult -Name 'SecurityPolicy' -Server $name
+        if ((Get-UnelevatedNote -Result $pol) -and $pol.PSObject.Properties['Errors'] -and @($pol.Errors).Count -gt 0) { $top = @('NOT ALL READ (not run as administrator)') + @($top) }
         # Last checked = the oldest of the collectors the audit reads (Settings, SecurityPolicy): never fresher than its weakest input
         $rows += [pscustomobject]@{ Server = $name; Group = $gname; Class = (Get-ServerClass -Name $name); Light = (Get-WorstLight -Rows $checks); 'Last checked' = (Format-LastChecked $cov.Checked); Red = $c.Red; Amber = $c.Amber; Green = $c.Green; Grey = $c.Grey; 'Pass rate' = $score; Tailoring = $tail; 'Top red' = ($top -join '; '); Cells = @{ 'Last checked' = (Get-ResultAgeColour $cov.Checked) } }
     }
@@ -929,7 +1116,7 @@ function Show-TailoringRuleEditor {
     $action = New-Object System.Windows.Forms.ComboBox; $action.Location = New-Object System.Drawing.Point(175, ($y - 3)); $action.Width = 200; $action.DropDownStyle = 'DropDownList'
     foreach ($v in 'disable', 'downgrade', 'threshold') { [void]$action.Items.Add($v) }
     $action.SelectedItem = $(if ($Rule) { [string]$Rule.action } else { 'disable' })
-    $script:Gui['Tips'].SetToolTip($action, 'disable = risk accepted (grey); downgrade = Red becomes Amber; threshold = another expected value')
+    $script:Gui['Tips'].SetToolTip($action, 'disable = accepted; downgrade = Red to Amber; threshold = new value')
     $y += 32
     $fields = @{}
     foreach ($spec in @(@('value', 'Value (threshold only):'), @('reason', 'Reason (required):'), @('by', 'Decided by:'), @('date', 'Date (yyyy-MM-dd):'), @('review', 'Review date (yyyy-MM-dd):'))) {
@@ -940,8 +1127,8 @@ function Show-TailoringRuleEditor {
         $y += 32
     }
     if (-not $Rule) { $fields['by'].Text = Get-OperatorIdentity; $fields['date'].Text = Get-Date -Format 'yyyy-MM-dd'; $fields['review'].Text = (Get-Date).AddMonths(6).ToString('yyyy-MM-dd') }
-    $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'OK'; $ok.Location = New-Object System.Drawing.Point(420, ($y + 6)); $ok.Size = New-Object System.Drawing.Size(90, 30); $ok.DialogResult = 'OK'
-    $cancel = New-Object System.Windows.Forms.Button; $cancel.Text = 'Cancel'; $cancel.Location = New-Object System.Drawing.Point(520, ($y + 6)); $cancel.Size = New-Object System.Drawing.Size(90, 30); $cancel.DialogResult = 'Cancel'
+    $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'OK'; $ok.Location = New-Object System.Drawing.Point(420, ($y + 6)); $ok.Size = New-Object System.Drawing.Size(90, 30); $ok.DialogResult = 'OK'; Set-ButtonFace -Button $ok
+    $cancel = New-Object System.Windows.Forms.Button; $cancel.Text = 'Cancel'; $cancel.Location = New-Object System.Drawing.Point(520, ($y + 6)); $cancel.Size = New-Object System.Drawing.Size(90, 30); $cancel.DialogResult = 'Cancel'; Set-ButtonFace -Button $cancel
     $dlg.Controls.AddRange(@($lbl, $check, $lbl2, $kind, $target, $lbl3, $action, $ok, $cancel)); $dlg.AcceptButton = $ok; $dlg.CancelButton = $cancel
     $result = $null
     if ($dlg.ShowDialog($script:Gui['Form']) -eq 'OK') {
@@ -1148,14 +1335,14 @@ function New-SecurityConsole {
     $pageTailoring = New-Object System.Windows.Forms.TabPage; $pageTailoring.Text = 'Tailoring (risk decisions)'
     $pageSettings = New-Object System.Windows.Forms.TabPage; $pageSettings.Text = 'Security profile'
     $pages.TabPages.AddRange(@($pageServers, $pageControls, $pageConfig, $pageGpo, $pageTailoring, $pageSettings))
-    # no explainer text on the pages: what each shows is the tool tip of its tab (and of its controls)
+    # no explainer text on the pages: each tab's tool tip says in a few words what the page shows (the manual has the rest)
     $pages.ShowToolTips = $true
-    $pageServers.ToolTipText = "One row per server, its checks counted by light.`nRed = a failure inside the Essential Eight target or a High-severity control; Amber = other failures, warnings, overdue risk acceptances, a check that could not run; Green = pass; Grey = not applicable at this classification, not assessable from the server, or risk accepted.`nPass rate = Green of (Red + Amber + Green): risk-accepted controls are left out, unread ones count against it.`nDouble-click a server for every check with its evidence, the ISM text and the fix.`nBelow the divider: compliance of the servers shown and of every group - there a risk-accepted control counts as compliant and an unread one is left out, so its percentage is not the Pass rate."
-    $pageControls.ToolTipText = "One row per check across the servers shown on the Servers page.`nDouble-click a row for the servers that fail it and the ISM wording."
-    $pageConfig.ToolTipText = "The raw audit policy, security policy and hardening values of each ticked server, one row per setting.`nEach cell coloured by its verdict against data\security-settings.psd1: green = as expected, red = not, amber = warning or unreadable, grey = not applicable.`nHover a row for the verdicts."
-    $pageGpo.ToolTipText = "One row per security setting that Group Policy is missing, sets weaker, or does not enforce on the servers shown.`nImpact - would applying it break something in use? Impact found = current use on the servers named (SMB1 clients, NTLMv1 or Basic logons ...) - keep them out of the GPO until resolved; Check first = a check could not tell, or there is no automatic check; No impact found / expected = apply it; Not checked = press Check impact; Enforced (green) = a GPO already sets it.`nNow = the value on the servers today. Double-click a row for every server.`nNothing is changed: GPOs are edited in Group Policy Management, under a change record."
-    $pageTailoring.ToolTipText = "A rule records a risk decision: disable = accept (grey), downgrade = Red becomes Amber, threshold = a different expected value.`nScope: all, group:<name> or server:<name>. Yellow rows have passed their review date. Double-click to edit."
-    $pageSettings.ToolTipText = "The network's classification and Essential Eight target, and which servers face the internet."
+    $pageServers.ToolTipText = 'One row per server; double-click for every check'
+    $pageControls.ToolTipText = 'One row per check; double-click for the servers that fail it'
+    $pageConfig.ToolTipText = 'One row per setting, a column per ticked server'
+    $pageGpo.ToolTipText = 'Settings Group Policy is missing; nothing is changed here'
+    $pageTailoring.ToolTipText = 'Risk decisions: disable, downgrade or threshold'
+    $pageSettings.ToolTipText = 'Classification, Essential Eight target, internet-facing servers'
     New-SecurityGpoPage -Page $pageGpo   # 45-Security-Gpo.ps1
 
     # ---- Servers page ----
@@ -1184,7 +1371,7 @@ function New-SecurityConsole {
     $toolbar = New-ConsoleToolbar -Tab $pageServers
     $combo = New-GroupPicker -Toolbar $toolbar -OnChange { Update-SecurityGrids }
     $script:Gui['SecurityGroupCombo'] = $combo
-    $toolbar.Controls.Add((New-GuiButton -Text 'AUDIT (ticked or all)' -X 235 -Y 8 -W 170 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Status + Inventory + Agents + Settings + SecurityPolicy (auditpol, secedit) + Group Policy + Licensing collectors. Read-only, needs admin on the servers. The impact checks of the GPO recommendations run from that page (Check impact).' -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'AUDIT (ticked or all)' -X 235 -Y 8 -W 170 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Every Security collector on the ticked servers; read-only' -OnClick {
         Invoke-GuiAction -Name 'Security audit' -ReadOnly -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['SecurityGrid'])
             if ($servers.Count -eq 0) { $servers = @(Get-GridAllKeys -Grid $script:Gui['SecurityGrid']) }
@@ -1221,7 +1408,7 @@ function New-SecurityConsole {
     $cfgDiff = New-Object System.Windows.Forms.CheckBox; $cfgDiff.Text = 'Differences only'; $cfgDiff.Location = New-Object System.Drawing.Point(315, 8); $cfgDiff.AutoSize = $true
     $cfgDiff.Add_CheckedChanged({ Update-SecurityConfigGrid })
     $cfgTail = New-Object System.Windows.Forms.CheckBox; $cfgTail.Text = 'Include tailoring'; $cfgTail.Location = New-Object System.Drawing.Point(445, 8); $cfgTail.AutoSize = $true; $cfgTail.Checked = $true
-    $script:Gui['Tips'].SetToolTip($cfgTail, 'Ticked: each cell names the tailoring rule in force for that server ([accepted], [downgrade], [threshold 10]), the Expected column shows tailored values, and servers that differ only in tailoring count as different. Unticked: the raw values only.')
+    $script:Gui['Tips'].SetToolTip($cfgTail, 'Ticked: each cell names the tailoring rule in force')
     $cfgTail.Add_CheckedChanged({ Update-SecurityConfigGrid })
     $cfgCount = New-Object System.Windows.Forms.Label; $cfgCount.Location = New-Object System.Drawing.Point(580, 10); $cfgCount.AutoSize = $true; $cfgCount.ForeColor = 'DimGray'
     $cfgBar.Controls.AddRange(@($cfgFl, $cfgFilter, $cfgDiff, $cfgTail, $cfgCount))
@@ -1246,20 +1433,20 @@ function New-SecurityConsole {
     $pMl = New-Object System.Windows.Forms.ComboBox; $pMl.Location = New-Object System.Drawing.Point(260, 48); $pMl.Width = 100; $pMl.DropDownStyle = 'DropDownList'
     foreach ($v in '1', '2', '3') { [void]$pMl.Items.Add($v) }
     $pMl.SelectedItem = [string]$prof.maturityTarget; if (-not $pMl.SelectedItem) { $pMl.SelectedItem = '2' }
-    $script:Gui['Tips'].SetToolTip($pCls, 'Picks the ISM catalogue column (NC / OS / P / S / TS, data\ism-catalogue.psd1): a control the ISM does not require at that level is Grey and never counts. Stored in security\profile.json.')
-    $script:Gui['Tips'].SetToolTip($pMl, 'Each check''s Essential Eight level against this target: a failing control at or below it is Red, above it Amber - and any failing High-severity control is Red whatever its level. Stored in security\profile.json.')
+    $script:Gui['Tips'].SetToolTip($pCls, 'Picks the ISM catalogue column; other controls go Grey')
+    $script:Gui['Tips'].SetToolTip($pMl, 'A failing control at or below this level is Red, above it Amber')
     $box1.Controls.AddRange(@($pl1, $pCls, $pl2, $pMl))
 
     $box2 = New-Object System.Windows.Forms.GroupBox; $box2.Text = 'Internet-facing servers (tick the servers that face the internet)'; $box2.Location = New-Object System.Drawing.Point(12, 100); $box2.Size = New-Object System.Drawing.Size(560, 230)
     $ifTicks = New-TickList -Title 'Tick the servers that face the internet' -Width 440
     $ifTicks.Panel.Dock = 'None'; $ifTicks.Panel.Location = New-Object System.Drawing.Point(12, 20); $ifTicks.Panel.Size = New-Object System.Drawing.Size(440, 200)
-    $ifTip = 'An internet-facing server gets the shorter patch timeframe (two weeks, SEC-PAT-01) and ML2 application control (SEC-AC-01). Save writes "; class: internet-facing" after the server''s name on its line in the group file (editable in Notepad); a server unticked here that its group file marks with "# class: internet-facing" gets "; class: member". The Class column on the Servers page shows what is in force.'
+    $ifTip = 'An internet-facing server: two-week patching, ML2 application control'
     foreach ($ctl in @($ifTicks.Panel) + @($ifTicks.Panel.Controls)) { $script:Gui['Tips'].SetToolTip($ctl, $ifTip) }
     $box2.Controls.AddRange(@($ifTicks.Panel))
 
     $pl4 = New-Object System.Windows.Forms.Label; $pl4.Text = 'Note:'; $pl4.Location = New-Object System.Drawing.Point(14, 344); $pl4.AutoSize = $true
     $pNote = New-Object System.Windows.Forms.TextBox; $pNote.Location = New-Object System.Drawing.Point(60, 341); $pNote.Width = 500; $pNote.Text = [string]$prof.note
-    $pSave = New-GuiButton -Text 'Save settings' -X 580 -Y 336 -W 130 -H 32 -Colour 'LightGreen' -Tip 'Writes security\profile.json and the group-file lines, then recomputes every rating and report' -OnClick {
+    $pSave = New-GuiButton -Text 'Save settings' -X 580 -Y 336 -W 130 -H 32 -Colour 'LightGreen' -Tip 'Writes security\profile.json and recomputes every rating' -OnClick {
         Invoke-GuiAction -Name 'Security settings' -Action { Save-SecurityProfileFromPage } }   # writes group files: not read-only
     $pStatus = New-Object System.Windows.Forms.Label; $pStatus.Location = New-Object System.Drawing.Point(14, 380); $pStatus.AutoSize = $true; $pStatus.MaximumSize = New-Object System.Drawing.Size(980, 0); $pStatus.ForeColor = 'DimGray'
     $pageSettings.Controls.AddRange(@($box1, $box2, $pl4, $pNote, $pSave, $pStatus))

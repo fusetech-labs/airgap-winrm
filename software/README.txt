@@ -14,6 +14,17 @@ software\Vendor\Product\.  Press Reload lists + packages in the Software tab:
     Uninstall starts ticked; unticked, the tool never removes the product.
   * every offered file has an Edit... button: the same form, to change its
     package's registration later (only that entry is rewritten).
+  * Match in that form is the name Programs and Features shows.  It starts
+    wide enough for the names the inventory lists the product under (a copy
+    from the vendor's .exe installer is often named differently from the
+    .msi: "Wireshark 4.4.2 x64" against "Wireshark").
+  * an .msi that will not install over the .exe installer's copy (Wireshark's
+    says so itself) shows "Remove <version> first" on such a server: remove
+    that copy (UNINSTALL from the inventory list where its Removal column
+    offers it, by hand on the server where it reads "by hand"), then INSTALL.
+  * to take a package out again: Software library... > select it > Remove
+    package...  It asks first, and asks separately whether the package's
+    installer files are to be deleted from this folder.
   * other file types (.msp, .zip, .iso ...) are listed as not usable.
 
 Each offered file is vetted before it can be ticked:

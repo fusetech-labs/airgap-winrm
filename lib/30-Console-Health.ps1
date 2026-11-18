@@ -85,7 +85,7 @@ $script:RemoteProbeScript = {
                 else {
                     $item = Get-ItemProperty -LiteralPath $path -ErrorAction Stop
                     if ($key -eq '*') {
-                        $names = @($item.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object { '{0}={1}' -f $_.Name, ([string]$_.Value -replace '[\r\n|]', ' ') })
+                        $names = @($item.PSObject.Properties | Where-Object { @('PSPath', 'PSParentPath', 'PSChildName', 'PSDrive', 'PSProvider') -notcontains $_.Name } | ForEach-Object { '{0}={1}' -f $_.Name, ([string]$_.Value -replace '[\r\n|]', ' ') })
                         if ($names.Count -gt 0) { $value = $names -join '; ' } else { $value = '(no values)' }
                     } elseif ($null -eq $item.PSObject.Properties[$key]) { $value = 'NotConfigured' }
                     else { $v = $item.$key; if ($v -is [array]) { $value = ($v -join '; ') } else { $value = [string]$v } }
@@ -461,7 +461,9 @@ $script:RemoteSettingsScript = {
     $lines = New-Object System.Collections.Generic.List[string]
     function Add-S([string]$k, $v) { if ($null -eq $v) { $v = 'NotConfigured' }; if ($v -is [array]) { $v = ($v -join ';') }; $lines.Add("$k=$v") }
     function Get-RV([string]$path, [string]$name) { try { $p = Get-ItemProperty -Path $path -Name $name -ErrorAction Stop; return $p.$name } catch { return $null } }
-    function Get-Feat([string]$name) { try { $f = Get-WindowsOptionalFeature -Online -FeatureName $name -ErrorAction Stop; return [string]$f.State } catch { return 'Unknown' } }
+    # a feature name this Windows does not have comes back as nothing at all, without an error: that is Unknown, never a blank
+    function Get-Feat([string]$name) { try { $f = Get-WindowsOptionalFeature -Online -FeatureName $name -ErrorAction Stop; if (-not $f -or -not [string]$f.State) { return 'Unknown' }; return [string]$f.State } catch { return 'Unknown' } }
+    $domainRole = $null   # set where the computer system is read; the local accounts further down go by it
 
     try {
         $os = Get-CimInstance -ClassName Win32_OperatingSystem
@@ -476,6 +478,7 @@ $script:RemoteSettingsScript = {
         Add-S 'Domain' $cs.Domain
         Add-S 'DomainRole' $cs.DomainRole      # 4/5 = domain controller
         Add-S 'IsDomainController' ($cs.DomainRole -ge 4)
+        $domainRole = [int]$cs.DomainRole      # kept for the local accounts below ($cs is used again for something else on the way)
     } catch { Add-S 'OS.Caption' ('ERROR: ' + $_.Exception.Message) }
     try { Add-S 'TimeZone' (Get-TimeZone).Id } catch { Add-S 'TimeZone' (& tzutil.exe /g 2>$null) }
     # (Get-Culture would report the OPERATOR's culture: a remoting session inherits it.  The server's own default-user locale instead.)
@@ -493,6 +496,7 @@ $script:RemoteSettingsScript = {
         # reads just "Service" so the Basic / AllowUnencrypted values below are the SERVICE's, not the client's
         $svc = ($w -split '(?m)^\s*Service\s*$')[-1]
         if ($w -match 'TrustedHosts\s*=\s*(.*)') { Add-S 'WinRM.TrustedHosts' $Matches[1].Trim() }
+        elseif ($w -match '(?m)^\s*TrustedHosts\s*$') { Add-S 'WinRM.TrustedHosts' 'NotConfigured' }   # an empty list is printed as the name alone, without "="
         if ($svc -match 'AllowUnencrypted\s*=\s*(\w+)') { Add-S 'WinRM.AllowUnencrypted' $Matches[1] }
         if ($svc -match 'Basic\s*=\s*(\w+)') { Add-S 'WinRM.Basic' $Matches[1] }
         if ($w -match 'MaxEnvelopeSizekb\s*=\s*(\d+)') { Add-S 'WinRM.MaxEnvelopeSizekb' $Matches[1] }
@@ -572,6 +576,63 @@ $script:RemoteSettingsScript = {
         if ($guest) { Add-S 'Guest.Enabled' (-not $guest.Disabled) }
         if ($admin) { Add-S 'Administrator.Name' $admin.Name; Add-S 'Administrator.Enabled' (-not $admin.Disabled) }
     } catch { }
+    # Local users and local groups, for the Local accounts checks (SEC-ACC-*, H-ACC-*).  Read through ADSI (the WinNT
+    # provider): plain .NET, no PowerShell module is loaded for it.  Not on a domain controller - it has no local accounts,
+    # and WinNT there lists the whole domain.  A name cannot hold | ; , or = so those separate the fields:
+    #   LocalUsers   name|RID|enabled|locked out|password required|password expires|password age in days|days until it
+    #                expires|days since the last logon (or never)          - one user after another, ; between them
+    #   LocalGroups  name|SID|member,member ...   a member as DOMAIN\name or COMPUTER\name, or its SID when the account is gone
+    #   LocalGroupsBroad  group SID|member   one row for each member that stands for nearly everybody, told by its identifier
+    # LocalAccounts.Read says how it went: OK, DomainController, or ERROR: ... (the checks never pass on a list not read).
+    try {
+        # 4 / 5 = a domain controller.  The role read above is used; only when that read failed is it asked for again - and when
+        # it is not known at all nothing is listed: on a domain controller WinNT would list every account of the domain
+        $role = -1; if ($null -ne $domainRole) { $role = [int]$domainRole } else { try { $role = [int]([wmi]("Win32_ComputerSystem.Name='{0}'" -f $env:COMPUTERNAME)).DomainRole } catch { } }
+        if ($role -ge 4) { Add-S 'LocalAccounts.Read' 'DomainController' }
+        elseif ($role -lt 0) { Add-S 'LocalAccounts.Read' 'ERROR: whether this computer is a domain controller could not be read, so its local accounts were not listed' }
+        else {
+            $box = [ADSI]('WinNT://{0},computer' -f $env:COMPUTERNAME)
+            $kids = $box.psbase.Children
+            [void]$kids.SchemaFilter.Add('User'); [void]$kids.SchemaFilter.Add('Group')
+            $userLines = @(); $groupLines = @(); $broadLines = @(); $nowLocal = Get-Date
+            foreach ($kid in $kids) {
+                $class = [string]$kid.psbase.SchemaClassName
+                $kidName = [string]$kid.psbase.Name
+                $kidSid = ''; try { $kidSid = (New-Object System.Security.Principal.SecurityIdentifier ([byte[]]$kid.psbase.Properties['objectSid'].Value), 0).Value } catch { }
+                if ($class -eq 'User') {
+                    $flags = [int]$kid.psbase.Properties['UserFlags'].Value
+                    $ageSec = $null; try { $ageSec = [double]$kid.psbase.Properties['PasswordAge'].Value } catch { }
+                    $age = ''; if ($null -ne $ageSec) { $age = [int][math]::Floor($ageSec / 86400) }
+                    $expires = -not ($flags -band 0x10000)          # 0x10000 = the password never expires
+                    $left = ''
+                    if ($expires -and $null -ne $ageSec) { try { $maxSec = [double]$kid.psbase.Properties['MaxPasswordAge'].Value; if ($maxSec -gt 0) { $left = [int][math]::Floor(($maxSec - $ageSec) / 86400) } } catch { } }
+                    $last = 'never'; try { $seen = $kid.psbase.Properties['LastLogin'].Value; if ($seen -is [datetime]) { $last = [int][math]::Max(0, [math]::Floor(($nowLocal - $seen).TotalDays)) } } catch { }
+                    # 0x2 = disabled, 0x10 = locked out, 0x20 = no password required
+                    $userLines += ('{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}|{8}' -f $kidName, ($kidSid -split '-')[-1], [int](-not ($flags -band 0x2)), [int][bool]($flags -band 0x10), [int](-not ($flags -band 0x20)), [int]$expires, $age, $left, $last)
+                } elseif ($class -eq 'Group') {
+                    $inGroup = @()
+                    foreach ($member in @($kid.psbase.Invoke('Members'))) {
+                        $adsPath = [string]$member.GetType().InvokeMember('ADsPath', 'GetProperty', $null, $member, $null)
+                        $bits = @(($adsPath -replace '^WinNT://', '') -split '/')
+                        $memberName = $bits[-1]; if ($bits.Count -ge 2) { $memberName = $bits[-2] + '\' + $bits[-1] }
+                        $inGroup += $memberName
+                        # a member that stands for nearly everybody, told by its identifier - its name is translated on a server
+                        # in another language: Everyone, Authenticated Users, Anonymous, Interactive, Network, BUILTIN\Users and
+                        # Guests, a domain's Domain Users, Guests and Computers
+                        try {
+                            $memberSid = (New-Object System.Security.Principal.SecurityIdentifier ([byte[]]$member.GetType().InvokeMember('objectSid', 'GetProperty', $null, $member, $null)), 0).Value
+                            if (@('S-1-1-0', 'S-1-5-11', 'S-1-5-7', 'S-1-5-4', 'S-1-5-2', 'S-1-5-32-545', 'S-1-5-32-546') -contains $memberSid -or $memberSid -match '^S-1-5-21-.+-(513|514|515)$') { $broadLines += ('{0}|{1}' -f $kidSid, $memberName) }
+                        } catch { }
+                    }
+                    $groupLines += ('{0}|{1}|{2}' -f $kidName, $kidSid, ($inGroup -join ','))
+                }
+            }
+            Add-S 'LocalAccounts.Computer' $env:COMPUTERNAME
+            Add-S 'LocalUsers' ($userLines -join ';'); Add-S 'LocalGroups' ($groupLines -join ';')
+            Add-S 'LocalGroupsBroad' ($broadLines -join ';')   # group identifier|member, for each member that stands for nearly everybody
+            Add-S 'LocalAccounts.Read' 'OK'
+        }
+    } catch { Add-S 'LocalAccounts.Read' ('ERROR: ' + $_.Exception.Message) }
 
     # LSA / credentials
     $lsa = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
@@ -622,7 +683,13 @@ $script:RemoteSettingsScript = {
             $mv = [string]$pair[1]; if ($mv -eq 'NOTSET') { $mv = 'NotConfigured' }
             Add-S $pair[0] $mv
         }
-    } catch { Add-S 'ExploitProtection.DEP' 'Unknown' }
+    } catch {
+        # no Get-ProcessMitigation (it came after Windows Server 2016): the system-wide policy is the one registry value
+        # that cmdlet reads.  Absent = nothing is set system-wide, as NOTSET above; present = set, and not decoded here
+        $mo = Get-RV 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel' 'MitigationOptions'
+        if ($null -eq $mo -and -not (Get-Command -Name 'Get-ProcessMitigation' -ErrorAction SilentlyContinue)) { foreach ($key in 'ExploitProtection.DEP', 'ExploitProtection.ASLR', 'ExploitProtection.CFG') { Add-S $key 'NotConfigured' } }
+        else { Add-S 'ExploitProtection.DEP' 'Unknown' }
+    }
 
     # PowerShell and script engines
     $psp = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell'
@@ -631,7 +698,13 @@ $script:RemoteSettingsScript = {
     Add-S 'PS.Transcription' (Get-RV "$psp\Transcription" 'EnableTranscripting')
     Add-S 'PS.ProtectedEventLogging' (Get-RV 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\EventLog\ProtectedEventLogging' 'EnableProtectedEventLogging')
     Add-S 'PS.LanguageMode' $ExecutionContext.SessionState.LanguageMode
-    Add-S 'Feature:PowerShell-V2' (Get-Feat 'MicrosoftWindowsPowerShellV2Root')
+    # The PowerShell 2.0 engine.  On a server the roles and features decide (Win32_ServerFeature, id 411 = Windows PowerShell
+    # 2.0 Engine; listed only while installed): once .NET Framework 3.5 is gone the engine reads Removed there, while its
+    # component still reads Enabled as an optional feature.  On a client Windows the optional feature is all there is.
+    $ps2 = 'Unknown'
+    try { $sf = @(Get-CimInstance -ClassName Win32_ServerFeature -ErrorAction Stop); if ($sf.Count -gt 0) { $ps2 = 'Disabled'; if (@($sf | Where-Object { [int]$_.ID -eq 411 }).Count -gt 0) { $ps2 = 'Enabled' } } } catch { }
+    if ($ps2 -eq 'Unknown') { foreach ($featName in 'MicrosoftWindowsPowerShellV2Root', 'MicrosoftWindowsPowerShellV2') { $fv = Get-Feat $featName; if ($fv -ne 'Unknown') { $ps2 = $fv; break } } }
+    Add-S 'Feature:PowerShell-V2' $ps2
     Add-S 'Feature:NET-Framework-3.5' (Get-Feat 'NetFx3')
     Add-S 'Feature:Telnet-Client' (Get-Feat 'TelnetClient')
     Add-S 'Feature:IE11' (Get-Feat 'Internet-Explorer-Optional-amd64')
@@ -733,6 +806,62 @@ function Get-HealthReadError {
     return ''
 }
 
+# ---------------------------------------------------------------------
+#  LOCAL ACCOUNTS.  The Settings collector lists the server's local users
+#  and local groups (LocalUsers, LocalGroups: read through ADSI, no module
+#  loaded).  These two turn the lines into objects for the checks of both
+#  consoles: H-ACC-* below, SEC-ACC-* in 40-Console-Security.ps1.
+# ---------------------------------------------------------------------
+# a principal that stands for "nearly everybody": judged on the name after the last backslash (CORP\Domain Users)
+$script:BroadPrincipals = @('Everyone', 'Authenticated Users', 'Users', 'Domain Users', 'Domain Computers', 'INTERACTIVE', 'NETWORK', 'ANONYMOUS LOGON', 'Guests', 'Domain Guests')
+
+function Get-LocalAccounts {
+    # The local users and groups of one server from its merged settings table ($c.S).
+    #   Read      'OK'; 'DomainController' (it has none); 'ERROR: ...'; '' = a result from before they were collected
+    #   Users     Name, Rid, Enabled, Locked, PasswordRequired, PasswordExpires, PasswordAgeDays, PasswordLeftDays (below 0 =
+    #             expired; $null = never expires or not known), LastLogonDays ($null = never logged on), Admin (a direct
+    #             member of the local Administrators group)
+    #   Groups    Name, Sid, Members (DOMAIN\name, COMPUTER\name, or a bare SID when the account no longer exists)
+    param($Settings)
+    $read = [string]$Settings['LocalAccounts.Read']
+    $computer = [string]$Settings['LocalAccounts.Computer']
+    $users = @(); $groups = @()
+    if ($read -eq 'OK') {
+        $number = { param($t) if ([string]$t -match '^-?\d+$') { [int]$t } else { $null } }
+        foreach ($line in @(([string]$Settings['LocalUsers']) -split ';' | Where-Object { $_ })) {
+            $f = $line -split '\|'
+            if ($f.Count -lt 9) { continue }
+            $users += [pscustomobject]@{ Name = $f[0]; Rid = $f[1]; Enabled = ($f[2] -eq '1'); Locked = ($f[3] -eq '1'); PasswordRequired = ($f[4] -eq '1'); PasswordExpires = ($f[5] -eq '1'); PasswordAgeDays = (& $number $f[6]); PasswordLeftDays = (& $number $f[7]); LastLogonDays = (& $number $f[8]); Admin = $false }
+        }
+        foreach ($line in @(([string]$Settings['LocalGroups']) -split ';' | Where-Object { $_ })) {
+            $f = $line -split '\|'
+            if ($f.Count -lt 3) { continue }
+            $groups += [pscustomobject]@{ Name = $f[0]; Sid = $f[1]; Members = @($f[2] -split ',' | Where-Object { $_ }) }
+        }
+        $admins = @($groups | Where-Object { $_.Sid -eq 'S-1-5-32-544' })[0]
+        if ($admins -and $computer) { foreach ($u in $users) { if (@($admins.Members | Where-Object { $_ -ieq ($computer + '\' + $u.Name) }).Count -gt 0) { $u.Admin = $true } } }
+    }
+    return [pscustomobject]@{ Read = $read; Computer = $computer; Users = $users; Groups = $groups }
+}
+
+function Get-LocalAccountsUnread {
+    # The verdict of a Local accounts check when the list was not read: never a pass on nothing.
+    param([string]$Read)
+    if ($Read -eq 'DomainController') { return (NotApplicable 'a domain controller has no local accounts') }
+    if ($Read -like 'ERROR:*') { return (Warn ('the local users and groups could not be read - ' + $Read.Substring(6).Trim())) }
+    return (Warn 'the local users and groups were not read - check the server again (they are collected from version 2.3 on)')
+}
+
+function Get-LocalAccountIdle {
+    # Why an enabled local account counts as inactive after $Days, or '' when it is in use: its last logon is older, or
+    # it never logged on and its password was set longer ago than that (a new account not used yet is not inactive).
+    param($User, [int]$Days)
+    if ($null -ne $User.LastLogonDays) { if ($User.LastLogonDays -gt $Days) { return ('not logged on for {0} days' -f $User.LastLogonDays) }; return '' }
+    if ($null -ne $User.PasswordAgeDays -and $User.PasswordAgeDays -le $Days) { return '' }
+    if ($null -ne $User.PasswordAgeDays) { return ('never logged on (its password was set {0} days ago)' -f $User.PasswordAgeDays) }
+    return 'never logged on'
+}
+
 New-Check -Id 'H-SVC-01' -Console 'Health' -Group 'Services' -Title 'Automatic services are running' -Severity 'High' -Needs 'Health' `
     -Why 'A stopped automatic service is usually a crashed or misconfigured component.' `
     -Test {
@@ -768,7 +897,11 @@ New-Check -Id 'H-LOG-01' -Console 'Health' -Group 'Logons' -Title 'Failed logons
     -Test {
         param($c)
         $readError = @($c.Health.Errors | Where-Object { $_ -like 'failed logons:*' })
-        if ($readError.Count -gt 0) { return (Warn ('the Security log could not be read: ' + $readError[0] + ' (the account needs Administrators or Event Log Readers on the server)')) }
+        if ($readError.Count -gt 0) {
+            # read on the computer itself without "Run as administrator": that, not the account's groups, is the reason
+            $why = Get-UnelevatedNote -Result $c.Health; if (-not $why) { $why = 'the account needs Administrators or Event Log Readers on the server' }
+            return (Warn ('the Security log could not be read: ' + $readError[0] + ' (' + $why + ')'))
+        }
         $total = [int]$c.Health.LogonFailureTotal
         $max = 0; $top = ''
         foreach ($l in @($c.Health.LogonFailures)) { $f = $l -split '\|'; if ([int]$f[0] -gt $max) { $max = [int]$f[0]; $top = "$($f[1]) from $($f[2]) (type $($f[3]))" } }
@@ -782,12 +915,58 @@ New-Check -Id 'H-LOG-02' -Console 'Health' -Group 'Logons' -Title 'No account lo
     -Test {
         param($c)
         $readError = @($c.Health.Errors | Where-Object { $_ -like 'lockouts:*' })
-        if ($readError.Count -gt 0) { return (Warn ('the Security log could not be read: ' + $readError[0])) }
+        if ($readError.Count -gt 0) { $why = Get-UnelevatedNote -Result $c.Health; return (Warn ('the Security log could not be read: ' + $readError[0] + $(if ($why) { ' (' + $why + ')' } else { '' }))) }
         $lk = @($c.Health.Lockouts)
         if ($lk.Count -eq 0) { return (Pass 'none') }
         # event 4740 keeps the CALLER computer (where the bad password came from) in TargetDomainName - not a domain (R6-D15)
         return (Warn ("{0} lockout(s) (event 4740) in {1} h" -f $lk.Count, $c.Health.WindowHours) -Items @($lk | ForEach-Object { $f = $_ -split '\|'; "$($f[0]) locked out at $($f[2]), caller computer $($f[1])" }))
     } -Fix 'Find the caller computer in the 4740 event and the 4625/4771 events before it.'
+
+New-Check -Id 'H-ACC-01' -Console 'Health' -Group 'Local accounts' -Title 'No local account locked out or with an expired password' -Needs 'Settings' -Applies 'member' `
+    -Why 'A local account that is locked out, or whose password has expired, stops the service, the task or the person that logs on with it - often weeks after anybody looked.' `
+    -Test {
+        param($c)
+        $la = Get-LocalAccounts -Settings $c.S
+        if ($la.Read -ne 'OK') { return (Get-LocalAccountsUnread $la.Read) }
+        $soon = [int]$script:Config.LocalPasswordExpiryWarnDays
+        $on = @($la.Users | Where-Object { $_.Enabled })
+        $items = @()
+        foreach ($u in $on) {
+            if ($u.Locked) { $items += ('{0} is locked out' -f $u.Name) }
+            if ($u.PasswordExpires -and $null -ne $u.PasswordLeftDays) {
+                if ($u.PasswordLeftDays -lt 0) { $items += ('{0}: its password expired {1} day(s) ago' -f $u.Name, (-$u.PasswordLeftDays)) }
+                elseif ($u.PasswordLeftDays -le $soon) { $items += ('{0}: its password expires in {1} day(s)' -f $u.Name, $u.PasswordLeftDays) }
+            }
+        }
+        if ($items.Count -eq 0) { return (Pass ('{0} enabled local account(s): none locked out, no password expired or expiring within {1} days' -f $on.Count, $soon)) }
+        return (Warn ('{0} finding(s) on the enabled local accounts' -f $items.Count) -Items $items)
+    } -Fix 'A locked account: find what keeps trying the old password (H-LOG-01 names the source). An expired or expiring password: change it where the account is used - the service, the task and the people who know it - in one step.'
+
+New-Check -Id 'H-ACC-02' -Console 'Health' -Group 'Local accounts' -Title 'Services run as local accounts that exist and can log on' -Needs 'Settings', 'Inventory' -Applies 'member' `
+    -Why 'A service set to run as a local account that was deleted, disabled or locked out, or whose password has expired, keeps running until its next start - and then does not come back.' `
+    -Test {
+        param($c)
+        $la = Get-LocalAccounts -Settings $c.S
+        if ($la.Read -ne 'OK') { return (Get-LocalAccountsUnread $la.Read) }
+        $byName = @{}; foreach ($u in $la.Users) { $byName[$u.Name.ToLower()] = $u }
+        $items = @(); $seen = 0
+        foreach ($line in @($c.Inventory.Services)) {
+            $f = $line -split '\|'
+            if ($f.Count -lt 5 -or $f[2] -eq 'Disabled') { continue }
+            $acct = [string]$f[4]; $local = ''
+            if ($acct -like '.\*') { $local = $acct.Substring(2) } elseif ($la.Computer -and $acct -like ($la.Computer + '\*')) { $local = $acct.Substring($la.Computer.Length + 1) }
+            if (-not $local) { continue }
+            $seen++
+            $u = $byName[$local.ToLower()]
+            if (-not $u) { $items += ('{0} runs as {1}: no such local account' -f $f[0], $acct) }
+            elseif (-not $u.Enabled) { $items += ('{0} runs as {1}: the account is disabled' -f $f[0], $acct) }
+            elseif ($u.Locked) { $items += ('{0} runs as {1}: the account is locked out' -f $f[0], $acct) }
+            elseif ($u.PasswordExpires -and $null -ne $u.PasswordLeftDays -and $u.PasswordLeftDays -lt 0) { $items += ('{0} runs as {1}: its password expired {2} day(s) ago' -f $f[0], $acct, (-$u.PasswordLeftDays)) }
+        }
+        if ($items.Count -gt 0) { return (Warn ('{0} of {1} service(s) on local accounts would not start again' -f $items.Count, $seen) -Items $items) }
+        if ($seen -eq 0) { return (Pass 'no service runs as a local user account') }
+        return (Pass ('{0} service(s) run as a local user account; each account exists, is enabled and can log on' -f $seen))
+    } -Fix 'Point the service at an account that exists (services.msc > Log On), or enable / unlock the account and set its password in the service as well. A group Managed Service Account needs none of this (ISM-1619).'
 
 New-Check -Id 'H-SW-01' -Console 'Health' -Group 'Software' -Title 'No dormant software' -Severity 'Low' -Needs 'Inventory' `
     -Why 'Software installed long ago that no service, process or scheduled task uses is attack surface without a purpose (ISM-0380).' `
@@ -1005,7 +1184,10 @@ New-Check -Id 'H-GPO-01' -Console 'Health' -Group 'Group Policy' -Title 'Group P
         # the collector's own failures (the GPO list, the extension list or the logs unreadable) are not a clean bill
         $gerr = @($c.Gpo.Errors | Where-Object { $_ })
         if ($gerr.Count -gt 0) { return (Warn ('the Group Policy state could not be fully read ({0} query(ies) failed)' -f $gerr.Count) -Items $gerr) }
-        $failed = @(Get-GpoExtensionRows -Server $c.Server | Where-Object { $_.Failed })
+        $extRows = @(Get-GpoExtensionRows -Server $c.Server)
+        $failed = @($extRows | Where-Object { $_.Failed })
+        # a failed result left behind by an extension that has had nothing to apply since: named, amber, not a failure of today
+        $stale = @($extRows | Where-Object { $_.PSObject.Properties['Stale'] -and $_.Stale })
         $events = @(Get-GpoEventRows -Server $c.Server)
         $errs = @($events | Where-Object { $_.Level -in 'Critical', 'Error' })
         $warns = @($events | Where-Object { $_.Level -eq 'Warning' })
@@ -1017,10 +1199,11 @@ New-Check -Id 'H-GPO-01' -Console 'Health' -Group 'Group Policy' -Title 'Group P
             if ($cleared.Count -gt 0) { $errs = @($errs | Where-Object { [string]$_.Time -ge $refresh.Substring(0, 16) }); $warns = @($warns) + @($cleared) }
         }
         $applied = @(Get-GpoRows -Server $c.Server | Where-Object { $_.Applied -and $_.GPO -ne 'Local Group Policy' }).Count
-        $items = @($failed | ForEach-Object { "extension '$($_.Extension)' last run $($_.LastRun): $($_.Result)" })
+        $items = @(@($failed) + @($stale) | ForEach-Object { "extension '$($_.Extension)' last run $($_.LastRun): $($_.Result)" })
         $items += @(@($errs) + @($warns) | Select-Object -First 8 | ForEach-Object { "$($_.Level) $($_.Id) ($($_.Log) log, $($_.Time)): $($_.Message)" })
         $gh = [int]$c.Gpo.WindowHours; if (-not $gh) { $gh = [int]$script:Config.EventWindowHours }   # the window the server was asked with
         if ($failed.Count -gt 0 -or $errs.Count -gt 0) { return (Fail ('{0} extension(s) failed, {1} Group Policy error(s) in {2} h' -f $failed.Count, $errs.Count, $gh) -Items $items) }
+        if ($stale.Count -gt 0) { return (Warn ('{0} GPO(s) applied; {1} extension(s) failed at a run long before the last refresh and have not run since' -f $applied, $stale.Count) -Items $items) }
         if ($warns.Count -gt 0) { return (Warn ('{0} GPO(s) applied; {1} Group Policy warning(s) in {2} h' -f $applied, $warns.Count, $gh) -Items $items) }
         # every domain member gets at least the Default Domain Policy: none applied = the list was not read, or no policy reaches it
         if ($applied -eq 0) { return (Warn 'no domain GPO applied on a domain member - the policy list could not be read, or the server is not getting policy at all') }
@@ -1051,6 +1234,10 @@ New-Check -Id 'H-GPO-03' -Console 'Health' -Group 'Group Policy' -Title 'Trust w
         $sc = [string]$c.Gpo.SecureChannel
         if ($sc -eq 'True') { return (Pass ('secure channel to {0} verified' -f $c.Gpo.Domain)) }
         if ($sc -eq 'False') { return (Fail ('the secure channel to {0} is broken' -f $c.Gpo.Domain)) }
+        # the PDC emulator has no secure channel of its own to test: the collector says so (an answer from before 2.3
+        # holds the error Windows gives there instead; the Settings and Directory collectors name the role holder)
+        $role = ''; $isPdc = ''; if ($c.S) { $role = [string]$c.S['DomainRole']; $isPdc = [string]$c.S['AD.IsPdc'] }
+        if ($sc -like 'not tested*' -or $role -eq '5' -or $isPdc -eq 'True') { return (NotApplicable ('the PDC emulator of {0}: it is the domain''s end of every secure channel and has none of its own to test - dcdiag (H-AD-01) tests this domain controller' -f $c.Gpo.Domain)) }
         return (Warn ('the secure channel could not be tested: {0}' -f $sc))
     } -Fix 'Test-ComputerSecureChannel -Repair -Credential <domain admin> on the server (a change - use a change record), or rejoin the domain. Check first that the computer account was not reset or deleted, and that a domain controller is reachable.'
 
@@ -1080,8 +1267,9 @@ New-Check -Id 'H-COL-01' -Console 'Health' -Group 'Collector' -Title 'All health
         param($c)
         $e = @($c.Health.Errors)
         if ($e.Count -eq 0) { return (Pass 'every query answered') }
-        return (Warn ("{0} health query(ies) failed" -f $e.Count) -Items $e)
-    } -Fix 'Usually a right that is missing (Security log needs administrators or Event Log Readers) or a service that is not installed.'
+        $why = Get-UnelevatedNote -Result $c.Health
+        return (Warn ("{0} health query(ies) failed{1}" -f $e.Count, $(if ($why) { ' - ' + $why } else { '' })) -Items $e)
+    } -Fix 'Usually a right that is missing (Security log needs administrators or Event Log Readers) or a service that is not installed. On the computer the toolkit runs on: start the toolkit with "Run as administrator".'
 
 # ---------------------------------------------------------------------
 #  SOE STANDARDS  (soe\<name>.json)
@@ -1420,6 +1608,9 @@ function Get-HealthSummaryRows {
         $cellMap['Last checked'] = Get-ResultAgeColour $cov.Checked   # the oldest of the collectors the row reads: never fresher than its weakest input
         $failedNow = Get-ResultFailure $h
         if ($failedNow) { $worst = @(('LATEST CHECK FAILED at ' + (Format-LastChecked $h.LastAttempt) + ': ' + $failedNow + ' - the row shows the check of ' + (Format-LastChecked $h.Checked))) + @($worst) }
+        # read on the computer itself without "Run as administrator", and a query was refused: said first, in a few words
+        # (the row's tool tip is this text; the checks concerned and the details page have the whole reason)
+        if ((Get-UnelevatedNote -Result $h) -and @($h.Errors).Count -gt 0) { $worst = @('NOT ALL READ (not run as administrator)') + @($worst) }
         $rows += [pscustomobject]@{
             Server = $name; Group = $(if ($g) { $g.Name } else { '' }); Light = (Get-WorstLight -Rows $checks); 'Last checked' = (Format-LastChecked $cov.Checked)
             Red = $c.Red; Amber = $c.Amber; Green = $c.Green
@@ -1484,7 +1675,16 @@ function Get-HealthDetailsHtml {
         if ($soeStd) { $soeRows = @(Compare-SoeStandard -Standard $soeStd -Server $Server | ForEach-Object { [pscustomobject]@{ Light = $_.Light; Type = $_.Type; Item = $_.Name; Expected = $_.Expected; Actual = $_.Actual; Verdict = $_.Verdict; Note = $_.Note } }) }
     }
     $soeSection = @{ Heading = $(if ($soeName) { "SOE standard '$soeName'" } else { 'SOE standard' }); Rows = $soeRows; Columns = @('Light', 'Type', 'Item', 'Expected', 'Actual', 'Verdict', 'Note'); Note = $(if ($soeName) { 'every rule of the standard against this server (check H-SOE-01); Red = a required rule differs, Amber = an optional one' } else { "no standard applies to this server's group: add '# soe: <name>' to the group file, or create soe\default.json" }) }
-    $sections = @($sections[0]) + @($soeSection) + @($sections | Select-Object -Skip 1)
+    # a domain controller: what the Directory collector read there comes first after the checks - dcdiag test by test,
+    # replication, the role holders, the services (48-Directory.ps1; nothing on any other server)
+    $directory = @(Get-DirectoryDetailsSections -Server $Server)
+    $dirText = Get-DirectorySummaryText -Server $Server -Checks @(Get-CheckRows -Console 'Health' -Server $Server)
+    if ($dirText) { $facts += , @('Directory', $dirText) }
+    $rights = Get-UnelevatedNote -Result $h
+    if ($rights) { $facts += , @('Rights', $rights) }
+    # ... and a server's SQL Server instances and certification authority (49-ServerRoles.ps1; nothing where it has neither)
+    $roles = @(Get-RolesDetailsSections -Server $Server)
+    $sections = @($sections[0]) + $directory + $roles + @($soeSection) + @($sections | Select-Object -Skip 1)
     $sections += @(Get-GpoDetailsSections -Server $Server)
     $sections += @(Get-ScriptsDetailSections -Server $Server)   # the scripts and tasks scan, when it has run (31-Health-Scripts.ps1)
     $sections += Get-ChangeLogSection -Server $Server
@@ -1502,16 +1702,19 @@ function Export-HealthReport {
     $gpoRows = @(foreach ($s in $servers) { foreach ($r in @(Get-GpoRows -Server $s)) { [pscustomobject]@{ Server = $s; Order = $r.Order; GPO = $r.GPO; Status = $r.Status; 'Linked at' = $r.LinkedAt; Version = $r.Version } } })
     # what needs attention first (the list under the divider), with every server named
     $attention = @(Get-HealthAttentionRows -Servers $servers | ForEach-Object { [pscustomobject]@{ Level = $_.Level; Item = $_.Item; Servers = $_.Servers; Which = (@($_.Members) -join ', '); Example = $_.Example; Light = $(switch ($_.Level) { 'Critical' { 'Red' } 'Unreachable' { 'Red' } 'Warning' { 'Amber' } default { 'Grey' } }) } })
+    # the domain controllers among them: a row each, dcdiag test by test, every replication link (48-Directory.ps1; none = no tables)
+    $directory = @(Get-DirectoryReportSections -Servers $servers)
+    $directory += @(Get-RolesReportSections -Servers $servers)   # every SQL Server instance, every certification authority (49-ServerRoles.ps1)
     $cap = Get-HealthCapacityFigures -Servers $servers
     foreach ($m in @(@('Processor busy', 'Cpu'), @('Memory used', 'Memory'), @('Disk used (fullest volume)', 'Disk'))) {
         $fg = $cap.($m[1])
         if ($null -ne $fg.Max) { $notes += ('{0}: {1}% to {2}%, average {3}%, highest on {4}; {5} warning, {6} critical' -f $m[0], [int][math]::Round($fg.Min), [int][math]::Round($fg.Max), [int][math]::Round($fg.Avg), $fg.Worst, $fg.Warning, $fg.Critical) }
     }
-    return (Export-ConsoleReport -Console 'Health' -Title 'Health report' -Summary $summary -SummaryColumns @('Server', 'Group', 'Light', 'Red', 'Amber', 'Green', 'Services', 'Tasks', 'Failed logons', 'Lockouts', 'Dormant', 'SOE', 'GPO', 'Hardware', 'Speed', 'CPU', 'RAM used', 'Disk free (min)', 'Up (d)', 'Errors', 'Clock', 'Worst') -Notes $notes -Sections @(
+    return (Export-ConsoleReport -Console 'Health' -Title 'Health report' -Summary $summary -SummaryColumns @('Server', 'Group', 'Light', 'Red', 'Amber', 'Green', 'Services', 'Tasks', 'Failed logons', 'Lockouts', 'Dormant', 'SOE', 'GPO', 'Hardware', 'Speed', 'CPU', 'RAM used', 'Disk free (min)', 'Up (d)', 'Errors', 'Clock', 'Worst') -Notes $notes -Sections (@(
         @{ Name = 'Needs attention'; Rows = $attention; Columns = @('Level', 'Item', 'Servers', 'Which', 'Example') },
         @{ Name = 'Checks'; Rows = $checkRows; Columns = @('Server', 'Id', 'Group', 'Title', 'Verdict', 'Light', 'Evidence', 'Fix') },
         @{ Name = 'SOE compliance'; Rows = $soeRows; Columns = @('Server', 'Standard', 'Type', 'Name', 'Expected', 'Actual', 'Verdict', 'Light', 'Note') },
-        @{ Name = 'Group Policy'; Rows = $gpoRows; Columns = @('Server', 'Order', 'GPO', 'Status', 'Linked at', 'Version') }))
+        @{ Name = 'Group Policy'; Rows = $gpoRows; Columns = @('Server', 'Order', 'GPO', 'Status', 'Linked at', 'Version') }) + $directory))
 }
 
 # ---------------------------------------------------------------------
@@ -1815,12 +2018,12 @@ function Update-HealthDashboard {
     if (-not $script:Gui['HealthDashCpu']) { return }
     $fig = Get-HealthCapacityFigures -Servers $Servers
     $lim = Get-HealthThresholds
-    foreach ($d in @(@('HealthDashCpu', 'Processor', 'busy', 'Cpu', 'Processor busy on each server shown, a few seconds averaged at the last check (H-CPU-01) - a snapshot: check again before acting'), @('HealthDashMem', 'Memory', 'in use', 'Memory', 'Physical memory in use on each server shown (H-MEM-01)'), @('HealthDashDisk', 'Disk', 'used, fullest volume', 'Disk', 'Space used on the volume the disk check judged on each server shown (H-DSK-01: the one under the limits, else the fullest; a volume smaller than DiskSmallVolumeGB is listed, not judged); critical needs the GB limit and the % limit both crossed'))) {
+    foreach ($d in @(@('HealthDashCpu', 'Processor', 'busy', 'Cpu', 'Processor busy at the last check'), @('HealthDashMem', 'Memory', 'in use', 'Memory', 'Memory in use'), @('HealthDashDisk', 'Disk', 'used, fullest volume', 'Disk', 'Disk used, the volume judged'))) {
         $box = $script:Gui[$d[0]]; $old = $box.Image
         $box.Image = New-HealthGauge -Title $d[1] -Subtitle $d[2] -Figure $fig.($d[3]) -Limits $lim[$d[3]]
         if ($old) { $old.Dispose() }
-        # what the dial does not spell out: the thresholds in words, and that every dot is a server in its check's colour
-        $script:Gui['Tips'].SetToolTip($box, ('{0}. Thresholds: {1} (Settings tab). A dot per server in its check''s colour; the dark band is the lowest to the highest reading.' -f $d[4], $lim[$d[3]].Text))
+        # what the dial does not spell out, in a few words: what it measures and its thresholds
+        $script:Gui['Tips'].SetToolTip($box, ('{0}; thresholds: {1}' -f $d[4], $lim[$d[3]].Text))
     }
     $rows = @(Get-HealthAttentionRows -Servers $Servers)
     Set-GridRows -Grid $script:Gui['HealthAttention'] -Rows $rows -NoKeepChecks -ToolTipProperty 'Tip' -CellColourProperty 'Cells'
@@ -1834,7 +2037,7 @@ function New-HealthDashboard {
     # attention list on the right, each under a heading strip like the grid's.
     param($Panel)
     $left = New-Object System.Windows.Forms.Panel; $left.Dock = 'Left'; $left.Width = 684
-    $sh = New-GridHeader -Heading 'SUMMARY' -Detail '' -Tip 'Processor, memory and disk across the servers shown, from the last "Check health". Hover a dial for its thresholds.'
+    $sh = New-GridHeader -Heading 'SUMMARY' -Detail '' -Tip 'Processor, memory and disk from the last "Check health"'
     $dials = New-Object System.Windows.Forms.FlowLayoutPanel; $dials.Dock = 'Fill'; $dials.WrapContents = $false; $dials.AutoScroll = $true; $dials.BackColor = 'White'
     foreach ($key in 'HealthDashCpu', 'HealthDashMem', 'HealthDashDisk') {
         $pic = New-Object System.Windows.Forms.PictureBox; $pic.Size = New-Object System.Drawing.Size(220, 240); $pic.SizeMode = 'Normal'
@@ -1847,7 +2050,7 @@ function New-HealthDashboard {
         if ($script:Gui['Busy']) { Write-PatchLog 'Busy - details are available again when the current action finishes' 'WARN'; return }
         if ($this.SelectedItems.Count -gt 0) { $row = $this.SelectedItems[0].Tag; if ($row) { Show-DetailsWindow -Title ('Needs attention: ' + $row.Item) -Html (Get-HealthAttentionHtml -Id $row.Id -Servers @($row.Members)) } }
     })
-    $ah = New-GridHeader -Heading 'NEEDS ATTENTION' -Detail '' -Tip 'Every check that is red (critical) or amber (warning) on a server shown, and the servers that could not be read - critical first, then the most servers. Hover a line for every server; double-click it for each server''s finding and the fix.'
+    $ah = New-GridHeader -Heading 'NEEDS ATTENTION' -Detail '' -Tip 'Every red or amber check, critical first; double-click for the fix'
     $right.Controls.AddRange(@($att, $ah.Panel)); $att.BringToFront()
     $Panel.Controls.AddRange(@($right, $left)); $right.BringToFront()
     $script:Gui['HealthDashPics'] = $dials; $script:Gui['HealthAttention'] = $att; $script:Gui['HealthAttentionHead'] = $ah.Info; $script:Gui['HealthDashInfo'] = $sh.Info
@@ -2116,11 +2319,11 @@ function New-SoeItemEditorForm {
     $run = New-Object System.Windows.Forms.CheckBox; $run.Text = 'Must be running'; $run.AutoSize = $true; $run.Margin = New-Object System.Windows.Forms.Padding(0, 8, 0, 4)
     if ($Item -and $Item.PSObject.Properties['mustRun']) { $run.Checked = [bool]$Item.mustRun }
     $table.Controls.Add($req, 0, $row); $table.Controls.Add($run, 1, $row); $row++
-    $help = New-Object System.Windows.Forms.Button; $help.Text = 'Help'; $help.Size = New-Object System.Drawing.Size(95, 30); $help.Anchor = 'Left'; $help.Margin = New-Object System.Windows.Forms.Padding(0, 10, 0, 0)
+    $help = New-Object System.Windows.Forms.Button; $help.Text = 'Help'; $help.Size = New-Object System.Drawing.Size(95, 30); $help.Anchor = 'Left'; $help.Margin = New-Object System.Windows.Forms.Padding(0, 10, 0, 0); Set-ButtonFace -Button $help
     $help.Add_Click({ Show-DetailsWindow -Title 'Help: SOE items by hand' -Html (Get-SoeItemHelpHtml) })
     $buttons = New-Object System.Windows.Forms.FlowLayoutPanel; $buttons.AutoSize = $true; $buttons.FlowDirection = 'RightToLeft'; $buttons.Anchor = 'Right'; $buttons.Margin = New-Object System.Windows.Forms.Padding(0, 10, 0, 0)
-    $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'OK'; $ok.Size = New-Object System.Drawing.Size(95, 30); $ok.DialogResult = 'OK'
-    $cancel = New-Object System.Windows.Forms.Button; $cancel.Text = 'Cancel'; $cancel.Size = New-Object System.Drawing.Size(95, 30); $cancel.DialogResult = 'Cancel'
+    $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'OK'; $ok.Size = New-Object System.Drawing.Size(95, 30); $ok.DialogResult = 'OK'; Set-ButtonFace -Button $ok
+    $cancel = New-Object System.Windows.Forms.Button; $cancel.Text = 'Cancel'; $cancel.Size = New-Object System.Drawing.Size(95, 30); $cancel.DialogResult = 'Cancel'; Set-ButtonFace -Button $cancel
     $buttons.Controls.Add($cancel); $buttons.Controls.Add($ok)   # right to left: Cancel at the edge, OK beside it
     $table.Controls.Add($help, 0, $row); $table.Controls.Add($buttons, 1, $row)
     $dlg.Controls.Add($table)
@@ -2365,7 +2568,7 @@ function New-HealthConsole {
     $combo = New-GroupPicker -Toolbar $toolbar -OnChange { Update-HealthGrid; Update-HealthGpoPage }
     $script:Gui['HealthGroupCombo'] = $combo
     # ONE button collects everything the Health checks, the SOE standard check and the Security console need.
-    $toolbar.Controls.Add((New-GuiButton -Text 'Check health (ticked or all)' -X 235 -Y 8 -W 190 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Status, inventory, health, agents, settings, configuration-point and Group Policy collectors on the ticked servers (all shown if none ticked). Reads only - except that the status check removes the toolkit''s own finished OS patch tasks (\WinRMToolkit\OSPatch-*), as every status check does. Includes the SOE standard check (H-SOE-01).' -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'Check health (ticked or all)' -X 235 -Y 8 -W 190 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Every Health collector on the ticked servers (all if none ticked)' -OnClick {
         Invoke-GuiAction -Name 'Health check' -ReadOnly -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['HealthGrid'])
             if ($servers.Count -eq 0) { $servers = @(Get-GridAllKeys -Grid $script:Gui['HealthGrid']) }
@@ -2377,6 +2580,8 @@ function New-HealthConsole {
             Get-ServerSettings -ComputerName $servers | Out-Null
             Get-ServerProbes -ComputerName $servers -Probes (Get-SoeProbeList) | Out-Null
             Get-ServerGpo -ComputerName $servers | Out-Null
+            Get-ServerDirectory -ComputerName $servers | Out-Null   # the domain controllers among them: dcdiag, replication, the domain (48-Directory.ps1)
+            Get-ServerRoles -ComputerName $servers | Out-Null       # SQL Server and Certificate Services, where a server has them (49-ServerRoles.ps1)
         }
     }))
     $toolbar.Controls.Add((New-GuiButton -Text 'Tick all' -X 430 -Y 8 -W 70 -ReadOnly -OnClick { Set-GridChecks -Grid $script:Gui['HealthGrid'] -Checked $true }))
@@ -2385,15 +2590,17 @@ function New-HealthConsole {
         Invoke-GuiAction -Name 'Health report' -ReadOnly -Action { Show-ReportDone -Report (Export-HealthReport) }
     }))
     $toolbar.Controls.Add((New-GuiButton -Text 'Open reports folder' -X 735 -Y 8 -W 140 -ReadOnly -OnClick { Invoke-GuiAction -Name 'Open reports folder' -ReadOnly -Action { Open-ReportFolder } }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Assign SOE standard...' -X 885 -Y 8 -W 150 -Tip 'Which SOE standard each server is compared with (ticked servers come pre-selected). Written onto the server''s line in the group file as "; soe: <name>", so it persists with the list.' -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'Assign SOE standard...' -X 885 -Y 8 -W 150 -Tip 'Which SOE standard each server is compared with' -OnClick {
         Invoke-GuiAction -Name 'Assign SOE standard' -Action {
             if (-not (Test-GuiDialogAllowed 'The assignment dialog')) { return }
             if (Show-SoeAssignmentDialog -Servers @(Get-GridChecked -Grid $script:Gui['HealthGrid'])) { Get-PatchGroups | Out-Null; Clear-CheckRowCache; Invoke-ConsoleRefresh; Update-SoeItemsGrid }
         }
     }))
-    # what runs on the ticked servers by itself (31-Health-Scripts.ps1): the tasks, the scripts, what to look at - then the report
-    $toolbar.Controls.Add((New-GuiButton -Text 'Scripts and tasks (ticked)' -X 1040 -Y 8 -W 175 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Scheduled tasks and PowerShell scripts on the ticked servers: what runs, from where, what it does and what to look at. Read-only, within the time budget (Settings tab, Health); then the Scripts report.' -OnClick {
-        Invoke-GuiAction -Name 'Scripts and tasks' -ReadOnly -Action {
+    # what runs on the ticked servers by itself (31-Health-Scripts.ps1): the tasks, the scripts, what to look at - then the report.
+    # The one plum button of the window, in bold: an audit that walks the servers' disks and writes its own report, not one
+    # more health check - it is told apart from Check health at a glance (owner's ask 2026-11-19)
+    $scriptsBtn = New-GuiButton -Text 'Scripts and tasks audit (ticked)' -X 1040 -Y 8 -W 225 -Colour 'Plum' -ReadOnly -Tip 'Read-only audit of what runs by itself on the ticked servers' -OnClick {
+        Invoke-GuiAction -Name 'Scripts and tasks audit' -ReadOnly -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['HealthGrid'])
             if ($servers.Count -eq 0) { Show-GuiNotice 'Tick the servers to scan: the scan walks their disks for scripts (the folders and the time budget are on the Settings tab, Health).'; return }
             # a fresh scan at every press (owner's decision 2026-11-09: the data is worth it and the budget bounds it); the
@@ -2408,9 +2615,11 @@ function New-HealthConsole {
             }
             Show-ReportDone -Report (Export-ScriptsReport -Servers $servers)
         }
-    }))
+    }
+    $scriptsBtn.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+    $toolbar.Controls.Add($scriptsBtn)
     # what the row colours and the SOE column mean: on hover over the row count, not as a paragraph under the page
-    $script:Gui['Tips'].SetToolTip($count, 'Row colour = worst check: red = a failure (services, logons, disk, memory, processor, time ...) or a required SOE item that differs, amber = a warning, green = all clear, grey = not checked. Each cell that stands for a check carries that check''s own colour, so a green or amber cell shows inside a red row. SOE column: the standard on the server''s group-file line ("Assign SOE standard..." writes "; soe: <name>" after the name), else the group''s "# soe:" line, else soe\default.json; none = no standard applies. Double-click a server for every check, the SOE comparison, evidence and fixes.')
+    $script:Gui['Tips'].SetToolTip($count, 'Row colour = the worst check; double-click a server for every check')
     $hSplit.BringToFront()
 
     # ---- SOE standards page ----
@@ -2433,7 +2642,7 @@ function New-HealthConsole {
     # the title is 21 px tall: the row under it starts at 27 so it never covers the combo's or the button's top edge
     $cfgBar = New-Object System.Windows.Forms.Panel; $cfgBar.Dock = 'Top'; $cfgBar.Height = 56
     $cfgTitle = New-Object System.Windows.Forms.Label; $cfgTitle.Text = 'Pin from the reference server'; $cfgTitle.Location = New-Object System.Drawing.Point(8, 3); $cfgTitle.AutoSize = $true; $cfgTitle.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
-    $script:Gui['Tips'].SetToolTip($cfgTitle, 'What the reference server has, from its last "Check health": the configuration points it answers (which update server, time source, monitoring or security server - the list is data\soe-config-points.psd1, add your own), or its installed software, agents, features, services and settings with their versions and values. Tick rows, press the button: each becomes a rule of the standard.')
+    $script:Gui['Tips'].SetToolTip($cfgTitle, 'What the reference server has; tick rows to make them rules')
     $refLbl = New-Object System.Windows.Forms.Label; $refLbl.Text = 'Reference server:'; $refLbl.Location = New-Object System.Drawing.Point(8, 33); $refLbl.AutoSize = $true
     $refCombo = New-Object System.Windows.Forms.ComboBox; $refCombo.Location = New-Object System.Drawing.Point(110, 29); $refCombo.Width = 240; $refCombo.DropDownStyle = 'DropDownList'
     # the handlers only repaint the grid - never the combo's own items (Update-SoeRefCombo, from a console repaint) - and
@@ -2448,7 +2657,7 @@ function New-HealthConsole {
     $showCombo.Add_SelectedIndexChanged({ try { Update-SoeConfigPointsGrid } catch { Write-PatchLog ("The reference server's rows could not be shown: {0}" -f (Get-ShortError $_)) 'ERROR' } })
     $script:Gui['SoeShowCombo'] = $showCombo
     $cfgBar.Controls.AddRange(@($cfgTitle, $refLbl, $refCombo, $showLbl, $showCombo))
-    $cfgBar.Controls.Add((New-GuiButton -Text 'Add to the standard (ticked)' -X 660 -Y 27 -W 190 -H 26 -Colour 'LightGreen' -ReadOnly -Tip 'Each ticked row becomes a rule: a configuration point with the value the reference server has (or a value you type when it has none), a product or agent at its version (>=), a feature, a service with its start type and state, a setting with its value. Saved at once.' -OnClick {
+    $cfgBar.Controls.Add((New-GuiButton -Text 'Add to the standard (ticked)' -X 660 -Y 27 -W 190 -H 26 -Colour 'LightGreen' -ReadOnly -Tip 'Each ticked row becomes a rule; saved at once' -OnClick {
         Invoke-GuiAction -Name 'Add from the reference server' -ReadOnly -Action {
             $std = $script:Gui['SoeStandard']; if (-not $std) { Show-GuiNotice 'Create or select a standard first (New).'; return }
             $picked = @($script:Gui['SoeConfigGrid'].Items | Where-Object { $_.Checked } | ForEach-Object { $_.Tag })
@@ -2504,7 +2713,7 @@ function New-HealthConsole {
         }
     }))
     # Every change to a standard is written to its JSON file at once (no separate Save step to forget).
-    $soeBar.Controls.Add((New-GuiButton -Text 'Add from server...' -X 440 -Y 4 -W 130 -H 32 -Colour 'LightGreen' -ReadOnly -Tip 'Pick agents, software, features, services and settings from a scanned server (tick everything = whole server as exemplar). Saved at once.' -OnClick {
+    $soeBar.Controls.Add((New-GuiButton -Text 'Add from server...' -X 440 -Y 4 -W 130 -H 32 -Colour 'LightGreen' -ReadOnly -Tip 'Pick items from a scanned server; saved at once' -OnClick {
         Invoke-GuiAction -Name 'Add SOE items from a server' -ReadOnly -Action {
             $std = $script:Gui['SoeStandard']; if (-not $std) { Show-GuiNotice 'Create or select a standard first (New).'; return }
             $scanned = @(Get-UniqueNames (@($script:Results['Inventory'].Keys) + @($script:Results['Agents'].Keys) + @($script:Results['Settings'].Keys)))
@@ -2517,7 +2726,7 @@ function New-HealthConsole {
             Update-SoeItemsGrid
         }
     }))
-    $soeBar.Controls.Add((New-GuiButton -Text 'Add fleet agents' -X 575 -Y 4 -W 120 -H 32 -ReadOnly -Tip 'The most common version of every agent across the scanned servers. Saved at once.' -OnClick {
+    $soeBar.Controls.Add((New-GuiButton -Text 'Add fleet agents' -X 575 -Y 4 -W 120 -H 32 -ReadOnly -Tip 'The most common version of every agent; saved at once' -OnClick {
         Invoke-GuiAction -Name 'Add fleet agents' -ReadOnly -Action {
             $std = $script:Gui['SoeStandard']; if (-not $std) { Show-GuiNotice 'Create or select a standard first (New).'; return }
             $items = @(Get-FleetAgentItems)
@@ -2533,7 +2742,7 @@ function New-HealthConsole {
             $it = Show-SoeItemEditor; if ($it) { $std.items = @($std.items) + $it; Save-SoeStandard -Standard $std; Update-SoeItemsGrid }
         }
     }))
-    $soeBar.Controls.Add((New-GuiButton -Text 'Remove items (ticked)' -X 815 -Y 4 -W 140 -H 32 -ReadOnly -Tip 'Removes the ticked rules from the standard (asks first). Saved at once.' -OnClick {
+    $soeBar.Controls.Add((New-GuiButton -Text 'Remove items (ticked)' -X 815 -Y 4 -W 140 -H 32 -ReadOnly -Tip 'Removes the ticked rules (asks first); saved at once' -OnClick {
         Invoke-GuiAction -Name 'Remove SOE items' -ReadOnly -Action {
             $std = $script:Gui['SoeStandard']; if (-not $std) { return }
             $drop = @($script:Gui['SoeItemsGrid'].Items | Where-Object { $_.Checked } | ForEach-Object { $_.Tag.Item })
@@ -2545,14 +2754,14 @@ function New-HealthConsole {
             Update-SoeItemsGrid
         }
     }))
-    $soeBar.Controls.Add((New-GuiButton -Text 'Assign to servers...' -X 960 -Y 4 -W 130 -H 32 -Tip 'Which servers are compared with this standard. Written onto each server''s line in its group file as "; soe: <name>", so it persists with the list.' -OnClick {
+    $soeBar.Controls.Add((New-GuiButton -Text 'Assign to servers...' -X 960 -Y 4 -W 130 -H 32 -Tip 'Which servers are compared with this standard' -OnClick {
         Invoke-GuiAction -Name 'Assign SOE standard' -Action {
             if (-not (Test-GuiDialogAllowed 'The assignment dialog')) { return }
             if (Show-SoeAssignmentDialog -Standard ([string]$script:Gui['SoeCombo'].SelectedItem)) { Get-PatchGroups | Out-Null; Clear-CheckRowCache; Invoke-ConsoleRefresh; Update-SoeItemsGrid }
         }
     }))
     $soeLabel = New-Object System.Windows.Forms.Label; $soeLabel.Location = New-Object System.Drawing.Point(8, 48); $soeLabel.AutoSize = $true; $soeLabel.ForeColor = 'DimGray'
-    $script:Gui['Tips'].SetToolTip($soeLabel, ('Every change is saved to soe\<name>.json at once. A server is compared with the standard on its group-file line ("; soe: <name>", set by Assign to servers...), else its group''s "# soe:" line, else soe\{0}.json.' -f $script:Config.DefaultSoeStandard))
+    $script:Gui['Tips'].SetToolTip($soeLabel, 'Every change is saved to soe\<name>.json at once')
     $soeBar.Controls.Add($soeLabel); $script:Gui['SoeLabel'] = $soeLabel
     $soeSplit.BringToFront()
     $script:Gui['SoeSplit'] = $soeSplit
@@ -2565,14 +2774,14 @@ function New-HealthConsole {
         if ($script:Gui['Busy']) { Write-PatchLog 'Busy - details are available again when the current action finishes' 'WARN'; return }
         if ($this.SelectedItems.Count -gt 0) { $n = $this.SelectedItems[0].Text; Show-DetailsWindow -Title "GPO: $n" -Html (Get-GpoFleetDetailsHtml -Gpo $n -Servers @(Get-UniqueNames (Get-GroupRows -Combo $script:Gui['HealthGroupCombo'] | ForEach-Object { $_.Server }))) }
     })
-    $gpoHead = New-GridHeader -Heading 'GPOS ON THE SERVERS SHOWN' -Detail 'nothing collected yet - press "Check health" on the Health checks page' -Tip 'The computer part of each server''s last policy run, read by "Check health" (read-only). "Not applied" is often deliberate: security filtering, a WMI filter, or a GPO meant for users. Which GPO sets which security value is on the Security console''s GPO recommendations page. Double-click a GPO for every server''s status.'
+    $gpoHead = New-GridHeader -Heading 'GPOS ON THE SERVERS SHOWN' -Detail 'nothing collected yet - press "Check health" on the Health checks page' -Tip 'Each server''s last computer policy run; double-click a GPO'
     $gpoSplit.Panel1.Controls.Add($gpoGrid); $gpoSplit.Panel1.Controls.Add($gpoHead.Panel); $gpoGrid.BringToFront()
     $gpoSrvGrid = New-ConsoleGrid -NoCheckBoxes -Columns @(@{ Name = 'Server'; Width = 170 }, @{ Name = 'Light'; Width = 55 }, @{ Name = 'Domain'; Width = 160 }, @{ Name = 'Site'; Width = 110 }, @{ Name = 'Last refresh'; Width = 200 }, @{ Name = 'GPOs'; Width = 130 }, @{ Name = 'Failing extensions'; Width = 180 }, @{ Name = 'Errors'; Width = 140 }, @{ Name = 'Secure channel'; Width = 100 }, @{ Name = 'Note'; Width = 250; Fill = $true })
     $gpoSrvGrid.Add_DoubleClick({
         if ($script:Gui['Busy']) { Write-PatchLog 'Busy - details are available again when the current action finishes' 'WARN'; return }
         if ($this.SelectedItems.Count -gt 0) { $n = $this.SelectedItems[0].Text; Show-DetailsWindow -Title "Health: $n" -Html (Get-HealthDetailsHtml -Server $n) }
     })
-    $srvHead = New-GridHeader -Heading 'GROUP POLICY PER SERVER' -Detail '' -Tip 'Lights from checks H-GPO-01 (errors), H-GPO-02 (last refresh) and H-GPO-03 (secure channel). Red: an extension failed, a Group Policy error, or a broken secure channel. Amber: warnings, or no refresh for longer than the Settings tab allows. Double-click a server for its whole Health page.'
+    $srvHead = New-GridHeader -Heading 'GROUP POLICY PER SERVER' -Detail '' -Tip 'Lights from H-GPO-01..03; double-click a server for its page'
     $gpoSplit.Panel2.Controls.Add($gpoSrvGrid); $gpoSplit.Panel2.Controls.Add($srvHead.Panel); $gpoSrvGrid.BringToFront()
     $pageGpo.Controls.Add($gpoSplit)
     $script:Gui['GpoGrid'] = $gpoGrid; $script:Gui['GpoServerGrid'] = $gpoSrvGrid; $script:Gui['GpoHead'] = $gpoHead.Info; $script:Gui['GpoServerHead'] = $srvHead.Info; $script:Gui['GpoSplit'] = $gpoSplit
@@ -2653,7 +2862,7 @@ function Show-SoeAssignmentDialog {
     $combo = New-Object System.Windows.Forms.ComboBox; $combo.Location = New-Object System.Drawing.Point(230, 10); $combo.Width = 320; $combo.DropDownStyle = 'DropDownList'
     [void]$combo.Items.Add($none); foreach ($n in $names) { [void]$combo.Items.Add($n) }
     if ($Standard -and $combo.Items.Contains($Standard)) { $combo.SelectedItem = $Standard } else { $combo.SelectedIndex = 0 }
-    $apply = New-Object System.Windows.Forms.Button; $apply.Text = 'Apply to selected'; $apply.Location = New-Object System.Drawing.Point(560, 8); $apply.Size = New-Object System.Drawing.Size(130, 28)
+    $apply = New-Object System.Windows.Forms.Button; $apply.Text = 'Apply to selected'; $apply.Location = New-Object System.Drawing.Point(560, 8); $apply.Size = New-Object System.Drawing.Size(130, 28); Set-ButtonFace -Button $apply
     $hint = New-Object System.Windows.Forms.Label; $hint.Location = New-Object System.Drawing.Point(10, 46); $hint.Size = New-Object System.Drawing.Size(960, 66); $hint.ForeColor = 'DimGray'
     $hint.Text = ('Select one or more servers (Shift or Ctrl for several; the filter box narrows the list), pick a standard, press "Apply to selected", then Save. Save writes "; soe: <name>" after the server name on its line in the group file, e.g. "srv-web01.corp.local; soe: Web tier", so the assignment persists with the list and can be edited in Notepad. A server without its own entry uses the group file''s "# soe:" line, else soe\{0}.json. The comparison runs inside "Check health" (check H-SOE-01, the SOE column).' -f $script:Config.DefaultSoeStandard)
     $bottom.Controls.AddRange(@($l, $combo, $apply, $hint))
@@ -2688,8 +2897,8 @@ function Show-InputBox {
     $dlg.Text = $Title; $dlg.Size = New-Object System.Drawing.Size(480, 160); $dlg.StartPosition = 'CenterParent'; $dlg.FormBorderStyle = 'FixedDialog'; $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
     $l = New-Object System.Windows.Forms.Label; $l.Text = $Prompt; $l.Location = New-Object System.Drawing.Point(12, 12); $l.Size = New-Object System.Drawing.Size(440, 20)
     $t = New-Object System.Windows.Forms.TextBox; $t.Location = New-Object System.Drawing.Point(12, 40); $t.Width = 440; $t.Text = $Default
-    $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'OK'; $ok.Location = New-Object System.Drawing.Point(262, 76); $ok.Size = New-Object System.Drawing.Size(90, 28); $ok.DialogResult = 'OK'
-    $cancel = New-Object System.Windows.Forms.Button; $cancel.Text = 'Cancel'; $cancel.Location = New-Object System.Drawing.Point(362, 76); $cancel.Size = New-Object System.Drawing.Size(90, 28); $cancel.DialogResult = 'Cancel'
+    $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'OK'; $ok.Location = New-Object System.Drawing.Point(262, 76); $ok.Size = New-Object System.Drawing.Size(90, 28); $ok.DialogResult = 'OK'; Set-ButtonFace -Button $ok
+    $cancel = New-Object System.Windows.Forms.Button; $cancel.Text = 'Cancel'; $cancel.Location = New-Object System.Drawing.Point(362, 76); $cancel.Size = New-Object System.Drawing.Size(90, 28); $cancel.DialogResult = 'Cancel'; Set-ButtonFace -Button $cancel
     $dlg.Controls.AddRange(@($l, $t, $ok, $cancel)); $dlg.AcceptButton = $ok; $dlg.CancelButton = $cancel
     $dlg.ActiveControl = $t   # the cursor is in the box: type the name, press Enter
     $answer = ''

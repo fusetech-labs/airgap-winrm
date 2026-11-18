@@ -74,7 +74,7 @@ $script:SpokeMode = [bool]$Spoke   # read by Get-PatchGroups (this computer is t
 # 3. Load the building blocks - an explicit list in load order; any other .ps1 in lib\ is reported, never run.
 $script:LibFiles = @('01-Config.ps1', '02-Logging.ps1', '03-Groups.ps1', '04-Patches.ps1', '05-WinRM.ps1', '06-Install.ps1',
                      '07-Gui.ps1', '08-CodeTour.ps1', '09-Reports.ps1', '10-Checks.ps1', '11-ChangeLog.ps1', '12-Settings.ps1', '13-GroupPolicy.ps1', '14-State.ps1',
-                     '20-Console-Patching.ps1', '21-Patching-Analysis.ps1', '30-Console-Health.ps1', '31-Health-Scripts.ps1', '40-Console-Security.ps1', '45-Security-Gpo.ps1', '46-Security-Compliance.ps1', '47-Licensing.ps1', '50-Console-Software.ps1',
+                     '20-Console-Patching.ps1', '21-Patching-Analysis.ps1', '30-Console-Health.ps1', '31-Health-Scripts.ps1', '40-Console-Security.ps1', '45-Security-Gpo.ps1', '46-Security-Compliance.ps1', '47-Licensing.ps1', '48-Directory.ps1', '49-ServerRoles.ps1', '50-Console-Software.ps1',
                      '60-Console-Settings.ps1', '70-Console-About.ps1', '80-Console-Commands.ps1')
 $libFolder = Join-Path $script:RootFolder 'lib'
 if (-not (Test-Path -LiteralPath $libFolder)) {

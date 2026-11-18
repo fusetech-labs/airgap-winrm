@@ -449,7 +449,7 @@ function Wait-PatcherJob {
         # an install watch (Watch-PatchRuns) may own the button as "Let the servers go": a read-only check running alongside
         # borrows it and hands it back as it was - neither hidden, nor with this check's stop turned into "let them go" (R6-00)
         if ($script:Gui['StopOwner']) { $lent = @{ Text = $button.Text; Tip = $button.ToolTipText; Enabled = $button.Enabled; Stop = [bool]$script:Gui['StopRequested'] } }
-        $script:Gui['StopRequested'] = $false; $button.Enabled = $true; $button.Text = 'Stop waiting'; $button.ToolTipText = 'Give up on the servers that have not answered yet (read-only checks only; nothing is changed on them)'; $button.Visible = $true
+        $script:Gui['StopRequested'] = $false; $button.Enabled = $true; $button.Text = 'Stop waiting'; $button.ToolTipText = 'Stop waiting for the servers that have not answered (read-only)'; $button.Visible = $true
     }
     $turnBegan = @{}   # child job -> seconds on the watch when it was first seen running (NotStarted = still queued for a slot)
     try {
@@ -574,7 +574,11 @@ function Invoke-Collector {
     $localNames = @($names | Where-Object { Test-ThisComputer -Name $_ })
     $names = @($names | Where-Object { $localNames -notcontains $_ })
     $localJob = $null
+    # the job runs with this window's rights: one not started with "Run as administrator" reads this computer without
+    # them, and the answer says so (Elevated, read by Get-UnelevatedNote) - over WinRM a server hands an administrator all of them
+    $elevatedHere = $true
     if ($localNames.Count -gt 0) {
+        $elevatedHere = [bool](Test-ToolkitAdmin)
         Write-PatchLog ("Start-Job  ({0} collector on this computer - {1} - as {2}; no WinRM call to itself)" -f $Name, ($localNames -join ','), (Get-OperatorIdentity)) 'CMD'
         $localCall = @{ ScriptBlock = $ScriptBlock }
         if ($ArgumentList.Count -gt 0) { $localCall['ArgumentList'] = $ArgumentList }
@@ -616,8 +620,8 @@ function Invoke-Collector {
     # every answer under the name it was asked by: a remote child by its Location, the local job once per alias of this
     # computer in the list (localhost and the name are one box: one run, a row for each)
     $answers = @()
-    if ($job) { foreach ($child in $job.ChildJobs) { $errs = @(); $o = Receive-Job -Job $child -ErrorAction SilentlyContinue -ErrorVariable errs; $answers += [pscustomobject]@{ Child = $child; Server = [string]$child.Location; Out = $o; Errors = @($errs) } } }
-    if ($localJob) { $child = $localJob.ChildJobs[0]; $errs = @(); $o = Receive-Job -Job $child -ErrorAction SilentlyContinue -ErrorVariable errs; foreach ($alias in $localNames) { $answers += [pscustomobject]@{ Child = $child; Server = $alias; Out = $o; Errors = @($errs) } } }
+    if ($job) { foreach ($child in $job.ChildJobs) { $errs = @(); $o = Receive-Job -Job $child -ErrorAction SilentlyContinue -ErrorVariable errs; $answers += [pscustomobject]@{ Child = $child; Server = [string]$child.Location; Out = $o; Errors = @($errs); Local = $false } } }
+    if ($localJob) { $child = $localJob.ChildJobs[0]; $errs = @(); $o = Receive-Job -Job $child -ErrorAction SilentlyContinue -ErrorVariable errs; foreach ($alias in $localNames) { $answers += [pscustomobject]@{ Child = $child; Server = $alias; Out = $o; Errors = @($errs); Local = $true } } }
     $results = @($early)
     $denied  = @()
     $keep = $null   # what goes into the table for a server: its fresh result, or the good result it had when this attempt failed
@@ -633,6 +637,7 @@ function Invoke-Collector {
                 $result | Add-Member -NotePropertyName Reachable -NotePropertyValue $true  -Force
                 $result | Add-Member -NotePropertyName Error     -NotePropertyValue ''     -Force
                 $result | Add-Member -NotePropertyName Checked   -NotePropertyValue (Get-Date) -Force
+                if ($answer.Local) { $result | Add-Member -NotePropertyName Elevated -NotePropertyValue $elevatedHere -Force }
                 $sumText = ''
                 if ($Summary) { try { $sumText = [string](& $Summary $result) } catch { $sumText = ('collected (the summary line failed: {0})' -f (Get-ShortError $_)) } } else { $sumText = "$Name collected" }
                 Write-PatchLog ("{0}: {1}" -f $server, $sumText) 'OK'
@@ -717,6 +722,8 @@ function Get-ServerStatus {
     # the toolkit PC itself in the list: a managed server like any other, worked without a WinRM call to itself - said once
     # per check, so nobody wonders
     foreach ($self in @($fresh | Where-Object { Test-ThisComputer -Name $_ })) { Write-PatchLog "$self is this computer, the toolkit PC: checked and patched like any other managed server, with every step run here instead of over WinRM; its reboot comes last, with a 60 s countdown, and closes the toolkit with it" 'WHY' }
+    # ... and read with this window's rights: without "Run as administrator" Windows refuses part of it, here only
+    if (@($fresh | Where-Object { Test-ThisComputer -Name $_ }).Count -gt 0 -and -not (Test-ToolkitAdmin)) { Write-PatchLog 'This window was not started with "Run as administrator": on THIS computer the Security log (failed logons, lockouts), the policy results (RSoP), the audit policy, the user rights and a few settings are refused and show as not read. Every other server is read in full. To read them here too, close the toolkit and start it from a PowerShell opened with "Run as administrator".' 'WARN' }
     try { Update-InstallFlagsFromStatus -Servers $fresh } catch { Write-PatchLog "The open install runs could not be matched against the status: $(Get-ShortError $_)" 'WARN' }
     # a software item the tool stopped waiting for, finished since: its real result goes into the change log on this PC (50-Console-Software)
     try { Update-SoftwareLateResults -Servers $fresh } catch { Write-PatchLog "Late software results could not be added to the change log: $(Get-ShortError $_)" 'WARN' }
@@ -747,6 +754,16 @@ function Get-CollectorResult {
     param([string]$Name, [string]$Server)
     if (-not $script:Results.ContainsKey($Name)) { return $null }
     return $script:Results[$Name][$Server]
+}
+
+function Get-UnelevatedNote {
+    # Why a result read on the computer itself may be short of values, or '': the toolkit there (this window, or the copy
+    # on a server) was not started with "Run as administrator".  Windows then hands even an administrator a session
+    # without the rights the Security log, the policy results (RSoP), the audit policy and the user rights are read
+    # with.  A result read over WinRM, or from before 2.3, carries no such mark and gets no note.
+    param($Result)
+    if (-not $Result -or -not $Result.PSObject.Properties['Elevated'] -or $Result.Elevated -ne $false) { return '' }
+    return 'the toolkit that read this computer was not started with "Run as administrator" - start it that way and check again'
 }
 
 function ConvertTo-SettingsTable {

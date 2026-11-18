@@ -6,6 +6,247 @@ All notable changes to this project are recorded here. The format follows Keep a
 The Airgap Download Toolkit in `companion\`, for the side that has internet, carries a version number of its own; its
 entries are headed *Download Toolkit*.
 
+## [2.3.0] - in progress
+
+### Added
+
+- **Domain controllers and the domain: ten health checks and 37 security checks, with no PowerShell module.** On a
+  domain controller the Health check, the Security audit and the self-check run one more collector, *Directory*
+  (`lib\48-Directory.ps1`). It reads the directory on the server it runs on through ADSI, the registry, WMI and
+  `dcdiag.exe` - not the ActiveDirectory module, not any other - and writes nothing. On every other server the
+  checks read *not a domain controller*, without a call.
+  - **Every domain controller** (H-AD-01..05, SEC-ADC-01..04): dcdiag, inbound replication as the directory records
+    it, SYSVOL and NETLOGON, the directory's services, the five operations master roles; LDAP signing (ISM-1929),
+    the Print Spooler (ISM-1828), other server roles on a domain controller (ISM-1926), strong certificate mapping
+    (ISM-1943).
+  - **The domain, once, on its PDC emulator** (H-AD-06, 07, 09 and SEC-AD-01..29): the last backup, the RID pool, the
+    functional level; Kerberos pre-authentication, reversible encryption, accounts without a password, userPassword,
+    passwords in descriptions, service principal names (who has one, AES, duplicates), delegation, SID history, who
+    owns the domain and whether those accounts are protected, cannot be delegated and are in use, inactive
+    accounts, disabled accounts in groups, Pre-Windows 2000 Compatible Access, the machine account quota, SID
+    filtering on trusts, the KRBTGT and built-in Administrator passwords, computer account passwords, who may
+    replicate the directory's secrets (DCSync), write permissions of Domain Computers, passwords in Group Policy
+    Preferences. 45 ISM controls are cited; the manual has the table.
+  - **The forest, once, on the PDC emulator of its root domain** (H-AD-08, H-AD-10, SEC-AD-30..33): the time
+    source, the Recycle Bin, certificate templates that let a requester name the subject of a logon certificate or
+    that ordinary accounts may change, the published templates good for logon, the templates changed lately.
+  - **A domain controller that refuses WinRM** is read by its own local copy: the self-check and the local window
+    run the collector there, and the results file written to the hub carries the checks into the hub's consoles.
+  - **On the Health tab** a domain controller's details page (double-click its row) says `dcdiag 29/29` at its head,
+    with what else of its directory checks is red or amber, and lists dcdiag test by test (a failed one with what
+    dcdiag printed), every inbound replication link, the role holders, the directory's services and the domain's
+    domain controllers. The Health report has the same as three tables. The grid has no column for it: the
+    directory checks count in the row's Red, Amber and Green like any other.
+  - A read that fails, or that the collector's four minutes no longer allow, is Amber with the reason - never a
+    pass. A sweep that returns more than `DirectoryMaxObjects` objects stops there, judges what it read and says
+    *there may be more*; with nothing found up to there it is Amber too. A domain controller with results from before 2.3 shows the checks grey (*not collected yet*) until it is
+    checked again.
+  - Seven thresholds on the Settings tab: `DirectoryMaxObjects` (20000), `DirectoryReplicationMaxHours` (24),
+    `DirectoryBackupMaxDays` (7), `DomainAccountInactiveDays` (45), `DomainAdminsMax` (5),
+    `KrbtgtPasswordMaxAgeDays` (180), `ComputerPasswordMaxAgeDays` (30).
+  - Not judged: what cannot be read from a server (ISM-1827, ISM-1833, ISM-1927, ISM-1928), and whether the
+    reviews the ISM asks for took place - the checks give the list to review. The certification authority's own
+    flags and web enrolment are read on the authority itself (the next entry).
+- **Local users and groups: eight security checks and two health checks.** The Settings collector lists every local
+  user account and local group of a server - through ADSI (the WinNT provider), so no PowerShell module is loaded -
+  and the checks judge them. Not applicable on a domain controller; a list that could not be read is Amber, never a
+  pass. The built-in Administrator has its own check, SEC-CRD-03, stricter from this version (see *Changed*).
+  - SEC-ACC-01 Guest, DefaultAccount and WDAGUtilityAccount are disabled (ISM-0383); SEC-ACC-02 no enabled account
+    may have an empty password (ISM-0421, ISM-1557, ISM-0422); SEC-ACC-03 and SEC-ACC-04 local administrator accounts and other local
+    accounts not logged on for 45 days (ISM-1648, ISM-1404); SEC-ACC-05 shared local accounts on a domain member
+    (ISM-0415); SEC-ACC-06 the password of any enabled local administrator account, whatever it is called, older
+    than a year: not rotated (ISM-1685); SEC-ACC-07 who is in the
+    privileged and remote-logon groups (ISM-1508, ISM-1852); SEC-ACC-08 group members left over from deleted accounts
+    (ISM-0430).
+  - Health: H-ACC-01 a local account locked out, or its password expired or about to; H-ACC-02 a service that runs
+    as a local account which is gone, disabled or locked out, or whose password has expired.
+  - Three thresholds on the Settings tab: `LocalAccountInactiveDays` (45), `LocalAdminPasswordMaxAgeDays` (365),
+    `LocalPasswordExpiryWarnDays` (14).
+- **The computer the toolkit runs on says when it was read without administrator rights.** That computer is read by
+  the window itself, and a window not started with *Run as administrator* is refused the Security log, the policy
+  results (RSoP), the audit policy, the user rights and a few settings there - whatever groups the account is in.
+  The values showed as *not read* with a hint about the account's groups. Now the answer of every collector run on
+  the computer itself carries the rights it was read with: the Health and Security rows begin with *NOT ALL READ
+  (not run as administrator)*, the checks concerned (failed logons, lockouts, the collector's own errors, RSoP) name
+  the reason, and every check writes one warning to the log. Every other server is read in full, as before. The same mark travels in the
+  results file of a copy run on a server.
+- **NOT ELEVATED, in the top right corner of every console**, while the window runs without administrator rights. A
+  click opens a page: what is not read on the PC the toolkit runs on (the Security log, Group Policy results, the
+  audit policy and user rights, some settings and features), what is not done there (installs and removals, the
+  Trellix Agent services), whether that concerns the PC today - only when it is in a group file, or the window is
+  the copy on a server - and how to start with the rights. A window that has them shows no mark.
+- **SQL Server and Certificate Services: six health checks and 13 security checks, read from the server.** Every
+  Health check, every Security audit and the self-check run one more collector, *Roles* (`lib\49-ServerRoles.ps1`),
+  on every server. It reads the registry, the services, the access lists of folders, the Application log, the
+  certificate store and the web server's configuration file - and writes nothing. No connection is made to a
+  database instance. A server with neither role answers at once and its checks read *not applicable*.
+  - **SQL Server** (H-SQL-01..03, SEC-SQL-01..07), per instance: the engine and Agent services; errors in the
+    Application log, damaged pages in red; backups as that log records them; the accounts the services run as
+    (ISM-1249, ISM-1250); how the instance listens (ISM-1247); Force Encryption and its certificate (ISM-1277);
+    who may reach the data, log and backup folders (ISM-1256); a web server on the same machine (ISM-1269);
+    Windows logons only (ISM-1260); logon auditing (ISM-1537). What is decided inside the instance - who is a
+    sysadmin, `sa`, the server audit - is not read, and the checks say so.
+  - **A certification authority** (H-CA-01..03, SEC-CA-01..06): the service, the next revocation list, its own
+    certificate; `EDITF_ATTRIBUTESUBJECTALTNAME2` (ISM-1944); the provider that holds its key (ISM-1957); web
+    enrolment with HTTPS and Extended Protection (ISM-2130); its audit filter (ISM-2132); who may manage it
+    (ISM-1508); encrypted requests (ISM-1246). Read as the configuration of Certificate Services is documented:
+    no certification authority was at hand, so try these on yours.
+  - **Certificate templates**, with the domain's other checks: SEC-AD-32 lists the published templates good for
+    logon (ISM-1947) and SEC-AD-33 the templates changed in the last 90 days, for the quarterly review (ISM-2131).
+  - On the Health tab the server's page lists its instances, their services, folders, errors and backups, or its
+    certification authority; the Health report has both as tables. One threshold on the Settings tab:
+    `SqlBackupMaxDays` (7).
+- **Software library: Remove package...** takes the selected package out of `data\software-packages.psd1` - no hand
+  edit - and, asked separately, deletes its installer files from `software\`. The removed entry is written to the
+  log; every other byte of the catalogue stays; nothing changes on a server.
+- `data\known-apps.psd1` knows KeePass 2.x (2.62 of 2026-11-04, from the vendor's release list): an older copy reads
+  **Behind** in the software inventory, where it read *not in known-apps.psd1*. KeePass 1.x is a line of its own
+  and is not matched.
+- Software console, registering an `.exe`: the form reads which setup program built the file - Inno Setup, a WiX
+  bundle, InstallShield or NSIS - says so in its preview (*Built with*) and starts a new registration with that
+  program's usual silent switches, instead of leaving the choice to the operator. Help on the Software tab and the
+  manual have the table of setup programs, their marks and their switches.
+
+### Changed
+
+- **Tool tips are a few words.** Every tool tip of the window - buttons, headings, tick boxes, the page tabs of the
+  Security console, the settings - is now at most 70 characters on one line, where some ran to a paragraph. What
+  they explained is in the manual: the row colours of the Health grid, the pass rate, what unticking an
+  internet-facing server writes. The tool tip of a setting ends with the setting's name.
+- **The manual's ten screenshots are of version 2.3**: every console as it is now, taken from the running window with
+  the results of a test fleet; the servers' names and the login are blurred, as before.
+- **Health console: the button is now Scripts and tasks audit (ticked)**, and it is told apart from the checks beside
+  it: the one plum button of the window, in bold. What it does is unchanged - read-only, the ticked servers, then
+  the Scripts report.
+- **TCP 445 is described as it is used.** The ports picture and the Code Tour (A2, A3) listed SMB as never used.
+  That holds from this PC to a server - the tool never opens `\\server\C$`. The other way it is optional: the copy
+  on a server marked `winrm: no` may read `patches\` and `software\` from, and write its results file to, a share
+  of this PC. The picture's row now says so (*optional*, a `winrm: no` server to the operator PC), and the manual
+  and the copy's `INSTRUCTIONS.txt` name the port. Carried by hand, the copy and its results file use no port.
+- No installer restarts a server, also where the switches cannot say so: an `.exe` built with NSIS has no switch that
+  holds back a restart, so it is refused whatever is typed in the argument boxes (**Blocked: file**, in the form and at
+  every scan). Before, `/S /norestart` passed the check although the installer ignores `/norestart`. Take the
+  vendor's `.msi`. The setup program is kept with the file's vetting.
+- No removal restarts a server either. UNINSTALL runs an uninstaller only where the tool knows the switch that holds
+  a restart back (MSI, Inno Setup, WiX bundles) and adds it. Any other uninstaller - NSIS, InstallShield and the
+  rest - could restart the server by itself: its product now reads **by hand** in the Removal column and is never
+  run, refused on the operator PC and again on the server. Before, such a product read **quiet (may restart)** and
+  was removed after a warning. Remove it on the server in a reboot window.
+- **SEC-CRD-03, the built-in Administrator: enabled is a failure, whatever the account is called.** The check passed
+  a renamed account and only warned about an enabled one still named Administrator. A rename does not change which
+  account it is - the same identifier on every Windows server - and the ISM has default accounts changed, disabled
+  or removed (ISM-0383): local administration runs on an account of your own, any name, and the built-in one is
+  disabled. The check now fails on an enabled built-in Administrator under any name and names the local
+  administrator accounts used in its place. On a domain controller, where the account is the domain's break glass
+  account, renamed is still enough. A server that passed on a rename fails until the account is disabled, or the
+  check is tailored with a reason.
+
+### Fixed
+
+- **The buttons of the pop-up windows look like buttons.** The buttons at the foot of a pop-up window - the Software
+  library, Register, the plan before an install, a change record, Copy for a server, code signing, the SOE and
+  tailoring forms - were left to the Windows theme and could draw as bare text, like labels. They wear the flat face
+  with an edge that the buttons of the consoles have; the pop-up windows of the Download Toolkit too.
+- **Software library window: the buttons say what a press does.** *Most needed* is **Tick most to do**: it ticks the
+  packages with the most servers to update or install, as many as the console shows. *Show ticked*, which read like a
+  filter of the list, is **OK**: it shows the ticked packages in the console and closes the window. Each button has
+  a tool tip, and the line of text beside them is gone.
+- From the last code review before release:
+  - **Compliance figures.** A finding whose text happened to hold the words *not read* was left out of the figures
+    as if its value had not been read: SQL Server in mixed mode (SEC-SQL-06), a certification authority that records
+    only part (SEC-CA-04). And local groups, or the members of Administrators, that did not come back counted as
+    not compliant where they were not read (SEC-ACC-07, SEC-ACC-08, SEC-CRD-02). The texts now say what they mean.
+  - **The log line of a Group Policy check** counted an extension's old failed result as *failing*, while the check
+    and the page call it stale. It counts the two as they do.
+  - **A self-check asked for the Directory alone** (`-Only Directory`), or one whose settings read failed, ended as
+    a failed collector on a healthy server: the collector waited for another one to say whether the computer is a
+    domain controller. The computer it runs on now says so itself; a server left out on the hub is named in the log.
+  - **Local accounts on a domain controller.** Where the domain role could not be read, the Settings collector went
+    on to list local accounts - on a domain controller that is every account of the domain. It lists nothing then
+    and says why.
+  - **Nearly everybody** (Everyone, Authenticated Users, Domain Users ...) was written out five times and the lists
+    differed: INTERACTIVE and NETWORK counted for the local groups only. One list now, the same in every check.
+  - An installer that cannot be read no longer has the vetting cache written again at every scan; Help on the
+    Software tab names the library window's buttons as they are.
+- **ISM citations, each read against the control's text** (ISM of September 2026). Every control a check or the
+  manual names is in the catalogue, and the catalogue is ASD's spreadsheet line for line. One rule for all 180
+  Security checks: a check cites a control only where the check's own result is evidence for that control. 23 checks
+  cited one that does not meet it:
+  - **A control about something else.** *SMB signing required* (SEC-OPT-13, SEC-OPT-14) cited ISM-1962, which is
+    about SMB version 1; User Account Control (SEC-OPT-15..17) cited ISM-1584, about unprivileged users; the two
+    logon rights (SEC-RGT-05, SEC-RGT-06) cited the privileged access control; the event log sizes (SEC-LOG-02..04)
+    cited the 12-month retention control, which a size does not show. All cite the hardening control, ISM-1409, whose
+    guidance their expected values come from. *Maximum password age*, a report (SEC-POL-06), cited the password
+    length control and now cites ISM-1590, which says when a password is changed.
+  - **Audit subcategories cite a logging control, not the control about the thing audited.** Account Lockout (was
+    ISM-1403), Audit Policy Change (ISM-1815), Removable Storage and PNP Activity (ISM-1418), Computer Account
+    Management and Other Account Management Events (ISM-1650, which names user accounts and security groups) cite
+    ISM-0582.
+  - **A pass that would have vouched for more than was read.** *Local Administrators group membership* (SEC-CRD-02)
+    no longer cites ISM-0445, dedicated privileged accounts: the membership does not show that. The patch timeframe
+    (SEC-PAT-01) cites the two timeframes it judges, two weeks and one month (ISM-1694, ISM-1695), and no longer
+    the 48-hour controls (ISM-1877, ISM-1696), which need the vendor's rating; its text names them as not judged.
+    *SQL Server listens only the ways it is used* (SEC-SQL-02) cites ISM-1247, unneeded functionality, in place of
+    ISM-1272, which holds only where local access is all that is needed - not something the check can tell.
+  - **Every classification.** *Every enabled account must have a password* (SEC-ACC-02, SEC-AD-03) cited only the
+    length control for networks up to PROTECTED, so on a SECRET or TOP SECRET network the check went grey and such
+    an account was not named. It cites the length control of every classification (ISM-0421, ISM-1557, ISM-0422).
+  - *Vulnerability scanner used for online services and operating systems* (SEC-NA-06) cited the online services
+    control only; ISM-1702, operating systems, is added.
+  - **What it changes on screen.** SEC-AUD-09, SEC-AUD-10 and SEC-AUD-12 are no longer Essential Eight checks
+    (they were ML2), nor are SEC-RGT-05 and SEC-RGT-06 (ML3); SEC-CRD-02 is ML3 where it was ML1. A failure of
+    SEC-AUD-09, SEC-AUD-10, SEC-AUD-12 or SEC-RGT-05 is amber where it was red; SEC-CRD-02 stays red.
+  - Three texts said more than their control: the lockout duration (ISM-1403 names no "15 minutes"), password
+    complexity (ISM-2080 has no "when the length is 15 or more") and the patch timeframe shown with SEC-PAT-01.
+- Health, *Trust with the domain* (H-GPO-03) on a domain controller that holds the PDC emulator role: the check was
+  Amber, *the secure channel could not be tested*. That domain controller is the domain's end of every secure
+  channel and has none of its own, and Windows answers the test there with *the specified domain either does not
+  exist or could not be contacted*. The Group Policy collector no longer runs the test there, and the check reads
+  *not applicable* - also for a result collected before this version. Any other domain controller is tested as
+  before.
+- Security, SEC-CRD-03 on a domain controller: the check read *built-in Administrator not read* (Amber), because a
+  domain controller has no local accounts to read it from. It now judges the domain's built-in Administrator as the
+  directory holds it, on the domain's PDC emulator; the other domain controllers say where it is judged.
+- Four values that were never read, found by going through a full set of results:
+  - **Group Policy, each extension's last result.** The list was empty on every server, so *every policy extension
+    succeeded* was said of nothing and a failed extension could not be seen. Windows Server keeps the results under
+    `Status\GPExtensions`, not where the collector looked; they are read from there now, with the time each
+    extension last had policy to apply.
+  - **SEC-OS-01, PowerShell 2.0 engine removed, passed on a blank.** The feature name asked for does not exist on a
+    server, the answer was empty, and empty is not *Enabled*. The engine is now read from the server's roles and
+    features, where it reads removed once .NET Framework 3.5 is gone; a state that cannot be read is *Unknown* -
+    Amber, never a pass. A server that has the engine installed fails the check from now on.
+  - **SEC-NET-05, WinRM TrustedHosts, read *not collected* wherever the list was empty** - the good case. `winrm`
+    prints an empty list as the name alone; that is read as not configured, and the check passes.
+  - **SEC-PLT-01, exploit protection, read *could not read* on Windows Server 2016**, which has no
+    `Get-ProcessMitigation`. The collector falls back to the registry value that cmdlet reads: absent means nothing
+    is set system-wide, the same answer the later versions give.
+- A SQL Server instance whose name begins with PS (PSOFT, PSQL01) was missing from the inventory: the collector
+  left out every registry value beginning with PS to drop the five properties PowerShell adds. They are left out by
+  name now; the configuration points of an SOE standard had the same fault.
+- Health, *Group Policy applies without errors*: a failed result that an extension left behind long before the last
+  refresh - it has had nothing to apply since - is named in amber and no longer counts as failing today; a failure
+  at the last refresh is red, as before.
+- Software console, Register form: a file version of 4.6.9.0 beside an installed 4.6.7 drew the warning that the two
+  are *written differently*. A trailing `.0` is not a difference (the two compare, and UPDATE was offered all along);
+  the warning now leaves it out and keeps to real ones such as 2409 against 24.09.
+- Software console: Wireshark, registered from its `.msi`, was offered as INSTALL on servers that already had it, and
+  its row in the inventory list stayed *not in known-apps.psd1*. Three causes, each fixed:
+  - **Match.** The Register form took Match from the installer's own product name, and a copy from the vendor's `.exe`
+    installer is listed under another one (*Wireshark 4.4.2 x64* against *Wireshark*). The form now starts Match wide
+    enough for the names the inventory lists the product under (`Wireshark*`), turns a version number in the name
+    into `*` (*PuTTY release 0.85 (64-bit)*), never widens onto another product, offers that Match first in the list,
+    and its preview names any such name Match leaves out.
+  - **The software library is a reference for the currency verdict.** A product that a registered package covers is
+    **Behind** while `software\` holds a newer installer and **Current** when it does not, whether or not
+    `data\known-apps.psd1` names the product. Registering is enough; nothing is typed into the catalogue.
+  - **An `.msi` that refuses the `.exe` installer's copy.** Wireshark's `.msi` carries a launch condition that names
+    the copy its `.exe` installer leaves, and ends with error 1603 while that copy is there. The tool reads such a
+    rule from the `.msi` itself (LaunchCondition, AppSearch, RegLocator), keeps it with the file's vetting, and the
+    server's cell reads **Remove 4.4.2 first** instead of INSTALL or UPDATE: remove that copy, then INSTALL. The
+    copy a Wireshark `.exe` leaves has an uninstaller the tool does not run (it reads **by hand**, see *Changed*),
+    so it is removed on the server. The inventory row says the same, and the Register form lists the rule.
+
 ## Download Toolkit [1.1] - 2026-11-18
 
 ### Added

@@ -917,7 +917,7 @@ function New-CommandsConsole {
     # ---- servers (left) ----
     $grid = New-ConsoleGrid -Columns @(@{ Name = 'Server'; Width = 150 }, @{ Name = 'Group'; Width = 90 }, @{ Name = 'Last result'; Width = 160; Fill = $true })
     $grid.Add_ItemChecked({ Update-CommandServerCount })
-    $head = New-GridHeader -Heading 'SERVERS' -Detail '' -Tip 'The command runs on the ticked servers. Last result = the answer to the last command.'
+    $head = New-GridHeader -Heading 'SERVERS' -Detail '' -Tip 'Last result = the answer to the last command'
     $split.Panel1.Controls.Add($grid); $split.Panel1.Controls.Add($head.Panel); $grid.BringToFront()
     $script:Gui['CommandGrid'] = $grid; $script:Gui['CommandCount'] = $head.Info
 
@@ -930,12 +930,12 @@ function New-CommandsConsole {
     $cmdLabel = New-Object System.Windows.Forms.Label; $cmdLabel.Text = 'PS>'; $cmdLabel.Dock = 'Left'; $cmdLabel.Width = 36; $cmdLabel.TextAlign = 'MiddleLeft'; $cmdLabel.Font = New-Object System.Drawing.Font('Consolas', 10, [System.Drawing.FontStyle]::Bold)
     $box = New-Object System.Windows.Forms.ComboBox
     $box.Dock = 'Fill'; $box.DropDownStyle = 'DropDown'; $box.MaxLength = 4000; $box.Font = New-Object System.Drawing.Font('Consolas', 10)
-    $script:Gui['Tips'].SetToolTip($box, 'One PowerShell command. Enter runs it on the ticked servers; the drop-down holds this session''s commands.')
+    $script:Gui['Tips'].SetToolTip($box, 'One PowerShell command; Enter runs it on the ticked servers')
     $box.Add_TextChanged({ Update-CommandRiskLabel })
     $box.Add_KeyDown({ if ($_.KeyCode -eq 'Enter' -and -not $this.DroppedDown) { $_.SuppressKeyPress = $true; Start-CommandRun } })
     $script:Gui['CommandBox'] = $box
     # -ReadOnly: a read-only command may run alongside an install (Invoke-GuiAction refuses one that may change)
-    $run = New-GuiButton -Text 'Run (ticked servers)' -W 170 -H 28 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Read-only commands run at once; one that may change the servers asks for a change record and a confirmation first' -OnClick { Start-CommandRun }
+    $run = New-GuiButton -Text 'Run (ticked servers)' -W 170 -H 28 -Colour 'LightSkyBlue' -ReadOnly -Tip 'A command that may change a server asks for a change record first' -OnClick { Start-CommandRun }
     $run.Dock = 'Right'
     $script:Gui['CommandRunButton'] = $run
     $cmdBar.Controls.AddRange(@($box, $cmdLabel, $run)); $box.BringToFront()
@@ -945,7 +945,7 @@ function New-CommandsConsole {
     $outBar = New-Object System.Windows.Forms.Panel; $outBar.Dock = 'Bottom'; $outBar.Height = 38
     $outBar.Controls.Add((New-GuiButton -Text 'Clear output' -X 6 -Y 5 -W 110 -H 28 -ReadOnly -OnClick { $script:Gui['CommandOutput'].Clear() }))
     $outBar.Controls.Add((New-GuiButton -Text 'Save output...' -X 121 -Y 5 -W 110 -H 28 -ReadOnly -Tip 'The whole pane as a text file' -OnClick { Invoke-GuiAction -Name 'Save command output' -ReadOnly -Action { Save-CommandOutput } }))
-    $outBar.Controls.Add((New-GuiButton -Text 'Change log' -X 236 -Y 5 -W 110 -H 28 -ReadOnly -Tip 'Every change with its change record (changes\change-log.csv) - commands that may change a server included' -OnClick { Invoke-GuiAction -Name 'Change log' -ReadOnly -Action { Show-ChangeLogWindow } }))
+    $outBar.Controls.Add((New-GuiButton -Text 'Change log' -X 236 -Y 5 -W 110 -H 28 -ReadOnly -Tip 'Every change with its change record, commands included' -OnClick { Invoke-GuiAction -Name 'Change log' -ReadOnly -Action { Show-ChangeLogWindow } }))
     $outHint = New-Object System.Windows.Forms.Label; $outHint.Text = 'Ctrl+A, Ctrl+C copies it. Each answer is formatted on its server.'
     $outHint.Location = New-Object System.Drawing.Point(356, 11); $outHint.AutoSize = $true; $outHint.ForeColor = 'DimGray'
     $outBar.Controls.Add($outHint)
@@ -973,7 +973,7 @@ function New-CommandsConsole {
     $whatPanel = New-Object System.Windows.Forms.Panel; $whatPanel.Dock = 'Bottom'; $whatPanel.Height = 150
     $what = New-Object System.Windows.Forms.Label; $what.Dock = 'Fill'; $what.Padding = New-Object System.Windows.Forms.Padding(2, 6, 2, 0); $what.ForeColor = 'Black'
     $script:Gui['CommandWhat'] = $what
-    $use = New-GuiButton -Text 'Use this command' -W 200 -H 30 -ReadOnly -Tip 'Puts it in the command box with the first <placeholder> selected - type the real value' -OnClick { Use-CheatSheetEntry }
+    $use = New-GuiButton -Text 'Use this command' -W 200 -H 30 -ReadOnly -Tip 'Puts it in the command box with the first <placeholder> selected' -OnClick { Use-CheatSheetEntry }
     $use.Dock = 'Bottom'
     $legend = New-Object System.Windows.Forms.Label; $legend.Dock = 'Bottom'; $legend.Height = 34; $legend.ForeColor = 'DimGray'
     $legend.Text = 'Black = read-only, runs at once. Dark red = may change a server: change record and confirmation first. <name> = type the real value.'

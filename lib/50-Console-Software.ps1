@@ -14,8 +14,9 @@
 #      UPDATE runs it with the reboot suppressed, so one reboot ("Reboot
 #      ticked servers") finishes both the OS patches and the software
 #    - UNINSTALL removes ticked products (MSI product code, or the product's
-#      own QuietUninstallString) - never a protected product, never one the
-#      server's SOE standard requires
+#      own QuietUninstallString where the tool can hold its uninstaller back
+#      from restarting the server) - never a protected product, never one
+#      the server's SOE standard requires
 #  Every install, update and removal goes through: a fresh check, the plan,
 #  the change record (11-ChangeLog.ps1), the pre-action confirmations
 #  (Settings tab: snapshot, Trellix ...), a re-check - and for a removal
@@ -97,25 +98,39 @@ B. ANY OTHER PRODUCT - AN MSI WHERE THE VENDOR OFFERS ONE
    3. Press Register... next to it. The form is filled from the file: name, version
       source, file pattern, the signer to trust, and names the fleet's inventory has seen for Match. For an .exe,
       give the vendor's silent switches - they must suppress the reboot (REBOOT=R, REBOOT=ReallySuppress or
-      /norestart) or the form refuses. Install, Update and Uninstall start ticked: leave Uninstall ticked unless the
+      /norestart) or the form refuses. The form reads which setup program built the .exe (Inno Setup, a WiX
+      bundle, InstallShield, NSIS) and starts with that program's usual switches; Help on the Software tab has
+      the table. Install, Update and Uninstall start ticked: leave Uninstall ticked unless the
       product must never be removed (unticked, UNINSTALL refuses it - right for VMware Tools, wrong for an ordinary
       application). The preview shows the exact command lines; Register writes the package into
       data\software-packages.psd1.
    4. Later versions dropped into the same folder are picked up by the file pattern - no new registration.
    5. To change a registration later, press Edit... next to any of its installers in the installer list: the same
       form, filled from the entry. Save changes rewrites only that entry; its comments are kept.
+   6. Match is what says "installed": the name Programs and Features shows. A copy from the vendor's .exe installer
+      is often listed under another name than the .msi gives (Wireshark 4.4.2 x64 against Wireshark), so the form
+      starts Match wide enough for the names the inventory has, and warns when Match leaves one out.
+   7. An .msi does not always take over a copy that the vendor's .exe installer put there. Where the .msi says so
+      itself (Wireshark's does), the server reads "Remove <version> first": remove that copy - UNINSTALL from the
+      inventory list where its Removal column offers it, by hand on the server where it reads "by hand" - then
+      Check and INSTALL. From then on the .msi updates its own installs.
+   8. To take a package out of the library: Software library... > select it > Remove package... It asks first,
+      and asks separately whether its installer files are to be deleted from software\. Nothing changes on a
+      server; the removed entry is written to the log.
 
 C. WHICH PRODUCTS NEED ATTENTION
    The inventory list on the Software tab (and the O/S Patching console's software grid) marks products Behind,
-   Stale, Ageing or End of life against data\known-apps.psd1 and the rest of the fleet. For the vendor's current
-   version use its release notes or download page, and record it as Latest in known-apps.psd1 so every server is
-   judged against it.
+   Stale, Ageing or End of life against data\known-apps.psd1, the software library and the rest of the fleet. A
+   product that a registered package covers is Behind as soon as the library holds a newer installer - nothing to
+   type. For a product without a package, take the vendor's current version from its release notes or download
+   page and record it as Latest in known-apps.psd1 so every server is judged against it.
 
 D. REMOVING SOFTWARE
    Tick products in the inventory list, then UNINSTALL. An MSI product is removed with msiexec /x <product code>
    /qn /norestart REBOOT=ReallySuppress; another product with its own QuietUninstallString, with that
    uninstaller's no-restart switches added (Inno Setup /NORESTART /SUPPRESSMSGBOXES, WiX bundles /norestart).
-   An uninstaller with no known switch shows "quiet (may restart)" and the plan warns. Never removed: products
+   An uninstaller with no such switch could restart the server by itself: the tool does not run it, and the
+   product reads "by hand" (Programs and Features, in a reboot window). Never removed either: products
    with neither, protected products (ProtectedProducts in software-packages.psd1, or a package without
    Uninstall - Edit... ticks it) and products the server's SOE standard requires. "dormant" in the Use column =
    installed long ago and nothing on the server uses its folder (no service, process or task): confirm with the
@@ -205,6 +220,77 @@ function Get-MsiProperty {
     }
 }
 
+function Get-MsiRefusals {
+    # What an .msi itself refuses to install over, read from its own tables: a LaunchCondition of the form "NOT <property>"
+    # (alone or with "Installed OR"), where AppSearch fills that property from an Uninstall key of HKLM (RegLocator,
+    # directly or through a DrLocator on top of it).  That is the vendor saying "remove the copy another installer put
+    # there first": Wireshark's .msi names the key its .exe installer writes, and ends with error 1603 while it exists.
+    # One row per such key: Key (the Uninstall key's name), Hive ('64', or '32' = WOW6432Node) and Message (the vendor's
+    # text, its [property] placeholders as ...).  Every other condition is left to the installer.
+    param([string]$Path)
+    $out = @()
+    $script:MsiRefusalsError = ''   # set when the file could not be read: the caller then keeps nothing for it
+    $msiApp = $null; $db = $null
+    try {
+        $msiApp = New-Object -ComObject WindowsInstaller.Installer
+        $db = $msiApp.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $msiApp, @($Path, 0))
+        # every row of one query as an array of strings; an .msi without that table gives none
+        $read = {
+            param([string]$Sql, [int]$Columns)
+            $rows = New-Object System.Collections.Generic.List[object]
+            $view = $null
+            try {
+                $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @($Sql))
+                [void]$view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+                while ($true) {
+                    $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+                    if (-not $rec) { break }
+                    $vals = @(foreach ($i in 1..$Columns) { [string]$rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, $i) })
+                    $rows.Add($vals)
+                    try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($rec) } catch { }
+                }
+            } catch { }
+            finally { if ($view) { try { [void]$view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null) } catch { }; try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($view) } catch { } } }
+            return , $rows.ToArray()
+        }
+        $conds = & $read 'SELECT `Condition`, `Description` FROM `LaunchCondition`' 2
+        if ($conds.Count -gt 0) {
+            $search = @{}; $reg = @{}; $parent = @{}
+            $rows = & $read 'SELECT `Property`, `Signature_` FROM `AppSearch`' 2
+            foreach ($r in $rows) { if (-not $search.ContainsKey($r[0])) { $search[$r[0]] = @() }; $search[$r[0]] += $r[1] }
+            $rows = & $read 'SELECT `Signature_`, `Root`, `Key`, `Name`, `Type` FROM `RegLocator`' 5
+            foreach ($r in $rows) { $reg[$r[0]] = $r }
+            $rows = & $read 'SELECT `Signature_`, `Parent` FROM `DrLocator`' 2
+            foreach ($r in $rows) { if ($r[1]) { $parent[$r[0]] = $r[1] } }
+            $seen = @{}
+            foreach ($c in $conds) {
+                $m = [regex]::Match([string]$c[0], '^\s*(?:Installed\s+OR\s+)?\(?\s*NOT\s+([A-Za-z_][A-Za-z0-9_.]*)\s*\)?(?:\s+OR\s+Installed)?\s*$', 'IgnoreCase')
+                if (-not $m.Success -or -not $search.ContainsKey($m.Groups[1].Value)) { continue }
+                foreach ($sig in @($search[$m.Groups[1].Value])) {
+                    # a directory search sits on top of the registry search that names the key
+                    $hops = 0
+                    while ($sig -and -not $reg.ContainsKey($sig) -and $parent.ContainsKey($sig) -and $hops -lt 5) { $sig = $parent[$sig]; $hops++ }
+                    if (-not $sig -or -not $reg.ContainsKey($sig)) { continue }
+                    $loc = $reg[$sig]
+                    if ([string]$loc[1] -ne '2') { continue }   # HKEY_LOCAL_MACHINE only
+                    $km = [regex]::Match([string]$loc[2], '^SOFTWARE\\(WOW6432Node\\)?Microsoft\\Windows\\CurrentVersion\\Uninstall\\([^\\]+)$', 'IgnoreCase')
+                    if (-not $km.Success) { continue }
+                    # the 64-bit part of the registry only when the search says so (type bit 16)
+                    $type = 0; [void][int]::TryParse([string]$loc[4], [ref]$type)
+                    $hive = '32'; if (-not $km.Groups[1].Success -and ($type -band 16)) { $hive = '64' }
+                    $key = $km.Groups[2].Value
+                    if ($seen.ContainsKey("$key|$hive")) { continue }
+                    $seen["$key|$hive"] = $true
+                    $text = ((([string]$c[1]) -replace '\[[^\]]*\]', '...') -replace '\s+', ' ').Trim()
+                    $out += [pscustomobject]@{ Key = $key; Hive = $hive; Message = (ConvertTo-AsciiText $text '?') }
+                }
+            }
+        }
+    } catch { $out = @(); $script:MsiRefusalsError = Get-ShortError $_ }
+    finally { foreach ($com in @($db, $msiApp)) { if ($com) { try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($com) } catch { } } } }
+    return @($out)
+}
+
 function Get-SoftwareFileVersion {
     # The version an installer file brings: from its name (VersionRegex, groups joined by dots), from inside the .msi, or the .exe's ProductVersion.
     param($Package, $File)
@@ -239,6 +325,14 @@ function Get-SoftwarePackageBlock {
         if (-not (Test-SignerAllowed -Subject $Info.Signer -Signers @($Package.Signers))) { return ("signed by '{0}', not by {1} (Signers in software-packages.psd1)" -f (Get-SignerOrg $Info.Signer), (@($Package.Signers) -join ' / ')) }
     }
     if ($inst -eq 'exe') {
+        # NO RESTART BY AN INSTALLER: a setup program that has no switch to hold back a restart is not run at all, whatever
+        # the arguments say - a /norestart typed for it would be ignored and promise what nothing delivers.  The file
+        # itself names its setup program (Get-SetupProgram, kept with the vetting as Setup); NSIS is such a one.
+        # A file that could not be read for its setup program is not run either: it may be one of those.
+        if ($null -eq $Info.Setup -and [string]$Info.SetupUnread) { return ("the file could not be read to see which setup program built it ({0}) - not run until it can be: a restart cannot be ruled out" -f [string]$Info.SetupUnread) }
+        $builtBy = $null
+        if ([string]$Info.Setup) { $builtBy = @($script:SoftwareSetupPrograms | Where-Object { $_.Kind -eq [string]$Info.Setup })[0] }
+        if ($builtBy -and -not $builtBy.Arguments) { return ("built with {0}, which has no switch that holds back a restart (its /S only makes it silent) - the tool does not run such an installer: use the vendor's .msi" -f $builtBy.Kind) }
         foreach ($mode in @('Install', 'Update')) {
             if ($modes -notcontains $mode) { continue }
             $a = Get-SoftwareArguments -Package $Package -Mode $mode
@@ -289,7 +383,7 @@ function Get-SoftwarePackageFiles {
     # Scans software\ - every folder, any name, any depth - and sorts what it finds:
     #   offered  (returned, $script:SoftwareFiles) files a package claims (its folder + FilePattern), vetted, newest version
     #            first per package: Id, Name, Folder, File, FullName, Length, SizeMB, Version, Signature, Signer, Hash,
-    #            Blocked ('' = usable), Package
+    #            Blocked ('' = usable), Package, Refuses (an .msi's own "not over that copy" rules, Get-MsiRefusals)
     #   detected ($script:SoftwareDetected) .msi / .exe files no package claims yet - the Register button turns one into a
     #            package; until then the installer list shows them as NEW
     #   notes    ($script:SoftwareNotOffered) what cannot be used at all, and why
@@ -302,7 +396,7 @@ function Get-SoftwarePackageFiles {
     $infoDir = Join-Path $root '_info'
     if (-not $script:SoftwareFileCache) { $script:SoftwareFileCache = Read-SoftwareVettingCache }
     $script:SoftwareVerdictCache = @{}   # the files may have changed: every verdict is worked out again
-    $vetted = 0; $migrated = 0; $seenKeys = New-Object System.Collections.Generic.List[string]
+    $vetted = 0; $migrated = 0; $enriched = 0; $seenKeys = New-Object System.Collections.Generic.List[string]
     $found = New-Object System.Collections.Generic.List[object]
     $notOffered = New-Object System.Collections.Generic.List[string]
     $claimed = @{}
@@ -345,8 +439,26 @@ function Get-SoftwarePackageFiles {
                 $info.Version = Get-SoftwareFileVersion -Package $pkg -File $f; $info.Spec = $spec
                 $fresh = $true; $vetted++
             }
+            # what an .msi refuses to install over rides along in the cache; an entry from before it was read gets it once
+            if ($f.Extension -ieq '.msi' -and $null -eq $info.Refuses) {
+                $refused = @(Get-MsiRefusals -Path $f.FullName)
+                # an .msi that could not be opened has not been read: nothing is kept for it, and the next scan reads it again
+                if ($script:MsiRefusalsError) { Write-PatchLog ("Software [{0}]: {1} could not be read for what it refuses to install over ({2}) - read again at the next scan" -f $id, $f.Name, $script:MsiRefusalsError) 'WARN' }
+                else { $info.Refuses = $refused; if (-not $fresh) { $enriched++ } }   # only what was added is worth a write of the cache
+                foreach ($rk in @($info.Refuses | ForEach-Object { [string]$_.Key } | Select-Object -Unique)) { Write-PatchLog ("Software [{0}]: {1} does not install over a copy that another installer registered as '{2}' (the .msi's own launch condition) - such a server reads 'Remove ... first'" -f $id, $f.Name, $rk) 'INFO' }
+            }
+            # the setup program an .exe names (Get-SetupProgram) rides along the same way: '' = read, the file does not say
+            # A file that could not be read keeps Setup unset: it is read again at the next scan, and until then it is not
+            # run (Get-SoftwarePackageBlock) - "not read" must never pass as "not built with a program that restarts".
+            if ($f.Extension -ieq '.exe' -and $null -eq $info.Setup) {
+                $program = Get-SetupProgram -Path $f.FullName
+                $unreadWas = [string]$info['SetupUnread']
+                if ($program.Read) { $info.Setup = [string]$program.Kind; $info.Remove('SetupUnread') } else { $info['SetupUnread'] = [string]$program.Unread }
+                # the cache is written again only when the entry changed: a file that stays unreadable is read at every scan, not saved at every scan
+                if (-not $fresh -and ($program.Read -or $unreadWas -ne [string]$program.Unread)) { $enriched++ }
+            }
             $block = Get-SoftwarePackageBlock -Package $pkg -Info $info
-            $found.Add([pscustomobject]@{ Id = $id; Name = [string]$pkg.Name; Folder = $rel; File = $f.Name; FullName = $f.FullName; Length = $f.Length; SizeMB = [math]::Round($f.Length / 1MB, 1); Version = [string]$info.Version; Signature = $info.Signature; Signer = $info.Signer; Hash = $info.Hash; Blocked = $block; Package = $pkg })
+            $found.Add([pscustomobject]@{ Id = $id; Name = [string]$pkg.Name; Folder = $rel; File = $f.Name; FullName = $f.FullName; Length = $f.Length; SizeMB = [math]::Round($f.Length / 1MB, 1); Version = [string]$info.Version; Signature = $info.Signature; Signer = $info.Signer; Hash = $info.Hash; Blocked = $block; Package = $pkg; Refuses = @($info.Refuses | Where-Object { $_ }) })
             # one line per file only when it is new to the tool or blocked - a big library would bury the log at every reload
             if ($block) { Write-PatchLog ("Software [{0}]: {1} version {2} - BLOCKED: {3}" -f $id, $f.Name, $info.Version, $block) 'WARN' }
             elseif ($fresh) { Write-PatchLog ("Software found [{0}]: {1} version {2} ({3} MB)" -f $id, $f.Name, $info.Version, [math]::Round($f.Length / 1MB, 1)) 'INFO' }
@@ -381,7 +493,7 @@ function Get-SoftwarePackageFiles {
     # the cache keeps the files still there; it is rewritten only when something was vetted or has gone
     $stale = @($script:SoftwareFileCache.Keys | Where-Object { -not $seenKeys.Contains($_) })
     foreach ($k in $stale) { $script:SoftwareFileCache.Remove($k) }
-    if ($vetted -gt 0 -or $stale.Count -gt 0 -or $migrated -gt 0) { Save-SoftwareVettingCache }
+    if ($vetted -gt 0 -or $stale.Count -gt 0 -or $migrated -gt 0 -or $enriched -gt 0) { Save-SoftwareVettingCache }
     $packages = @($list | ForEach-Object { $_.Id } | Select-Object -Unique).Count
     Write-PatchLog ("Software library: {0} installer(s) of {1} package(s){2}{3}{4}" -f $list.Count, $packages, $(if ($vetted -gt 0) { ", $vetted vetted now (SHA256, signature)" } else { '' }), $(if (@($list | Where-Object { $_.Blocked }).Count -gt 0) { ', ' + @($list | Where-Object { $_.Blocked }).Count + ' blocked' } else { '' }), $(if ($detected.Count -gt 0) { ', ' + $detected.Count + ' NEW to register' } else { '' })) 'INFO'
     return $list
@@ -406,7 +518,12 @@ function Read-SoftwareVettingCacheFile {
     if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $map }
     try {
         foreach ($e in @(([System.IO.File]::ReadAllText($Path) | ConvertFrom-Json).Files)) {
-            if ($e -and $e.Key -and $e.Hash) { $map[[string]$e.Key] = @{ Hash = [string]$e.Hash; Signature = [string]$e.Signature; Signer = [string]$e.Signer; Version = [string]$e.Version; Spec = [string]$e.Spec } }
+            if (-not ($e -and $e.Key -and $e.Hash)) { continue }
+            # Refuses: $null = never read (a file written before the tool read it), an empty list = read, nothing refused
+            $refuses = $null
+            if ($e.PSObject.Properties['Refuses']) { $refuses = @(@($e.Refuses) | Where-Object { $_ -and $_.Key } | ForEach-Object { [pscustomobject]@{ Key = [string]$_.Key; Hive = [string]$_.Hive; Message = [string]$_.Message } }) }
+            $setup = $null; if ($e.PSObject.Properties['Setup']) { $setup = [string]$e.Setup }   # an .exe's setup program, the same way
+            $map[[string]$e.Key] = @{ Hash = [string]$e.Hash; Signature = [string]$e.Signature; Signer = [string]$e.Signer; Version = [string]$e.Version; Spec = [string]$e.Spec; Refuses = $refuses; Setup = $setup }
         }
     } catch { Write-PatchLog "Software vetting cache unreadable ($Path - $(Get-ShortError $_)) - every installer is vetted again" 'WARN' }
     return $map
@@ -419,7 +536,8 @@ function Read-SoftwareVettingCache {
     # the server checks the SHA256 and the signature of the staged file itself.
     $map = Read-SoftwareVettingCacheFile -Path (Get-SoftwareVettingCachePath)
     $own = Get-SoftwareVettingCacheWritePath
-    if ($own -ine (Get-SoftwareVettingCachePath)) { foreach ($e in (Read-SoftwareVettingCacheFile -Path $own).GetEnumerator()) { if (-not $map.ContainsKey($e.Key)) { $map[$e.Key] = $e.Value } } }
+    # (its own entry also where the hub's was written before an .msi's refusals were read: they are not read at every start)
+    if ($own -ine (Get-SoftwareVettingCachePath)) { foreach ($e in (Read-SoftwareVettingCacheFile -Path $own).GetEnumerator()) { if (-not $map.ContainsKey($e.Key) -or ($null -eq $map[$e.Key].Refuses -and $null -ne $e.Value.Refuses) -or ($null -eq $map[$e.Key].Setup -and $null -ne $e.Value.Setup)) { $map[$e.Key] = $e.Value } } }
     return $map
 }
 
@@ -427,13 +545,16 @@ function Save-SoftwareVettingCache {
     $p = Get-SoftwareVettingCacheWritePath
     $files = @(foreach ($k in @($script:SoftwareFileCache.Keys | Sort-Object)) {
         $e = $script:SoftwareFileCache[$k]
-        [pscustomobject]@{ Key = $k; Hash = $e.Hash; Signature = $e.Signature; Signer = $e.Signer; Version = $e.Version; Spec = $e.Spec }
+        $row = [ordered]@{ Key = $k; Hash = $e.Hash; Signature = $e.Signature; Signer = $e.Signer; Version = $e.Version; Spec = $e.Spec }
+        if ($null -ne $e.Refuses) { $row['Refuses'] = @($e.Refuses) }   # an .msi only
+        if ($null -ne $e.Setup) { $row['Setup'] = [string]$e.Setup }    # an .exe only
+        [pscustomobject]$row
     })
     try {
         $dir = Split-Path -Path $p -Parent
         if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
         $doc = [ordered]@{ Note = 'Written by the Software console: the vetting of every installer, so it is not read again at every start. Safe to delete.'; Files = $files }
-        [System.IO.File]::WriteAllText($p, (ConvertTo-Json -InputObject $doc -Depth 4), (New-Object System.Text.UTF8Encoding $false))
+        [System.IO.File]::WriteAllText($p, (ConvertTo-Json -InputObject $doc -Depth 6), (New-Object System.Text.UTF8Encoding $false))
     } catch { Write-PatchLog "Software vetting cache not written ($(Get-ShortError $_)) - the next start vets every installer again" 'WARN' }
 }
 
@@ -455,11 +576,85 @@ function ConvertTo-AsciiText {
     return [regex]::Replace([string]$Text, '[^\x20-\x7E]', $Replacement)
 }
 
+function Get-SetupProgram {
+    # Which setup program built an .exe installer, read from the file itself - it decides the silent switches:
+    #   WiX bundle     a section of the program called .wixburn
+    #   Inno Setup     its manifest names JR.Inno.Setup
+    #   NSIS           its manifest names Nullsoft.NSIS.exehead, or NullsoftInst follows the program image
+    #   InstallShield  its resources say InstallShield
+    # Returns Kind ('' = the file does not say) and Evidence.  Reads the headers, at most 8 MB of the resource section
+    # and 64 bytes after the program image - never the payload, so a 500 MB installer costs the same as a small one.
+    param([string]$Path)
+    $kind = ''; $evidence = ''; $unread = ''
+    $fs = $null
+    try {
+        $latin = [System.Text.Encoding]::GetEncoding(28591)
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $head = New-Object byte[] 4096
+        $got = $fs.Read($head, 0, $head.Length)
+        if ($got -lt 256 -or $head[0] -ne 0x4D -or $head[1] -ne 0x5A) { throw 'not a program file' }
+        $pe = [BitConverter]::ToInt32($head, 0x3C)
+        if ($pe -lt 0 -or $pe + 24 -gt $got -or $head[$pe] -ne 0x50 -or $head[$pe + 1] -ne 0x45) { throw 'no PE header' }
+        $count = [int][BitConverter]::ToUInt16($head, $pe + 6)
+        $table = $pe + 24 + [int][BitConverter]::ToUInt16($head, $pe + 20)
+        $names = @(); $imageEnd = [int64]0; $resAt = [int64]0; $resSize = [int64]0
+        for ($i = 0; $i -lt $count; $i++) {
+            $o = $table + 40 * $i
+            if ($o + 40 -gt $got) { break }
+            $name = $latin.GetString($head, $o, 8).TrimEnd([char]0)
+            $size = [int64][BitConverter]::ToUInt32($head, $o + 16); $at = [int64][BitConverter]::ToUInt32($head, $o + 20)
+            $names += $name
+            if ($at + $size -gt $imageEnd) { $imageEnd = $at + $size }
+            if ($name -eq '.rsrc') { $resAt = $at; $resSize = $size }
+        }
+        if ($names -contains '.wixburn') { $kind = 'WiX bundle'; $evidence = 'the program has a .wixburn section' }
+        else {
+            $chunk = {
+                param([int64]$From, [int64]$Length)
+                if ($From -le 0 -or $From -ge $fs.Length -or $Length -le 0) { return '' }
+                $take = [int][Math]::Min($Length, $fs.Length - $From)
+                $buf = New-Object byte[] $take
+                $fs.Position = $From
+                $read = 0
+                while ($read -lt $take) { $n = $fs.Read($buf, $read, $take - $read); if ($n -le 0) { break }; $read += $n }
+                return $latin.GetString($buf, 0, $read)
+            }
+            $res = & $chunk $resAt ([Math]::Min($resSize, [int64]8MB))
+            $after = & $chunk $imageEnd 64
+            $wide = (([char[]]'InstallShield') -join [string][char]0)   # the same word as the version resource holds it, two bytes a letter
+            if ($res.IndexOf('JR.Inno.Setup', [System.StringComparison]::Ordinal) -ge 0) { $kind = 'Inno Setup'; $evidence = 'its manifest names JR.Inno.Setup' }
+            elseif ($res.IndexOf('Nullsoft.NSIS.exehead', [System.StringComparison]::Ordinal) -ge 0) { $kind = 'NSIS'; $evidence = 'its manifest names Nullsoft.NSIS.exehead' }
+            elseif ($after.IndexOf('NullsoftInst', [System.StringComparison]::Ordinal) -ge 0) { $kind = 'NSIS'; $evidence = 'NullsoftInst follows the program' }
+            elseif ($res.IndexOf('InstallShield', [System.StringComparison]::Ordinal) -ge 0 -or $res.IndexOf($wide, [System.StringComparison]::Ordinal) -ge 0) { $kind = 'InstallShield'; $evidence = 'its resources say InstallShield' }
+        }
+    } catch {
+        $kind = ''; $evidence = ''
+        # a file that was read and is no program at all has answered: it names no setup program.  Anything else is a read that failed
+        if (@('not a program file', 'no PE header') -notcontains [string]$_.Exception.Message) { $unread = Get-ShortError $_ }
+    }
+    finally { if ($fs) { $fs.Dispose() } }
+    # Read = the file was read; a file that could not be read (locked, a read error) has said nothing about itself, and
+    # that is not "the file does not say" - Unread carries the reason
+    return [pscustomobject]@{ Kind = $kind; Evidence = $evidence; Read = (-not $unread); Unread = [string]$unread }
+}
+
+function Get-VersionShape {
+    # How many parts a version is written with, a trailing .0 not counted: 4.6.9.0 and 4.6.7 are both 3 - they compare
+    # (ConvertTo-VersionObject fills the missing part with 0) - while 2409 is 1 and 24.09 is 2, which do not.  0 = no number.
+    param([string]$Version)
+    $m = [regex]::Match([string]$Version, '\d+(\.\d+)*')
+    if (-not $m.Success) { return 0 }
+    $parts = @($m.Value -split '\.')
+    $n = $parts.Count
+    while ($n -gt 1 -and $parts[$n - 1] -match '^0+$') { $n-- }
+    return $n
+}
+
 function Get-SoftwareFileFacts {
     # What an installer says about itself: the signature and its signer, and the product name, version and maker
-    # (from inside an .msi, or the version resource of an .exe).
+    # (from inside an .msi, or the version resource of an .exe) - and, for an .exe, the setup program that built it.
     param([string]$Path)
-    $facts = [ordered]@{ Path = $Path; Kind = ([System.IO.Path]::GetExtension($Path)).TrimStart('.').ToLower(); Signature = 'Unknown'; Signer = ''; Org = ''; ProductName = ''; ProductVersion = ''; Manufacturer = '' }
+    $facts = [ordered]@{ Path = $Path; Kind = ([System.IO.Path]::GetExtension($Path)).TrimStart('.').ToLower(); Signature = 'Unknown'; Signer = ''; Org = ''; ProductName = ''; ProductVersion = ''; Manufacturer = ''; SetupKind = ''; SetupUnread = ''; SetupEvidence = '' }
     try { $sig = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop; $facts.Signature = [string]$sig.Status; if ($sig.SignerCertificate) { $facts.Signer = $sig.SignerCertificate.Subject; $facts.Org = Get-SignerOrg $facts.Signer } } catch { }
     if ($facts.Kind -eq 'msi') {
         $facts.ProductName = Get-MsiProperty -Path $Path -Property 'ProductName'
@@ -467,6 +662,8 @@ function Get-SoftwareFileFacts {
         $facts.Manufacturer = Get-MsiProperty -Path $Path -Property 'Manufacturer'
     } elseif ($facts.Kind -eq 'exe') {
         try { $vi = (Get-Item -LiteralPath $Path).VersionInfo; $facts.ProductName = [string]$vi.ProductName; $facts.ProductVersion = [string]$vi.ProductVersion; $facts.Manufacturer = [string]$vi.CompanyName } catch { }
+        $setup = Get-SetupProgram -Path $Path
+        $facts.SetupKind = [string]$setup.Kind; $facts.SetupEvidence = [string]$setup.Evidence; $facts.SetupUnread = [string]$setup.Unread
     }
     foreach ($k in 'ProductName', 'ProductVersion', 'Manufacturer') { $facts[$k] = ([string]$facts[$k]).Trim() }
     return [pscustomobject]$facts
@@ -503,17 +700,88 @@ function Get-SoftwareNamePattern {
 function Get-FleetProductNames {
     # Product names from the collected inventories that share a word with $Hint.  The Register form offers them for Match,
     # because Match must be the name Programs and Features shows - not always the name inside the installer.
-    param([string]$Hint)
+    # -All: every product name of every inventory (Get-SoftwareMatchSuggestion looks through them all)
+    param([string]$Hint, [switch]$All)
     if (-not $script:Results.ContainsKey('Inventory')) { return @() }
     $word = @(([string]$Hint -split '[^A-Za-z0-9]+') | Where-Object { $_.Length -ge 3 })[0]
-    if (-not $word) { return @() }
+    if (-not $word -and -not $All) { return @() }
     $names = @{}
     foreach ($srv in @($script:Results['Inventory'].Keys)) {
         $inv = $script:Results['Inventory'][$srv]
         if (-not $inv -or -not $inv.Reachable) { continue }
-        foreach ($line in @($inv.Products)) { $n = ([string]$line -split '\|')[0]; if ($n -like "*$word*") { $names[$n] = $true } }
+        foreach ($line in @($inv.Products)) { $n = ([string]$line -split '\|')[0]; if ($n -and ($All -or $n -like "*$word*")) { $names[$n] = $true } }
     }
+    if ($All) { return @($names.Keys | Sort-Object) }
     return @($names.Keys | Sort-Object | Select-Object -First 20)
+}
+
+function Get-ProductFamily {
+    # A product name without what changes from one installer or version of the same product to the next: dotted version
+    # numbers, a language tag, brackets, and the 64-bit / x64 marks - those kept apart as Arch ('64', '32' or '').
+    #   'Wireshark 4.4.2 x64' -> wireshark, 64      'Wireshark'       -> wireshark, ''
+    #   'Notepad++ (64-bit x64)' -> notepad++, 64   'Notepad++ (x64)' -> notepad++, 64
+    # Whole numbers stay in the name: SQL Server 2019 is not SQL Server 2022.
+    param([string]$Name)
+    $t = [string]$Name
+    $arch = ''
+    if ($t -match '(?i)\b(x64|amd64|win64|64[- ]?bit)\b') { $arch = '64' } elseif ($t -match '(?i)\b(x86|win32|32[- ]?bit)\b') { $arch = '32' }
+    $t = [regex]::Replace($t, '\b[a-z]{2}-[A-Z]{2}\b', ' ')
+    $t = [regex]::Replace($t, '\d+(?:\.\d+)+', ' ')
+    $t = [regex]::Replace($t, '(?i)\b(x64|x86|amd64|win64|win32|(64|32)[- ]?bit|edition)\b', ' ')
+    $t = [regex]::Replace($t, '[()\[\],]', ' ')
+    return [pscustomobject]@{ Base = (($t -replace '\s+', ' ').Trim().Trim('-').Trim()).ToLower(); Arch = $arch }
+}
+
+function Test-SameProductFamily {
+    # Two names of one product: the same name once versions and marks are gone, and not one 64-bit and the other 32-bit.
+    param($A, $B)
+    if (-not $A.Base -or $A.Base -ne $B.Base) { return $false }
+    return (-not $A.Arch -or -not $B.Arch -or $A.Arch -eq $B.Arch)
+}
+
+function Get-SoftwareMatchSuggestion {
+    # The Match a registration starts with.  The name the installer carries, its dotted version numbers as * ('PuTTY
+    # release 0.85 (64-bit)' -> 'PuTTY release * (64-bit)': the next version is the same package) - and widened to the
+    # names the fleet's inventory lists the same product under, when they differ: a copy from the vendor's .exe installer
+    # reads 'Wireshark 4.4.2 x64' where the .msi calls itself 'Wireshark', so Match becomes 'Wireshark*'.  Never
+    # widened onto another product: a pattern that would also cover a different name of the inventory is not used.
+    # Returns Match, Covered (the inventory's names of this product that it matches) and Missed (those it does not).
+    param([string]$ProductName, [string[]]$FleetNames = @())
+    $star = { param([string]$n) ((ConvertTo-AsciiText ([regex]::Replace([string]$n, '\d+(?:\.\d+)+', '*')) '*') -replace '\*+', '*').Trim() }
+    $own = & $star $ProductName
+    $match = $own
+    $same = @()
+    if ($own) {
+        $family = Get-ProductFamily $ProductName
+        $families = @{}
+        foreach ($n in @($FleetNames | Where-Object { $_ } | Select-Object -Unique)) { $families[$n] = (Test-SameProductFamily $family (Get-ProductFamily $n)) }
+        $same = @($families.Keys | Where-Object { $families[$_] } | Sort-Object)
+        if (@($same | Where-Object { $_ -notlike $own }).Count -gt 0) {
+            # what every name starts with and ends with: 'Notepad++ (x64)' and 'Notepad++ (64-bit x64)' give
+            # 'Notepad++ (*x64)', which leaves a 32-bit copy out; failing that, the shared start and * ('Wireshark*')
+            $forms = @($own) + @($same | ForEach-Object { & $star $_ })
+            $head = $own; $tail = $own
+            foreach ($form in $forms) {
+                $n = 0
+                while ($n -lt $head.Length -and $n -lt $form.Length -and [char]::ToLowerInvariant($head[$n]) -eq [char]::ToLowerInvariant($form[$n])) { $n++ }
+                $head = $head.Substring(0, $n)
+                $n = 0
+                while ($n -lt $tail.Length -and $n -lt $form.Length -and [char]::ToLowerInvariant($tail[$tail.Length - 1 - $n]) -eq [char]::ToLowerInvariant($form[$form.Length - 1 - $n])) { $n++ }
+                $tail = $tail.Substring($tail.Length - $n)
+            }
+            $shortest = [int](@($forms | ForEach-Object { $_.Length }) | Measure-Object -Minimum).Minimum
+            $tries = @()
+            if ($tail -and ($head.Length + $tail.Length) -le $shortest) { $tries += (($head + '*' + $tail) -replace '\*+', '*') }
+            $tries += ($head.TrimEnd(' ', '(', '[', '-', ',', '*') + '*')
+            foreach ($wide in $tries) {
+                if ($head -notmatch '[A-Za-z0-9]{3}') { break }   # too little in common to be a name
+                if (@($same | Where-Object { $_ -notlike $wide }).Count -gt 0) { continue }
+                if (@($families.Keys | Where-Object { -not $families[$_] -and $_ -like $wide }).Count -gt 0) { continue }   # it would take in another product
+                $match = $wide; break
+            }
+        }
+    }
+    return [pscustomobject]@{ Match = $match; Covered = @($same | Where-Object { $_ -like $match }); Missed = @($same | Where-Object { $_ -notlike $match }) }
 }
 
 function New-SoftwarePackageDraft {
@@ -536,11 +804,19 @@ function New-SoftwarePackageDraft {
     $versionFrom = 'name'
     $dottedInName = [regex]::IsMatch([string]$Detected.File, '\d+(?:\.\d+)+')
     if ($kind -eq 'msi') { $versionFrom = 'msi' } elseif ($Facts.ProductVersion -and (-not $np.VersionRegex -or -not $dottedInName)) { $versionFrom = 'file' }
-    $match = ((ConvertTo-AsciiText $Facts.ProductName '*') -replace '\*+', '*').Trim()   # a (R) or (TM) sign becomes a wildcard
+    # a (R) or (TM) sign and a version number in the name become wildcards, and the names the inventory has for the same product are covered
+    $match = [string](Get-SoftwareMatchSuggestion -ProductName ([string]$Facts.ProductName) -FleetNames @(Get-FleetProductNames -All)).Match
     if (-not $match) { $match = $name + '*' }
     $signers = @(); if ($Facts.Signature -eq 'Valid' -and $Facts.Org) { $signers = @(ConvertTo-AsciiText $Facts.Org '*') }
+    # an .exe says which setup program built it (Get-SetupProgram): that program's usual silent switches are the starting
+    # point - none for one the tool does not run (NSIS has no switch that holds back a restart) or one the file does not name
+    $switches = ''
+    if ($kind -eq 'exe' -and $Facts.PSObject.Properties['SetupKind'] -and $Facts.SetupKind) {
+        $usual = @($script:SoftwareSetupPrograms | Where-Object { $_.Kind -eq [string]$Facts.SetupKind })[0]
+        if ($usual) { $switches = [string]$usual.Arguments }
+    }
     return [ordered]@{ Id = $id; Name = $name; Folder = [string]$Detected.Folder; Match = $match; FilePattern = $np.FilePattern; VersionFrom = $versionFrom; VersionRegex = $np.VersionRegex
-        Installer = $kind; Arguments = ''; InstallArguments = ''; UpdateArguments = ''; Modes = @('Install', 'Update', 'Uninstall'); Requires = ''; Signers = $signers; AllowUnsigned = $false; Note = '' }
+        Installer = $kind; Arguments = ''; InstallArguments = $switches; UpdateArguments = $switches; Modes = @('Install', 'Update', 'Uninstall'); Requires = ''; Signers = $signers; AllowUnsigned = $false; Note = '' }
 }
 
 function Test-SoftwarePackageDraft {
@@ -568,7 +844,10 @@ function Test-SoftwarePackageDraft {
     if ($Draft.VersionFrom -eq 'name') { try { $null = [regex]::new([string]$Draft.VersionRegex) } catch { $regexOk = $false; $problems.Add('VersionRegex is not a valid regular expression') } }
     if ($Detected.FullName) {   # no file (a package edited from the library window): the fields are checked, the file is vetted when one turns up
         if ($regexOk) { try { $version = [string](Get-SoftwareFileVersion -Package $Draft -File (Get-Item -LiteralPath $Detected.FullName)) } catch { $version = '' } }
-        $block = Get-SoftwarePackageBlock -Package $Draft -Info @{ Version = $version; Signature = $Facts.Signature; Signer = $Facts.Signer }
+        $setupKind = ''; if ($Facts.PSObject.Properties['SetupKind']) { $setupKind = [string]$Facts.SetupKind }
+        # a file that could not be read for its setup program: Setup stays unset and the reason rides along, as in the scan
+        $setupUnread = ''; if ($Facts.PSObject.Properties['SetupUnread']) { $setupUnread = [string]$Facts.SetupUnread }
+        $block = Get-SoftwarePackageBlock -Package $Draft -Info @{ Version = $version; Signature = $Facts.Signature; Signer = $Facts.Signer; Setup = $(if ($setupUnread) { $null } else { $setupKind }); SetupUnread = $setupUnread }
         if ($block) { $problems.Add($block) }
     }
     return [pscustomobject]@{ Problems = @($problems.ToArray()); Version = $version }
@@ -576,6 +855,16 @@ function Test-SoftwarePackageDraft {
 
 # the server grid's own columns: a package Id with one of these names would overwrite that cell (Server is the row's key)
 $script:SoftwareFixedColumns = @('Server', 'Group', 'WinRM', 'Last checked', 'All packages', 'Hardware', 'Pending reboot', 'Trellix Agent', 'Staged', 'Toolkit task', 'Products', 'Colour', 'Tip', 'Cells')
+
+# the setup programs the Register form knows for an .exe: the name Get-SetupProgram gives, the form's label, the usual
+# silent switches with the restart held back ('' = it has none, so the tool does not run such an installer), how the
+# file shows it and where it is met (the last two for the Help page)
+$script:SoftwareSetupPrograms = @(
+    @{ Kind = 'InstallShield'; Label = 'InstallShield with an MSI inside'; Arguments = '/s /v"/qn REBOOT=R /l*v {log}"'; Shows = 'its resources say InstallShield'; Met = 'A setup.exe that unpacks an .msi and hands it to Windows Installer: /s silences the launcher, /v passes the rest to the .msi. An InstallShield setup without an .msi inside takes a response file instead (/s /f1) - the vendor''s documentation says which.' }
+    @{ Kind = 'Inno Setup'; Label = 'Inno Setup'; Arguments = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG={log}'; Shows = 'its manifest names JR.Inno.Setup'; Met = 'Many free tools (WinSCP''s Setup.exe, Git, KeePass). Its uninstaller is unins000.exe.' }
+    @{ Kind = 'WiX bundle'; Label = 'WiX / Burn bundle'; Arguments = '/quiet /norestart /log {log}'; Shows = 'the program has a .wixburn section'; Met = 'An .exe that carries one or more .msi packages (the Visual C++ Redistributable).' }
+    @{ Kind = 'NSIS'; Label = 'NSIS (Nullsoft)'; Arguments = ''; Shows = 'its manifest names Nullsoft.NSIS.exehead'; Met = 'Wireshark''s and Notepad++''s .exe. Silent with /S, but it has no switch that holds back a restart, so the tool does not run it whatever is typed in the argument boxes (Blocked: file): take the vendor''s .msi.' }
+)
 
 # the package fields the Register / Edit form shows; any other field in an entry is carried along unchanged
 $script:SoftwarePackageFields = @('Id', 'Name', 'Folder', 'Match', 'FilePattern', 'VersionFrom', 'VersionRegex', 'Installer', 'Arguments', 'InstallArguments', 'UpdateArguments', 'Modes', 'Requires', 'Signers', 'AllowUnsigned', 'Note')
@@ -820,6 +1109,113 @@ function Edit-SoftwarePackage {
     Get-SoftwarePackageFiles | Out-Null
 }
 
+# ---------------------------------------------------------------------
+#  REMOVING A PACKAGE FROM THE LIBRARY (the library window's "Remove
+#  package...").  The entry goes out of data\software-packages.psd1 - no
+#  hand edit - and, when the operator says so, its installer files go out
+#  of software\ with it.  Nothing touches a server: a product that is
+#  installed stays installed, and UNINSTALL in the inventory list is the
+#  way to take it off a server.
+# ---------------------------------------------------------------------
+function Get-SoftwareRemovalPlan {
+    # What "Remove package..." would do for one package, before anything is asked: the entry, the installer files the
+    # package claims (its folder + FilePattern, as the last scan listed them), whether those may be deleted from here, and
+    # the product names whose protection goes with the package (one without Uninstall protects its product).
+    param([string]$Id)
+    $pkg = @(@((Get-SoftwareCatalogue).Packages) | Where-Object { $_ -and ([string]$_.Id).Trim() -ieq $Id.Trim() })[0]
+    if (-not $pkg) { return $null }
+    $files = @(@($script:SoftwareFiles) | Where-Object { $_ -and [string]$_.Id -ieq ([string]$pkg.Id).Trim() })
+    $folder = Get-SoftwarePackageFolder -Package $pkg
+    $mayDelete = $true; $whyNot = ''
+    if ($script:SpokeMode) { $mayDelete = $false; $whyNot = 'the installers are in the hub''s folder, which a spoke reads and never writes' }
+    $protects = ''
+    if (@($pkg.Modes) -notcontains 'Uninstall') {
+        $alsoListed = @(@((Get-SoftwareCatalogue).ProtectedProducts) | Where-Object { $_ -and ([string]$pkg.Match -like [string]$_ -or [string]$_ -eq [string]$pkg.Match) })
+        if ($alsoListed.Count -eq 0) { $protects = [string]$pkg.Match }
+    }
+    return [pscustomobject]@{ Id = ([string]$pkg.Id).Trim(); Name = [string]$pkg.Name; Folder = $folder; Files = $files; SizeMB = [math]::Round((@($files | Measure-Object -Property Length -Sum).Sum) / 1MB, 1); MayDeleteFiles = $mayDelete; WhyNot = $whyNot; Protects = $protects }
+}
+
+function Remove-SoftwarePackage {
+    # Takes one package out of the catalogue: its @{ ... } goes with the lines it stands on (and the one empty line above
+    # it, so a registration and its removal leave the file as it was); every other byte stays, comments written by hand
+    # above it included.  The entry's own text goes to the log first, line by line, so a removal made by mistake can be
+    # pasted back.  -DeleteFiles: the installer files the package claimed go too (never on a spoke: the hub's folder is
+    # read, not written), and its folder when that leaves it empty.  Returns Id, Entry (the removed text), Deleted and
+    # Kept (file names; Kept with the reason).
+    param([string]$Id, [switch]$DeleteFiles, [string]$Path = '')
+    if (-not $Path) { $Path = Join-Path $script:Config.DataFolder 'software-packages.psd1' }
+    $plan = Get-SoftwareRemovalPlan -Id $Id
+    $before = [System.IO.File]::ReadAllText($Path)
+    $entry = Get-SoftwarePackageEntry -Text $before -Id $Id
+    if (-not $entry -or -not $plan) { throw "package '$Id' is not in data\software-packages.psd1 any more - press Reload lists + packages" }
+    $idsBefore = @(@((Get-SoftwareCatalogue).Packages) | Where-Object { $_ } | ForEach-Object { ([string]$_.Id).Trim() })
+    $text = $before.Substring($entry.Start, $entry.End - $entry.Start)
+    # whole lines: from the start of the entry's first line (only spaces before it) to the line break after its last
+    $from = $entry.Start; $to = $entry.End
+    $lineStart = $before.LastIndexOf("`n", [Math]::Max(0, $from - 1)) + 1
+    if ($before.Substring($lineStart, $from - $lineStart).Trim() -eq '') { $from = $lineStart }
+    $tail = [regex]::Match($before.Substring($to), '^[ \t]*,?[ \t]*\r?\n')
+    if ($tail.Success) { $to += $tail.Length }
+    # ... and the one empty line above it, when there is one
+    if ($from -eq $lineStart -and $lineStart -ge 2) {
+        $prevStart = $before.LastIndexOf("`n", $lineStart - 2) + 1
+        if ($before.Substring($prevStart, $lineStart - $prevStart).Trim() -eq '') { $from = $prevStart }
+    }
+    $after = $before.Substring(0, $from) + $before.Substring($to)
+    $gone = $plan.Id
+    Write-PatchLog ("REMOVING software package '{0}' by {1} - its entry in data\software-packages.psd1 was:" -f $gone, (Get-OperatorIdentity)) 'INFO'
+    foreach ($line in @($text -split "`r?`n")) { Write-PatchLog ('    ' + $line.TrimEnd()) 'INFO' }
+    Save-SoftwareCatalogueText -Path $Path -Before $before -After $after -What 'removal' -Check {
+        param($back)
+        $left = @(@($back.Packages) | Where-Object { $_ } | ForEach-Object { ([string]$_.Id).Trim() })
+        if ($left -contains $gone) { 'the entry is still in the file after writing' }
+        elseif ($left.Count -ne ($idsBefore.Count - 1) -or @($idsBefore | Where-Object { $_ -ine $gone -and $left -notcontains $_ }).Count -gt 0) { 'another package went missing with it' }
+    }
+    $deleted = @(); $kept = @()
+    if ($DeleteFiles -and -not $plan.MayDeleteFiles) { foreach ($f in $plan.Files) { $kept += ('{0} ({1})' -f $f.File, $plan.WhyNot) } }
+    elseif ($DeleteFiles) {
+        $root = (Get-Item -LiteralPath $script:Config.SoftwareFolder).FullName.TrimEnd('\')
+        foreach ($f in $plan.Files) {
+            # only a file under software\, and only the ones this package claimed at the last scan
+            if (-not ([string]$f.FullName).StartsWith($root + '\', [System.StringComparison]::OrdinalIgnoreCase)) { $kept += ('{0} (not under software\)' -f $f.File); continue }
+            try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop; $deleted += [string]$f.File }
+            catch { $kept += ('{0} ({1})' -f $f.File, (Get-ShortError $_)) }
+        }
+        # its folder too when nothing is left in it (never software\ itself, never a folder that still holds anything)
+        if ($plan.Folder) {
+            $dir = Join-Path $root $plan.Folder
+            try { if ((Test-Path -LiteralPath $dir) -and @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop).Count -eq 0) { Remove-Item -LiteralPath $dir -Force -ErrorAction Stop } } catch { }
+        }
+    } else { foreach ($f in $plan.Files) { $kept += [string]$f.File } }
+    Write-PatchLog ("REMOVED software package '{0}' by {1}: {2}{3}" -f $gone, (Get-OperatorIdentity), $(if ($deleted.Count -gt 0) { '{0} installer file(s) deleted from software\{1} ({2})' -f $deleted.Count, $plan.Folder, ($deleted -join ', ') } else { 'no installer file deleted' }), $(if ($kept.Count -gt 0) { '; left in place: ' + ($kept -join ', ') } else { '' })) 'OK'
+    return [pscustomobject]@{ Id = $gone; Entry = $text; Deleted = $deleted; Kept = $kept }
+}
+
+function Remove-SoftwarePackageFromLibrary {
+    # The library window's Remove package...: says what goes, asks once for the package and - when it has installer files
+    # that may be deleted from here - once more for the files (No is the answer Enter gives, both times), then removes it
+    # and scans again.  $true when the package was removed.
+    param([string]$Id)
+    $plan = Get-SoftwareRemovalPlan -Id $Id
+    if (-not $plan) { $null = Show-PatcherMessage -Text ("Package '{0}' was not found in data\software-packages.psd1 - press Reload lists + packages." -f $Id) -Title 'Remove software package' -Icon 'Warning'; return $false }
+    $lines = @(("Remove the package '{0}' from the software library?" -f $plan.Id), '', 'Its entry is taken out of data\software-packages.psd1 (the log keeps its text). Nothing changes on a server: where the product is installed it stays installed.')
+    if ($plan.Protects) { $lines += @('', ("This package does not allow Uninstall, which protects products named '{0}' from UNINSTALL. With the package gone, that protection is gone." -f $plan.Protects)) }
+    $ask = Show-PatcherMessage -Title 'Remove software package' -Buttons 'YesNo' -Icon 'Warning' -Default 'Button2' -Text ($lines -join "`n")
+    if ($ask -ne 'Yes') { Write-PatchLog "Removal of package '$($plan.Id)' cancelled - nothing written" 'INFO'; return $false }
+    $delete = $false
+    if (@($plan.Files).Count -gt 0 -and $plan.MayDeleteFiles) {
+        $list = (@($plan.Files | Select-Object -First 12 | ForEach-Object { '   {0}   {1} MB' -f $_.File, $_.SizeMB })) -join "`n"
+        if (@($plan.Files).Count -gt 12) { $list += ("`n   ... and {0} more" -f (@($plan.Files).Count - 12)) }
+        $files = Show-PatcherMessage -Title 'Remove software package' -Buttons 'YesNo' -Icon 'Question' -Default 'Button2' -Text (("Delete its {0} installer file(s) from software\{1} as well ({2} MB)?`n`n{3}`n`nYes = the files are deleted from this PC.`nNo = the files stay; without a package they show as * NEW again." -f @($plan.Files).Count, $plan.Folder, $plan.SizeMB, $list))
+        $delete = ($files -eq 'Yes')
+    }
+    $done = Remove-SoftwarePackage -Id $plan.Id -DeleteFiles:$delete
+    Get-SoftwarePackageFiles | Out-Null
+    if (@($done.Kept).Count -gt 0 -and $delete) { $null = Show-PatcherMessage -Title 'Remove software package' -Icon 'Warning' -Text ("Package '{0}' is removed, but not every file could be deleted:`n`n{1}" -f $done.Id, (($done.Kept | ForEach-Object { '   ' + $_ }) -join "`n")) }
+    return $true
+}
+
 function Get-SoftwareCommandPreview {
     # The command lines a draft would run on a server, for the Register form (built like RemoteSoftwareRunScript builds them).
     param($Draft, $Detected)
@@ -870,8 +1266,23 @@ function Show-SoftwareRegisterDialog {
     & $add 'Id' 'Package Id (unique, spaces fine):' (& $tb $Draft.Id) 520 'The key of the package: its grid column and its folder on the servers (C:\PatchStaging\software\<Id>).'
     $folderBox = & $tb ('software\' + $Draft.Folder); $folderBox.ReadOnly = $true
     & $add 'Folder' 'Folder on this PC:' $folderBox 520 'Where the installer is. The package reads every file in this folder that matches the file pattern.'
+    # the names the inventory lists this product under, and the Match that covers them (Get-SoftwareMatchSuggestion): it is
+    # first in the Match list, and the preview says when Match leaves one of those names out.  For an .msi, what the file
+    # itself refuses to install over (Get-MsiRefusals) is in the preview too.
+    $productName = [string]$Facts.ProductName; if (-not $productName) { $productName = [string]$Draft.Name }
+    $suggest = Get-SoftwareMatchSuggestion -ProductName $productName -FleetNames @(Get-FleetProductNames -All)
+    $sameNames = @($suggest.Covered) + @($suggest.Missed)
+    $refusedKeys = @(); if ($kind -eq 'msi' -and $Detected.FullName) { $refusedKeys = @(Get-MsiRefusals -Path $Detected.FullName | ForEach-Object { [string]$_.Key } | Select-Object -Unique) }
+    # for an .exe, the setup program that built it (Get-SetupProgram, read with the other facts): it decides the silent switches
+    $setupProgram = $null; $builtWith = ''
+    if ($kind -eq 'exe' -and $Detected.FullName) {
+        if ($Facts.PSObject.Properties['SetupKind'] -and $Facts.SetupKind) { $setupProgram = @($script:SoftwareSetupPrograms | Where-Object { $_.Kind -eq [string]$Facts.SetupKind })[0] }
+        if (-not $setupProgram) { $builtWith = 'Built with:   the file does not say which setup program - type the silent switches the vendor documents' }
+        elseif ($setupProgram.Arguments) { $builtWith = ('Built with:   {0} ({1}) - its usual silent switches: {2}' -f $setupProgram.Kind, $Facts.SetupEvidence, $setupProgram.Arguments) }
+        else { $builtWith = ('Built with:   {0} ({1}) - silent with /S, but it has no switch that holds back a restart, so this tool does not run it: take the vendor''s .msi' -f $setupProgram.Kind, $Facts.SetupEvidence) }
+    }
     $matchBox = New-Object System.Windows.Forms.ComboBox; $matchBox.DropDownStyle = 'DropDown'
-    foreach ($nm in @(Get-FleetProductNames -Hint $Draft.Name)) { [void]$matchBox.Items.Add($nm) }
+    foreach ($nm in @(@($suggest.Match) + @(Get-FleetProductNames -Hint $Draft.Name) | Where-Object { $_ } | Select-Object -Unique)) { [void]$matchBox.Items.Add($nm) }
     $matchBox.Text = [string]$Draft.Match
     & $add 'Match' 'Name in Programs and Features:' $matchBox 520 'How "installed? which version?" is answered: the DisplayName in the Uninstall registry, * = any text. The list offers names the fleet inventory has seen.'
     & $add 'Pattern' 'Installer file pattern:' (& $tb $Draft.FilePattern) 520 'Which files in the folder are this package. * = any text, so the next version of the file is picked up without registering again.'
@@ -881,14 +1292,14 @@ function Show-SoftwareRegisterDialog {
     if ($vf.Items.Contains([string]$Draft.VersionFrom)) { $vf.SelectedItem = [string]$Draft.VersionFrom } else { $vf.SelectedIndex = 0 }
     & $add 'VersionFrom' 'Version read from:' $vf 90 'msi = the ProductVersion inside the .msi; file = the .exe''s ProductVersion; name = the regular expression on the file name.'
     $rx = & $tb $Draft.VersionRegex; $rx.Location = New-Object System.Drawing.Point(330, ($lay.Y - 30)); $rx.Width = 422
-    $script:Gui['Tips'].SetToolTip($rx, 'Only for "name": the capture groups, joined with dots, are the version.')
+    $script:Gui['Tips'].SetToolTip($rx, 'Only for "name": the capture groups, joined with dots')
     $dlg.Controls.Add($rx); $c['Regex'] = $rx
     $modeY = $lay.Y
     $ml = New-Object System.Windows.Forms.Label; $ml.Text = 'Allowed on servers:'; $ml.Location = New-Object System.Drawing.Point(12, ($modeY + 4)); $ml.AutoSize = $true; $dlg.Controls.Add($ml)
     $x = 232
     foreach ($m in 'Install', 'Update', 'Uninstall') {
         $cb = New-Object System.Windows.Forms.CheckBox; $cb.Text = $m; $cb.AutoSize = $true; $cb.Location = New-Object System.Drawing.Point($x, ($modeY + 2)); $cb.Checked = (@($Draft.Modes) -contains $m)
-        $script:Gui['Tips'].SetToolTip($cb, $(switch ($m) { 'Install' { 'INSTALL may put it on servers that do not have it' } 'Update' { 'UPDATE may replace an older version on a server' } default { 'UNINSTALL may remove the product from servers. Unticked = the product is protected: the tool never removes it (right for VMware Tools; wrong for an ordinary application whose old version must go first).' } }))
+        $script:Gui['Tips'].SetToolTip($cb, $(switch ($m) { 'Install' { 'INSTALL may put it on servers that do not have it' } 'Update' { 'UPDATE may replace an older version on a server' } default { 'UNINSTALL may remove it; unticked = protected, never removed' } }))
         $dlg.Controls.Add($cb); $c['Mode' + $m] = $cb; $x += 100
     }
     $lay.Y += 30
@@ -902,8 +1313,12 @@ function Show-SoftwareRegisterDialog {
     $dlg.Controls.Add($uns); $c['Unsigned'] = $uns; $lay.Y += 30
     if ($kind -eq 'exe') {
         $preset = New-Object System.Windows.Forms.ComboBox; $preset.DropDownStyle = 'DropDownList'
-        foreach ($v in '(pick a common installer type, or type the vendor''s switches below)', 'InstallShield with an MSI inside:  /s /v"/qn REBOOT=R /l*v {log}"', 'Inno Setup:  /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG={log}', 'WiX / Burn bundle:  /quiet /norestart /log {log}') { [void]$preset.Items.Add($v) }
+        [void]$preset.Items.Add('(pick a common installer type, or type the vendor''s switches below)')
+        foreach ($sp in @($script:SoftwareSetupPrograms | Where-Object { $_.Arguments })) { [void]$preset.Items.Add(('{0}:  {1}' -f $sp.Label, $sp.Arguments)) }
         $preset.SelectedIndex = 0
+        # a new registration starts with the switches of the setup program the file names (New-SoftwarePackageDraft): the
+        # list shows that choice.  An edit keeps what the entry says and the list stays at the top.
+        if ($setupProgram -and $setupProgram.Arguments -and -not $editing -and [string]$Draft.InstallArguments -eq [string]$setupProgram.Arguments) { $preset.SelectedIndex = [Math]::Max(0, $preset.Items.IndexOf(('{0}:  {1}' -f $setupProgram.Label, $setupProgram.Arguments))) }
         & $add 'Preset' 'Silent switches - a starting point:' $preset 520 'Common conventions, not guarantees: use the switches the vendor documents. The reboot must be suppressed or the package is refused.'
         & $add 'Args1' 'Install arguments:' (& $tb $Draft.InstallArguments) 520 '{log} = the installer log path on the server.'
         & $add 'Args2' 'Update arguments:' (& $tb $Draft.UpdateArguments) 520 '{log} = the installer log path on the server.'
@@ -947,9 +1362,19 @@ function Show-SoftwareRegisterDialog {
         $seen = @(); try { $seen = @(Get-SoftwareRows -Servers @(Get-GridAllKeys -Grid $script:Gui['SoftwareServerGrid']) | Where-Object { $_.Product -like [string]$d.Match } | ForEach-Object { [string]$_.Version } | Where-Object { $_ } | Select-Object -Unique | Select-Object -First 4) } catch { $seen = @() }
         if ($seen.Count -gt 0) {
             $text.Add(('Installed:    {0} (from the last inventory)' -f ($seen -join ', ')))
-            $shape = { param([string]$v) $m = [regex]::Match($v, '\d+(\.\d+)*'); if ($m.Success) { @($m.Value -split '\.').Count } else { 0 } }
-            if ($t.Version -and (& $shape $t.Version) -ne (& $shape $seen[0])) { $text.Add('              WARNING: the file''s version and the installed version are written differently - check that Version from compares like with like') }
+            # a trailing .0 is not a difference (4.6.9.0 against an installed 4.6.7 compares): Get-VersionShape leaves it out
+            if ($t.Version -and (Get-VersionShape $t.Version) -ne (Get-VersionShape $seen[0])) { $text.Add('              WARNING: the file''s version and the installed version are written differently - check that Version from compares like with like') }
         }
+        if ($builtWith) { $text.Add($builtWith) }
+        # the same product under a name Match leaves out: that server would be offered a second copy
+        $missed = @($sameNames | Where-Object { $_ -notlike [string]$d.Match })
+        if ($missed.Count -gt 0) {
+            $text.Add(('Not covered:  {0}{1}' -f ((@($missed | Select-Object -First 3)) -join ', '), $(if ($missed.Count -gt 3) { ', +{0} more' -f ($missed.Count - 3) } else { '' })))
+            $way = 'pick the name from the Match list, or end Match with *'
+            if ([string]$suggest.Match -ne [string]$d.Match -and @($suggest.Missed).Count -eq 0) { $way = ("the Match list offers '{0}', which covers them" -f $suggest.Match) }
+            $text.Add('              WARNING: the inventory lists this product under the name(s) above and Match leaves them out - on such a server it does not count as installed (INSTALL where UPDATE is meant): ' + $way)
+        }
+        foreach ($rk in $refusedKeys) { $text.Add(("Refuses:      this .msi does not run over a copy that another installer registered as '{0}' (its own launch condition) - such a server reads 'Remove ... first' until that copy is uninstalled" -f $rk)) }
         $text.Add(('On a server:  {0}\software\{1}\{2}, run as a one-shot SYSTEM task' -f $script:Config.RemoteStaging.TrimEnd('\'), (Get-SoftwareStageName $d.Id), $(if ($Detected.File) { $Detected.File } else { '<installer>' })))
         $text.Add(('Allowed on:   {0}' -f $(if ($d.Requires) { "'" + $d.Requires + "' machines only" } else { 'any server' })))
         $text.Add(('Trusted:      {0}' -f $(if ($d.AllowUnsigned) { 'unsigned allowed (a signed file that was changed is still refused; the copy on the server must match this file''s SHA256)' } else { 'files signed by ' + (@($d.Signers) -join ' / ') })))
@@ -1087,6 +1512,8 @@ function Get-ServerTaskRows {
 function Get-SoftwareVerdict {
     # THE decision "what would INSTALL / UPDATE do with this installer file on this server?" (the Software twin of
     # Get-PatchVerdict).  Returns Cell, Go, Mode ('Install' / 'Update' / ''), Reason, Light, Installed, Staged.
+    # "Installed?" is answered by the package's Match against the product names; an .msi that names the copy of another
+    # installer it will not run over (the file's Refuses) is held back on a server that has that copy: 'Remove x first'.
     # -Products: the server's rows of Get-SoftwareRows when the caller already has them (a grid of hundreds of servers)
     # -ForAction: the plan of an install or a stage reads through Get-ActionResult, so a server whose latest check failed is
     # unreachable here however good the result the grid still shows (the O/S patch plan does the same; review 2026-11-08)
@@ -1122,6 +1549,29 @@ function Get-SoftwareVerdict {
             else { $cell = 'Behind'; $reason = "installed $have is older than $($PackageFile.Version), but software-packages.psd1 does not allow Update for this package"; $light = 'Amber' }
         } elseif ($modes -contains 'Install') { $cell = 'INSTALL ' + $PackageFile.Version; $go = $true; $mode = 'Install'; $light = 'Amber'; $reason = 'not installed; the package allows a new install' }
         else { $cell = 'Not installed'; $reason = 'not installed, and the package allows Update only' }
+        # the .msi's own refusal (Get-MsiRefusals): a copy of the product that another installer registered ends it with
+        # error 1603, whatever Match covers - neither INSTALL nor UPDATE is offered until that copy is removed
+        if ($go -and $PackageFile.PSObject.Properties['Refuses']) {
+            $stop = $null; $says = ''
+            foreach ($rf in @($PackageFile.Refuses | Where-Object { $_ })) {
+                foreach ($p in $Products) {
+                    if ([string]$p.KeyName -ine [string]$rf.Key) { continue }
+                    if ($p.Hive -and $rf.Hive -and [string]$p.Hive -ne [string]$rf.Hive) { continue }   # an inventory without the hive: the key name decides
+                    $stop = $p; $says = [string]$rf.Message; break
+                }
+                if ($stop) { break }
+            }
+            if ($stop) {
+                $go = $false; $mode = ''; $light = 'Amber'
+                if (-not $have) { $have = [string]$stop.Version }
+                $cell = ('Remove {0} first' -f $(if ($stop.Version) { $stop.Version } else { 'the old copy' }))
+                # how: UNINSTALL where the tool may run that copy's uninstaller, else by hand (one that could restart the server is never run)
+                $how = 'tick it in the inventory list and UNINSTALL, press Check, then INSTALL'
+                $removal = Get-UninstallVerdict -Row $stop
+                if (-not $removal.Go) { $how = ('UNINSTALL does not remove that copy (its Removal column reads "{0}"): remove it on the server by hand, press Check, then INSTALL' -f $removal.Cell) }
+                $reason = ("'{0}' was installed by another installer of this product, and this .msi does not run while it is there{1} - {2}" -f $stop.Product, $(if ($says) { ' (the .msi says: ' + $says + ')' } else { '' }), $how)
+            }
+        }
         if ($st -and $st.Reachable) {
             $running = @(); if (@($st.Tasks).Count -gt 0) { $running = @(Get-ServerTaskRows -Server $Server | Where-Object { $_.State -eq 'Running' }) }
             if ($go -and $running.Count -gt 0) { $go = $false; $cell = 'Task running'; $reason = 'a toolkit task is running on the server: ' + (($running | ForEach-Object { "$($_.Task) $($_.Item)" }) -join ', '); $light = 'Grey' }
@@ -1146,6 +1596,25 @@ function Get-SoftwareLibraryFiles {
         if ($usable.Count -gt 0) { $pick += $usable[0] } else { $pick += $g.Group[0] }
     }
     return $pick
+}
+
+function Get-SoftwareLibraryReference {
+    # The library as a reference for the currency verdict (Get-SoftwareRows, 20-Console-Patching.ps1): a registered
+    # package says which version of its product is at hand.  Per package with a usable installer: its Id, its Match, the
+    # newest usable version, and the Uninstall keys its .msi names as "the same product from another installer"
+    # (Get-MsiRefusals).  Stamp changes when any of that does; the list is rebuilt only after a new scan of software\.
+    if ($script:SoftwareLibraryReference -and [object]::ReferenceEquals($script:SoftwareLibraryReference.Source, $script:SoftwareFiles)) { return $script:SoftwareLibraryReference }
+    $packages = New-Object System.Collections.Generic.List[object]
+    $done = @{}
+    foreach ($f in @($script:SoftwareFiles)) {   # newest first within each package
+        if (-not $f -or $f.Blocked -or -not $f.Version -or $done.ContainsKey([string]$f.Id)) { continue }
+        $done[[string]$f.Id] = $true
+        $keys = @(); if ($f.PSObject.Properties['Refuses']) { $keys = @($f.Refuses | Where-Object { $_ -and $_.Key }) }
+        $packages.Add([pscustomobject]@{ Id = [string]$f.Id; Match = [string]$f.Package.Match; Version = [string]$f.Version; Keys = $keys })
+    }
+    $stamp = (@($packages.ToArray() | ForEach-Object { '{0}={1}={2}={3}' -f $_.Id, $_.Match, $_.Version, ((@($_.Keys | ForEach-Object { $_.Key + $_.Hive })) -join ',') }) -join ';')
+    $script:SoftwareLibraryReference = @{ Source = $script:SoftwareFiles; Packages = @($packages.ToArray()); Stamp = $stamp }
+    return $script:SoftwareLibraryReference
 }
 
 function Get-SoftwareGridFiles {
@@ -1237,7 +1706,7 @@ function Get-SoftwareSummary {
         if ($v.Verdict.Go) { $todo += ('{0}: {1}' -f $v.Id, $v.Verdict.Cell); if ($v.Verdict.Mode -eq 'Update') { $updates++ } else { $installs++ } }
         elseif ($v.Verdict.Light -eq 'Green') { $current++ }
         elseif ($v.Verdict.Light -eq 'Red') { $blocked++ }
-        elseif ($v.Verdict.Light -eq 'Amber') { $behind++ }   # an older version the package may not update, or one that cannot be compared: not current
+        elseif ($v.Verdict.Light -eq 'Amber') { $behind++ }   # an older version the package may not update, one that cannot be compared, or a copy the .msi does not run over: not current
     }
     $total = @($Verdicts).Count
     $text = 'not checked'; $colour = ''
@@ -1276,7 +1745,7 @@ function Get-SoftwareLibraryRows {
         $light = 'Grey'; $status = 'not checked yet'
         if ($f.Blocked) { $light = 'Red'; $status = 'installer blocked: ' + $f.Blocked }
         elseif ($upd + $ins -gt 0) { $light = 'Amber'; $status = $(if ($upd -gt 0) { ('newer than deployed on {0} server(s)' -f $upd) } else { 'not installed yet' }) }
-        elseif ($behind -gt 0) { $light = 'Amber'; $status = ('behind on {0} server(s) - Update not allowed for this package, or the versions cannot be compared' -f $behind) }
+        elseif ($behind -gt 0) { $light = 'Amber'; $status = ('behind on {0} server(s) - Update not allowed for this package, the versions cannot be compared, or another installer''s copy has to be removed first' -f $behind) }
         elseif ($cur -gt 0) { $light = 'Green'; $status = 'current on every server checked' }
         $files = @(@($script:SoftwareFiles) | Where-Object { $_.Id -eq $f.Id }).Count
         $rows += [pscustomobject]@{ Package = $f.Id; Shown = ($shown -contains $f.Id); Version = $f.Version; Files = $files; Update = $upd; Install = $ins; Current = $cur; 'Not checked' = $none; Deployed = $deployed; Status = $status; Light = $light; Todo = ($upd + $ins) }
@@ -1326,7 +1795,16 @@ function Show-SoftwareLibrary {
         Update-SoftwareLibraryCount
     })
     $filter.Add_TextChanged({ Update-SoftwareLibraryGrid -Filter $this.Text })
-    $bar = New-DialogButtonBar -Dialog $dlg -Buttons @(@{ Text = 'Most needed'; Width = 110 }, @{ Text = 'Untick all'; Width = 90 }, @{ Text = 'Edit package...'; Width = 120 }, @{ Text = 'Show ticked'; Result = 'OK'; Width = 110 }, @{ Text = 'Cancel'; Result = 'Cancel' }) -Hint 'Most needed = the packages with the most servers to update or install'
+    # The names say what a press does (the owner, 2026-11-19: "Most needed" made no sense and "Show ticked" seemed to do
+    # nothing - it read like a filter of this list, and is the window's OK): the first ticks the packages with the most
+    # servers to update or install, as many as the console shows; OK shows the ticked packages in the console and closes
+    $bar = New-DialogButtonBar -Dialog $dlg -Buttons @(
+        @{ Text = 'Tick most to do'; Width = 125; Tip = 'Ticks the packages with the most servers to update or install' },
+        @{ Text = 'Untick all'; Width = 90 },
+        @{ Text = 'Edit package...'; Width = 120; Tip = 'The selected package: its name, match, switches and files' },
+        @{ Text = 'Remove package...'; Width = 135; Tip = 'Takes the selected package out of the catalogue; asks first' },
+        @{ Text = 'OK'; Result = 'OK'; Width = 90; Tip = 'Shows the ticked packages in the console and closes' },
+        @{ Text = 'Cancel'; Result = 'Cancel'; Width = 90; Tip = 'Closes; the console shows what it showed before' })
     $bar.Buttons[0].Add_Click({
         $script:Gui['LibTicks'] = @{}
         foreach ($r in @($script:Gui['LibRows'] | Select-Object -First $script:Gui['LibMax'])) { $script:Gui['LibTicks'][$r.Package] = $true }
@@ -1341,14 +1819,27 @@ function Show-SoftwareLibrary {
         $script:Gui['LibRows'] = @(Get-SoftwareLibraryRows -Servers @(Get-GridAllKeys -Grid $script:Gui['SoftwareServerGrid']))
         Update-SoftwareLibraryGrid -Filter $script:Gui['LibFilter'].Text
     })
+    # Remove package...: the selected row's package out of the catalogue (and, asked separately, its installer files out of
+    # software\) - Remove-SoftwarePackageFromLibrary asks first; the rows are read again afterwards
+    $bar.Buttons[3].Add_Click({
+        $sel = $script:Gui['LibGrid'].SelectedItems
+        if ($sel.Count -eq 0) { $script:Gui['LibCount'].Text = 'select a package first'; return }
+        $name = [string]$sel[0].Text
+        try {
+            if (Remove-SoftwarePackageFromLibrary -Id $name) { $script:Gui['LibTicks'].Remove($name) }
+        } catch { Write-PatchLog ("Remove package '{0}' failed: {1}" -f $name, (Get-ShortError $_)) 'ERROR'; $null = Show-PatcherMessage -Title 'Remove software package' -Icon 'Error' -Text ("Package '{0}' was not removed:`n`n{1}" -f $name, (Get-ShortError $_)) }
+        $script:Gui['LibRows'] = @(Get-SoftwareLibraryRows -Servers @(Get-GridAllKeys -Grid $script:Gui['SoftwareServerGrid']))
+        Update-SoftwareLibraryGrid -Filter $script:Gui['LibFilter'].Text
+    })
     $script:Gui['LibFilter'] = $filter
     $dlg.Controls.Add($grid); $dlg.Controls.Add($top); $grid.BringToFront()
-    $dlg.AcceptButton = $null; $dlg.CancelButton = $bar.Buttons[4]
+    $dlg.AcceptButton = $null; $dlg.CancelButton = $bar.Buttons[5]
     Update-SoftwareLibraryGrid -Filter ''
     $answer = $dlg.ShowDialog($script:Gui['Form'])
     $dlg.Dispose()
     if ($answer -ne 'OK') { return }
-    $pick = @(@($rows | Where-Object { $script:Gui['LibTicks'][$_.Package] }) | ForEach-Object { $_.Package })
+    # the rows as they are now: an edit may have renamed a package, a removal taken one away
+    $pick = @(@($script:Gui['LibRows'] | Where-Object { $script:Gui['LibTicks'][$_.Package] }) | ForEach-Object { $_.Package })
     if ($pick.Count -eq 0) { Write-PatchLog 'Software library: nothing ticked - the packages shown stay as they were' 'WARN'; return }
     # the console shows them by name, as the library lists them by need
     Set-SoftwareShownIds -Ids @($pick | Sort-Object)
@@ -1495,19 +1986,19 @@ function Get-RemovalLeftovers {
 
 function Get-UninstallVerdict {
     # THE decision "may UNINSTALL remove this product from this server, and how?" - the inventory list's Removal column
-    # and the removal plan both call it.  Returns Go, Method ('MSI' / 'quiet string' / ''), Cell, Reason, and MayRestart:
-    # a removal never restarts a server where the tool knows the uninstaller's no-restart switch (MSI, Inno Setup, WiX
-    # bundles); any other uninstaller may restart it by itself, and the plan says so before anything runs.
+    # and the removal plan both call it.  Returns Go, Method ('MSI' / 'quiet string' / ''), Cell, Reason.  A removal never
+    # restarts a server: the tool runs an uninstaller only where it knows the switch that holds a restart back (MSI, Inno
+    # Setup, WiX bundles).  Any other uninstaller could restart the server by itself, so it is not run: 'by hand'.
     param($Row)
     $why = Get-ProductProtection -Server $Row.Server -Product $Row.Product
-    if ($why) { $cell = 'Protected'; if ($why -like 'required by*') { $cell = 'SOE' }; return [pscustomobject]@{ Go = $false; Method = ''; Cell = $cell; Reason = $why; MayRestart = $false } }
-    if (-not $Row.PSObject.Properties['KeyName'] -or -not $Row.KeyName) { return [pscustomobject]@{ Go = $false; Method = ''; Cell = 'Check again'; Reason = 'the inventory predates the uninstall details - press Check'; MayRestart = $false } }
-    if ([string]$Row.Msi -eq '1' -and [string]$Row.KeyName -match '^\{[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}$') { return [pscustomobject]@{ Go = $true; Method = 'MSI'; Cell = 'MSI'; Reason = ('msiexec /x {0} /qn /norestart REBOOT=ReallySuppress - no restart' -f $Row.KeyName); MayRestart = $false } }
+    if ($why) { $cell = 'Protected'; if ($why -like 'required by*') { $cell = 'SOE' }; return [pscustomobject]@{ Go = $false; Method = ''; Cell = $cell; Reason = $why } }
+    if (-not $Row.PSObject.Properties['KeyName'] -or -not $Row.KeyName) { return [pscustomobject]@{ Go = $false; Method = ''; Cell = 'Check again'; Reason = 'the inventory predates the uninstall details - press Check' } }
+    if ([string]$Row.Msi -eq '1' -and [string]$Row.KeyName -match '^\{[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}$') { return [pscustomobject]@{ Go = $true; Method = 'MSI'; Cell = 'MSI'; Reason = ('msiexec /x {0} /qn /norestart REBOOT=ReallySuppress - no restart' -f $Row.KeyName) } }
     $quiet = [string]$Row.Quiet
     $switches = @{ 'msiexec' = '/norestart REBOOT=ReallySuppress'; 'Inno Setup' = '/NORESTART /SUPPRESSMSGBOXES'; 'WiX bundle' = '/norestart' }
-    if ($switches.ContainsKey($quiet)) { return [pscustomobject]@{ Go = $true; Method = 'quiet string'; Cell = 'quiet string'; Reason = ('the product''s own QuietUninstallString ({0} uninstaller), with {1} added - no restart' -f $quiet, $switches[$quiet]); MayRestart = $false } }
-    if ($quiet -and $quiet -ne '0') { return [pscustomobject]@{ Go = $true; Method = 'quiet string'; Cell = 'quiet (may restart)'; Reason = 'the product''s own QuietUninstallString - an uninstaller with no known no-restart switch: it MAY RESTART THE SERVER by itself. Remove it by hand in a reboot window if that is not acceptable.'; MayRestart = $true } }
-    return [pscustomobject]@{ Go = $false; Method = ''; Cell = 'by hand'; Reason = 'neither an MSI product code nor a QuietUninstallString: remove it by hand (Programs and Features) in a change window'; MayRestart = $false }
+    if ($switches.ContainsKey($quiet)) { return [pscustomobject]@{ Go = $true; Method = 'quiet string'; Cell = 'quiet string'; Reason = ('the product''s own QuietUninstallString ({0} uninstaller), with {1} added - no restart' -f $quiet, $switches[$quiet]) } }
+    if ($quiet -and $quiet -ne '0') { return [pscustomobject]@{ Go = $false; Method = ''; Cell = 'by hand'; Reason = 'its uninstaller has no known switch that holds back a restart: it could restart the server by itself, so the tool does not run it - remove it by hand (Programs and Features) in a reboot window' } }
+    return [pscustomobject]@{ Go = $false; Method = ''; Cell = 'by hand'; Reason = 'neither an MSI product code nor a QuietUninstallString: remove it by hand (Programs and Features) in a change window' }
 }
 
 # ---------------------------------------------------------------------
@@ -1537,7 +2028,7 @@ $script:RemoteSoftwareRunScript = {
     $keys = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')
     # NO RESTART FROM A REMOVAL: the switches that keep a product's own uninstaller from restarting the server (or from
     # waiting on a message box nobody can answer).  The same block is in RemoteInventoryScript, which tells the operator
-    # beforehand; the two must stay the same.  Kind '' = an uninstaller with no known no-restart switch.
+    # beforehand; the two must stay the same.  Kind '' = an uninstaller with no known no-restart switch: never run.
     $noRestart = {
         param([string]$UninstallExe, [string]$UninstallArgs)
         $leaf = [System.IO.Path]::GetFileName($UninstallExe)
@@ -1623,8 +2114,8 @@ $script:RemoteSoftwareRunScript = {
         $r = [ordered]@{ Computer = $env:COMPUTERNAME; Index = $n; Kind = [string]$it.Kind; Item = [string]$it.Label; Accepted = $false; TaskName = ''; Message = '' }
         try {
             if ($guard) { throw $guard }
-            $exe = ''; $arg = ''; $mayRestart = $false
-            $log = '{0}\sw-{1}-{2:d2}.log' -f $swDir, $RunId, $n
+            $exe = ''; $arg = ''
+            $log ='{0}\sw-{1}-{2:d2}.log' -f $swDir, $RunId, $n
             if ([string]$it.Kind -eq 'install') {
                 $file = [string]$it.File
                 if (-not (Test-Path -LiteralPath $file)) { throw "staged file not found: $file - stage it first" }
@@ -1690,14 +2181,15 @@ $script:RemoteSoftwareRunScript = {
                     elseif ($q -match '^\s*(.+?\.exe)(\s+(.*))?$') { $exe = $Matches[1]; $arg = [string]$Matches[3] }
                     else { throw "cannot read the QuietUninstallString: $q" }
                     if ($exe -match '(?i)^msiexec(\.exe)?$') { $exe = "$env:SystemRoot\System32\msiexec.exe" }
-                    # a removal never restarts the server: the uninstaller's own no-restart switches, where it has known ones
-                    # (the reboot is the operator's separate step, under its own change record)
+                    # a removal never restarts the server: the uninstaller's own no-restart switches go on, and an uninstaller
+                    # without known ones is not run at all - whatever the plan on the operator PC said (the reboot is the
+                    # operator's separate step, under its own change record)
                     $rule = & $noRestart $exe $arg
+                    if (-not $rule.Kind) { throw "its uninstaller has no known switch that holds back a restart ($exe): it could restart the server by itself - refusing; remove it by hand in a reboot window" }
                     # a switch of the opposite meaning already in the string (REBOOT=Force, /forcerestart, /promptrestart) goes first
-                    if ($rule.Kind) { $arg = (($arg -replace '(?i)(^|\s)REBOOT=\S+', ' ') -replace '(?i)(^|\s)/(forcerestart|promptrestart|restart)(\s|$)', ' ').Trim() -replace '\s{2,}', ' ' }
+                    $arg = (($arg -replace '(?i)(^|\s)REBOOT=\S+', ' ') -replace '(?i)(^|\s)/(forcerestart|promptrestart|restart)(\s|$)', ' ').Trim() -replace '\s{2,}', ' '
                     foreach ($sw in @($rule.Add)) { if ($arg -notmatch ('(?i)(^|\s)' + [regex]::Escape(($sw -split '=')[0]))) { $arg = ($arg + ' ' + $sw).Trim() } }
                     if (-not (Test-Path -LiteralPath $exe)) { throw "the uninstaller named in QuietUninstallString is missing: $exe" }
-                    if (-not $rule.Kind) { $mayRestart = $true }
                 } else { throw 'no silent uninstall (neither an MSI product code nor a QuietUninstallString)' }
             } else { throw "unknown item kind '$($it.Kind)'" }
 
@@ -1712,7 +2204,6 @@ $script:RemoteSoftwareRunScript = {
             Register-ScheduledTask -TaskName $name -TaskPath $taskFolder -Action $action -Principal $principal -Settings $settings -Description $desc -Force | Out-Null
             @("Created=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')", "RunId=$RunId", "Index=$n", "Kind=$($it.Kind)", "Item=$($it.Label)", "Log=$log", "File=$($it.File)", "Change=$ChangeText", "Operator=$Operator", "Command=$exe $arg") | Set-Content -LiteralPath ($swDir + '\task-' + $name + '.txt')
             $r.Accepted = $true; $r.TaskName = $name; $r.Message = "queued as task $taskFolder$name : $exe $arg"
-            if ($mayRestart) { $r.Message += '  (an uninstaller with no known no-restart switch: it may restart the server by itself)' }
             & $note ('Software ' + $it.Mode) $it.Label 'START (queued)' 'Information'
         } catch { $r.Message = $_.Exception.Message }
         $out += [pscustomobject]$r
@@ -2199,11 +2690,11 @@ function Get-UninstallPlan {
         # no fresh inventory (the server did not answer the pre-flight) is not "gone": said as such - an inventory whose latest
         # read failed counts as not read here, whatever the grid still shows of it
         $invRow = Get-ActionResult -Name 'Inventory' -Server $row.Server
-        if (-not $invRow -or -not $invRow.Reachable) { $plan += [pscustomobject]@{ Server = $row.Server; Product = $row.Product; Version = $row.Version; KeyName = $row.KeyName; Hive = [string]$row.Hive; Go = $false; Method = ''; Use = ''; Reason = ('inventory not read: ' + $(if ($invRow) { [string]$invRow.Error } else { 'not checked' })); MayRestart = $false; Location = '' }; continue }
+        if (-not $invRow -or -not $invRow.Reachable) { $plan += [pscustomobject]@{ Server = $row.Server; Product = $row.Product; Version = $row.Version; KeyName = $row.KeyName; Hive = [string]$row.Hive; Go = $false; Method = ''; Use = ''; Reason = ('inventory not read: ' + $(if ($invRow) { [string]$invRow.Error } else { 'not checked' })); Location = '' }; continue }
         $fresh = @(Get-SoftwareRows -Servers @($row.Server) | Where-Object { $_.Product -eq $row.Product -and [string]$_.KeyName -eq [string]$row.KeyName -and (-not [string]$row.Hive -or [string]$_.Hive -eq [string]$row.Hive) })[0]
-        if (-not $fresh) { $plan += [pscustomobject]@{ Server = $row.Server; Product = $row.Product; Version = $row.Version; KeyName = $row.KeyName; Hive = [string]$row.Hive; Go = $false; Method = ''; Use = ''; Reason = 'no longer installed (fresh inventory)'; MayRestart = $false; Location = '' }; continue }
+        if (-not $fresh) { $plan += [pscustomobject]@{ Server = $row.Server; Product = $row.Product; Version = $row.Version; KeyName = $row.KeyName; Hive = [string]$row.Hive; Go = $false; Method = ''; Use = ''; Reason = 'no longer installed (fresh inventory)'; Location = '' }; continue }
         $v = Get-UninstallVerdict -Row $fresh
-        $plan += [pscustomobject]@{ Server = $fresh.Server; Product = $fresh.Product; Version = $fresh.Version; KeyName = $fresh.KeyName; Hive = [string]$fresh.Hive; Go = $v.Go; Method = $v.Method; Use = (Get-ProductUse -Row $fresh); Reason = $v.Reason; MayRestart = [bool]$v.MayRestart; Location = [string]$fresh.Location }
+        $plan += [pscustomobject]@{ Server = $fresh.Server; Product = $fresh.Product; Version = $fresh.Version; KeyName = $fresh.KeyName; Hive = [string]$fresh.Hive; Go = $v.Go; Method = $v.Method; Use = (Get-ProductUse -Row $fresh); Reason = $v.Reason; Location = [string]$fresh.Location }
     }
     return $plan
 }
@@ -2224,9 +2715,9 @@ function Uninstall-SoftwareOnServers {
     $plan = @(Get-UninstallPlan -Rows @($Rows | Where-Object { $kept -contains $_.Server }))
     foreach ($p in $plan) { $lvl = 'WARN'; if ($p.Go) { $lvl = 'INFO' }; Write-PatchLog ("Plan: {0}  remove {1} {2}  -> {3}" -f $p.Server, $p.Product, $p.Version, $p.Reason) $lvl }
     $todo = @($plan | Where-Object { $_.Go })
-    if ($todo.Count -eq 0) { $null = Show-PatcherMessage -Text 'Nothing to remove - every ticked product is protected, required by the SOE standard, has no silent uninstall, or is gone. The log has the reason per product.' -Title 'Nothing to do'; return @() }
+    if ($todo.Count -eq 0) { $null = Show-PatcherMessage -Text 'Nothing to remove - every ticked product is protected, required by the SOE standard, has no silent uninstall the tool can hold back from restarting the server, or is gone. The log has the reason per product.' -Title 'Nothing to do'; return @() }
     $planText = ($plan | ForEach-Object { $what = 'skip'; if ($_.Go) { $what = $_.Method }; '{0,-30} {1,-12} {2} {3}   {4}{5}' -f $_.Server, $what, $_.Product, $_.Version, $_.Reason, $(if ($_.Use) { '   [' + $_.Use.ToUpper() + ']' } else { '' }) }) -join "`n"
-    $ok = Show-PatcherMessage -Title 'The removal plan' -Buttons 'OKCancel' -Icon 'Question' -Text ("This is what will be REMOVED (rows marked skip are left alone):`n`n{0}`n`nEach removal runs on its server as a one-shot SYSTEM task, one at a time, and never restarts the server where the uninstaller has a known no-restart switch (MSI, Inno Setup, WiX bundles - added by the tool). After a removal the server shows 'reboot advised' until it restarts: plan that reboot as its own step.`n`nContinue?" -f $planText)
+    $ok = Show-PatcherMessage -Title 'The removal plan' -Buttons 'OKCancel' -Icon 'Question' -Text ("This is what will be REMOVED (rows marked skip are left alone):`n`n{0}`n`nEach removal runs on its server as a one-shot SYSTEM task, one at a time, and never restarts the server: the tool runs only uninstallers whose no-restart switch it knows (MSI, Inno Setup, WiX bundles - it adds the switch); any other is skipped, to remove by hand. After a removal the server shows 'reboot advised' until it restarts: plan that reboot as its own step.`n`nContinue?" -f $planText)
     if ($ok -ne 'OK') { Write-PatchLog "$who cancelled at the removal plan" 'WARN'; return @() }
     $goServers = @(Get-UniqueNames ($todo | ForEach-Object { $_.Server }))
     $change = Request-ChangeRecord -Action 'Software removal' -Servers $goServers -Items (($todo | ForEach-Object { $_.Product } | Select-Object -Unique) -join ', ')
@@ -2234,10 +2725,8 @@ function Uninstall-SoftwareOnServers {
     $confirmed = Confirm-SafetyChecks -Servers $goServers -Activity 'The removal'
     if ($confirmed -isnot [bool] -or $confirmed -ne $true) { Write-ChangeLog -Record $change -Server $goServers -Action $action -Item 'removal' -Result 'aborted at the safety checks - nothing changed'; return @() }
     $inUse = @($todo | Where-Object { $_.Use -like 'in use*' })
-    $mayRestart = @($todo | Where-Object { $_.MayRestart })
-    $warn = "REMOVE these products?`n`n" + (($todo | ForEach-Object { '{0,-30} {1} {2}{3}{4}' -f $_.Server, $_.Product, $_.Version, $(if ($_.Use -like 'in use*') { '   <- ' + $_.Use.ToUpper() } else { '' }), $(if ($_.MayRestart) { '   <- MAY RESTART THE SERVER' } else { '' }) }) -join "`n") + "`n`nThe tool cannot undo a removal: putting it back needs the vendor's installer, its configuration and its licence."
+    $warn = "REMOVE these products?`n`n" + (($todo | ForEach-Object { '{0,-30} {1} {2}{3}' -f $_.Server, $_.Product, $_.Version, $(if ($_.Use -like 'in use*') { '   <- ' + $_.Use.ToUpper() } else { '' }) }) -join "`n") + "`n`nThe tool cannot undo a removal: putting it back needs the vendor's installer, its configuration and its licence."
     if ($inUse.Count -gt 0) { $warn += "`n`n$($inUse.Count) of them are IN USE by a service, process or scheduled task on the server: that will stop working." }
-    if ($mayRestart.Count -gt 0) { $warn += "`n`n$($mayRestart.Count) of them use an uninstaller with no known no-restart switch: it MAY RESTART THE SERVER by itself. Answer No and remove those by hand in a reboot window if that is not acceptable." }
     $warn += "`n`nAnswer No and nothing is removed."
     $q = Show-PatcherMessage -Title 'CONFIRM REMOVAL (last question)' -Buttons 'YesNo' -Icon 'Warning' -Default 'Button2' -Text $warn
     if ($q -ne 'Yes') { Write-PatchLog "ABORTED - $who did not confirm the removal (answer: $q)" 'ERROR'; Write-ChangeLog -Record $change -Server $goServers -Action $action -Item 'removal' -Result 'aborted at the removal confirmation - nothing changed'; return @() }
@@ -2357,7 +2846,7 @@ function Update-SoftwarePackageList {
                 if ($f.Blocked) { $text += '  - BLOCKED: ' + $f.Blocked } else { $text += '  - ' + (Get-SignerOrg $f.Signer) }
                 $where = [string]$f.File; if ($f.Folder) { $where = $f.Folder + '\' + $f.File }
                 # the SHA256 too: the how-to promises it, and a change process may want it (R6-C13)
-                $tip = ("software\{0}`r`n{1}`r`nSHA256 {3}`r`nEdit... opens the registration of package '{2}' (modes, arguments, signer, Match ...)." -f $where, $text, $f.Id, $(if ($f.Hash) { $f.Hash } else { 'not read' }))
+                $tip = ("software\{0}`r`n{1}`r`nSHA256 {2}" -f $where, $text, $(if ($f.Hash) { $f.Hash } else { 'not read' }))
                 $cb = New-Object System.Windows.Forms.CheckBox
                 $cb.Location = New-Object System.Drawing.Point(5, ($y + 5)); $cb.Size = New-Object System.Drawing.Size(15, 15); $cb.Tag = [string]$f.FullName
                 $cb.Checked = [bool]$ticks[[string]$f.FullName]
@@ -2369,7 +2858,7 @@ function Update-SoftwarePackageList {
                 # a click on the text ticks the box too, like a list
                 $lbl.Add_Click({ $want = [string]$this.Tag; foreach ($other in $this.Parent.Controls) { if ($other -is [System.Windows.Forms.CheckBox] -and [string]$other.Tag -eq $want) { $other.Checked = -not $other.Checked } } })
                 $btn = New-Object System.Windows.Forms.Button
-                $btn.Text = 'Edit...'; $btn.Tag = [string]$f.FullName; $btn.Anchor = 'Top, Right'; $btn.BackColor = 'Gainsboro'; $btn.UseVisualStyleBackColor = $false
+                $btn.Text = 'Edit...'; $btn.Tag = [string]$f.FullName; $btn.Anchor = 'Top, Right'; Set-ButtonFace -Button $btn
                 $btn.Location = New-Object System.Drawing.Point(($w - 68), ($y + 1)); $btn.Size = New-Object System.Drawing.Size(64, 24)
                 # like Register...: the click only records the job, the timer opens the form after the click has finished
                 $btn.Add_Click({ $script:Gui['SoftwareRegisterPending'] = @{ Kind = 'edit'; FullName = [string]$this.Tag }; $script:Gui['SoftwareRegisterTimer'].Stop(); $script:Gui['SoftwareRegisterTimer'].Start() })
@@ -2420,7 +2909,7 @@ function Update-SoftwareNewPanel {
             foreach ($d in $new) {
                 $name = [string]$d.File; if ($d.Folder) { $name = ([string]$d.Folder -split '\\')[-1] }
                 $where = [string]$d.File; if ($d.Folder) { $where = $d.Folder + '\' + $d.File }
-                $tip = ("software\{0}  ({1} MB)`r`n{2}`r`nRegister... opens a form filled from the file; nothing is written until you press Register in it." -f $where, $d.SizeMB, $d.Reason)
+                $tip = ("software\{0}  ({1} MB)`r`n{2}" -f $where, $d.SizeMB, $d.Reason)
                 $title = New-Object System.Windows.Forms.Label
                 $title.Text = ('* NEW   {0}   {1} MB' -f $name, $d.SizeMB); $title.Font = $bold; $title.ForeColor = 'Black'; $title.AutoEllipsis = $true; $title.Anchor = 'Top, Left, Right'
                 $title.Location = New-Object System.Drawing.Point(6, $y); $title.Size = New-Object System.Drawing.Size(($w - 110), 18)
@@ -2428,7 +2917,7 @@ function Update-SoftwareNewPanel {
                 $file.Text = [string]$d.File; $file.ForeColor = 'Black'; $file.AutoEllipsis = $true; $file.Anchor = 'Top, Left, Right'
                 $file.Location = New-Object System.Drawing.Point(20, ($y + 18)); $file.Size = New-Object System.Drawing.Size(($w - 124), 18)
                 $btn = New-Object System.Windows.Forms.Button
-                $btn.Text = 'Register...'; $btn.Tag = [string]$d.FullName; $btn.Anchor = 'Top, Right'; $btn.BackColor = 'Gainsboro'; $btn.UseVisualStyleBackColor = $false
+                $btn.Text = 'Register...'; $btn.Tag = [string]$d.FullName; $btn.Anchor = 'Top, Right'; Set-ButtonFace -Button $btn
                 $btn.Location = New-Object System.Drawing.Point(($w - 98), ($y + 5)); $btn.Size = New-Object System.Drawing.Size(90, 28)
                 # the click only records which installer: the timer opens the form after the click has finished (the
                 # registration rebuilds this box, button included)
@@ -2484,7 +2973,7 @@ function Update-SoftwareServerGrid {
         $when = [datetime]::MinValue; if ($cov.Checked -is [datetime]) { $when = $cov.Checked }
         if ($when -gt [datetime]::MinValue) { $o.'Last checked' = Format-LastChecked $when }
         $offline = Test-RemoteDisabled -Name $name
-        if ($offline -and -not ($s -or $inv -or $st)) { $o.WinRM = 'self-check'; $o.Tip = "marked 'winrm: no' in the group file: never called over WinRM - run the self-check on the server and press Import results (O/S Patching tab)" }
+        if ($offline -and -not ($s -or $inv -or $st)) { $o.WinRM = 'self-check'; $o.Tip = "marked 'winrm: no': run its self-check, then Import results" }
         if ($unreachable) {
             $o.WinRM = 'FAILED'; $o.Colour = 'LightGray'
             $o.Tip = $(if ($s -and -not $s.Reachable) { $s.Error } else { $inv.Error })
@@ -2649,7 +3138,7 @@ function Get-SoftwareDetailsHtml {
     $sections += Get-ChangeLogSection -Server $Name
     if ($inv -and $inv.Reachable) {
         $prod = @(Get-SoftwareRows -Servers @($Name) | ForEach-Object { $rv = Get-UninstallVerdict -Row $_; [pscustomobject]@{ Light = $_.Light; Product = $_.Product; Version = $_.Version; Publisher = $_.Publisher; Installed = $_.Installed; Verdict = $_.Verdict; Use = (Get-ProductUse -Row $_); Removal = $rv.Cell; Reason = $_.Reason } })
-        $sections += @{ Heading = ('Products (inventory {0})' -f $inv.Checked.ToString('HH:mm:ss')); Rows = $prod; Columns = @('Light', 'Product', 'Version', 'Publisher', 'Installed', 'Verdict', 'Use', 'Removal', 'Reason'); Note = 'Removal: MSI or quiet string = UNINSTALL can remove it; by hand = no silent uninstall; Protected / SOE = never removed by the tool. Use: in use = a service, process or task points into its folder; dormant = installed over DormantMonths ago and nothing uses it.' }
+        $sections += @{ Heading = ('Products (inventory {0})' -f $inv.Checked.ToString('HH:mm:ss')); Rows = $prod; Columns = @('Light', 'Product', 'Version', 'Publisher', 'Installed', 'Verdict', 'Use', 'Removal', 'Reason'); Note = 'Removal: MSI or quiet string = UNINSTALL can remove it, without a restart; by hand = no silent uninstall, or one that could restart the server (never run); Protected / SOE = never removed by the tool. Use: in use = a service, process or task points into its folder; dormant = installed over DormantMonths ago and nothing uses it.' }
     }
     return (New-DetailsHtml -Title "Software: $Name" -Subtitle 'installer verdicts, staged files, toolkit tasks, the change record and the products' -Console 'Software' -Facts $facts -Sections $sections)
 }
@@ -2690,18 +3179,18 @@ function Get-SoftwareHelpHtml {
         @((Get-HelpCell '2 to do (1 UPDATE, 1 INSTALL)' 'lemonchiffon'), 'All packages: what every package of the library would do on this server - shown as a column or not. Hover the row for the list; ", 1 blocked" counts installers that failed vetting.', 'Software library... to show those packages, then tick their installers.'),
         @((Get-HelpCell '12 of 12 current' 'palegreen'), 'All packages: every package that applies is installed at the file''s version or newer.', 'Nothing.'),
         @((Get-HelpCell 'Behind'), 'Older version installed, but the package does not allow Update.', 'Edit... next to its installer and tick Update, if an update is wanted.'),
+        @((Get-HelpCell 'Remove 4.4.2 first'), 'The product is installed from the vendor''s other installer, and the package''s .msi will not run over that copy: the rule is read from the .msi itself (Wireshark''s names the copy its .exe installer leaves). Hover the cell for the .msi''s own words.', 'Remove that copy: tick it in the inventory list and UNINSTALL where its Removal column offers it, by hand on the server where it reads "by hand". Then Check and INSTALL.'),
         @((Get-HelpCell 'Not installed'), 'Not installed and the package allows Update only.', 'Nothing.'),
         @((Get-HelpCell 'N/A (hardware)' 'whitesmoke'), 'The package is for other hardware (VMware Tools: VMware virtual machines only).', 'Nothing.'),
-        @((Get-HelpCell 'Blocked: file' 'mistyrose'), 'The installer file failed vetting: version unreadable, signature not valid, signer not in Signers, or no reboot suppression in its arguments.', 'Hover its row in the installer list; fix the file, or Edit... the package.'),
+        @((Get-HelpCell 'Blocked: file' 'mistyrose'), 'The installer file failed vetting: version unreadable, signature not valid, signer not in Signers, no reboot suppression in its arguments, or an .exe built with a setup program that cannot hold back a restart (NSIS).', 'Hover its row in the installer list; fix the file, or Edit... the package.'),
         @((Get-HelpCell 'Task running'), 'A toolkit task is running on the server.', 'Wait for it; Check again.'))) }
     $sections += @{ Heading = 'The inventory list (bottom): what can be removed'; Html = (New-HelpTable -Headers @('Column / value', 'It means') -Rows @(
-        @((Get-HelpCell 'Ageing' 'navajowhite'), 'Verdict: the same currency verdict as the O/S Patching software grid (Current, Behind, Stale, Ageing, End of life, Unknown).'),
+        @((Get-HelpCell 'Ageing' 'navajowhite'), 'Verdict: the same currency verdict as the O/S Patching software grid (Current, Behind, Stale, Ageing, End of life, Unknown). A product that a registered package covers is judged against the newest installer in the library as well: Behind while the library holds a newer version, whether or not known-apps.psd1 names the product.'),
         @((Get-HelpCell 'dormant' 'navajowhite'), ('Use: installed over {0} months ago (DormantMonths) and no service, process or scheduled task points into its folder - the H-SW-01 rule. A candidate for removal: confirm with the owner.' -f $script:Config.DormantMonths)),
         @((Get-HelpCell 'in use (service Foo)'), 'Use: something on the server runs from its folder. Removing it stops that.'),
         @((Get-HelpCell 'MSI'), 'Removal: msiexec /x <product code> /qn /norestart REBOOT=ReallySuppress.'),
         @((Get-HelpCell 'quiet string'), 'Removal: the product''s own QuietUninstallString, with its no-restart switches added by the tool (msiexec: /norestart REBOOT=ReallySuppress; Inno Setup: /NORESTART /SUPPRESSMSGBOXES; WiX bundles: /norestart) - no restart.'),
-        @((Get-HelpCell 'quiet (may restart)'), 'Removal: the product''s own QuietUninstallString, from an uninstaller with no known no-restart switch - it MAY RESTART THE SERVER by itself. The removal plan and the last confirmation say so; remove it by hand in a reboot window if that is not acceptable. (An inventory from before 2026-10-22 shows every quiet string this way until the server is checked again.)'),
-        @((Get-HelpCell 'by hand'), 'Removal: no silent uninstall known - the tool will not remove it.'),
+        @((Get-HelpCell 'by hand'), 'Removal: the tool will not remove it. Either no silent uninstall is known, or its uninstaller has no known switch that holds back a restart (NSIS, InstallShield and others): it could restart the server by itself, so it is never run. Remove it on the server (Programs and Features) in a reboot window. Hover the row for which of the two.'),
         @((Get-HelpCell 'Protected' 'gainsboro'), 'Removal: never - ProtectedProducts in software-packages.psd1, or a package that does not allow Uninstall (VMware Tools). For a package you registered: Edit... next to its installer and tick Uninstall.'),
         @((Get-HelpCell 'SOE' 'gainsboro'), 'Removal: never - the server''s SOE standard requires it (a required software or agent item).'))) }
     $sections += @{ Heading = 'The buttons'; Note = ('Blue asks the servers (read-only). {0} change a server; STAGE ONLY (steel blue) copies files onto the servers without installing; green saves on this PC; grey works on this PC only.' -f $(if (Test-TrellixInUse) { 'Red, coral, khaki and the two wheat-coloured Trellix Agent buttons' } else { 'Red, coral and khaki' })); Html = (New-HelpTable -TrellixRows -Headers @('Button', 'What it does', 'Warnings before anything changes') -Rows @(
@@ -2713,12 +3202,16 @@ function Get-SoftwareHelpHtml {
         @((Get-HelpButton 'Reboot (ticked)' 'khaki'), 'The O/S Patching console''s reboot: pending servers by default, refused while servicing runs.', 'Yes/No per set, the change record'),
         @(((Get-HelpButton 'Start Trellix Agent (ticked)' 'wheat') + ' ' + (Get-HelpButton 'Stop Trellix Agent (ticked)' 'wheat')), 'The two agent services on the ticked servers by hand: Start = Automatic and running (after the install and the reboot - the agent reports to ePO again), Stop = Disabled and stopped. Fresh status first; servers without the agent or already in that state are skipped; Start is refused while an OS patch run is still open on the server. Each server keeps its own record (Application event 940, C:\PatchStaging\change-log.txt).', 'a Yes/No naming the servers (No is the default), the change record of ''Trellix Agent services'' (a change record or a maintenance activity by default)'),
         @((Get-HelpButton 'Register...'), 'Next to each * NEW installer in the yellow box under the installer list (a .msi or .exe in any folder under software\ that no package claims yet): a form filled from the file, checked as you type, written into data\software-packages.psd1. Uninstall starts ticked: unticked, the product is protected and UNINSTALL refuses it.', 'none - nothing touches a server'),
-        @((Get-HelpButton 'Software library...'), ('Above the installer list: every package with what its newest installer would do on the servers shown - how many to update, to install, already current, and the newest version deployed. Yellow = the library holds a newer version than some servers have (or a new install), green = current everywhere checked, red = installer blocked. Tick up to {0} to show as grid columns and in the installer list; Most needed ticks the ones with the most to do. The choice is kept (settings\software-shown.json).' -f $script:Config.MaxSoftwareColumns), 'none - nothing touches a server'),
+        @((Get-HelpButton 'Software library...'), ('Above the installer list: every package with what its newest installer would do on the servers shown - how many to update, to install, already current, and the newest version deployed. Yellow = the library holds a newer version than some servers have (or a new install), green = current everywhere checked, red = installer blocked. Tick up to {0} to show as grid columns and in the installer list; Tick most to do ticks the packages with the most servers to update or install, OK shows the ticked packages in the console and closes the window. The choice is kept (settings\software-shown.json). Edit package... opens the selected package''s registration. Remove package... takes the selected package out of data\software-packages.psd1 and, asked separately, deletes its installer files from software\ (kept, they show as * NEW again); the removed entry is written to the log.' -f $script:Config.MaxSoftwareColumns), 'Remove package...: a Yes/No for the package and another for its files (No is the default); nothing touches a server'),
         @((Get-HelpButton 'Edit...'), 'Next to each installer in the installer list: its package in the same form, filled from the entry. Save changes rewrites only that entry in data\software-packages.psd1 (its comments and any field the form does not show are kept).', 'none - nothing touches a server'),
         @((Get-HelpButton 'Change log'), 'Every install, removal and reboot this tool made, with its change record (changes\change-log.csv).', 'none'),
         @((Get-HelpButton 'Where do I get software?'), 'Download and silent-install notes, VMware Tools first.', 'none'),
         @((Get-HelpButton 'Report (HTML + CSV)'), 'reports\Software-<date>.html and .csv: package verdicts, removal candidates, every installed product, the server inventory, the licensing models, totals and servers, the change log. The HTML prints to PDF from the browser.', 'none'),
         @((Get-HelpButton 'Licensing (shown)'), 'The licensing of the servers shown as a page: the models (Windows Server per core or per processor, Standard''s two VMs per core set, the per-VM option, SQL Server per core or Server + CAL, Exchange, RDS CALs, Office), the totals, one row per server. Check software collects it.', 'works'))) }
+    # Register... on an .exe: the setup program that built it decides the silent switches (one row per program the form knows)
+    $sections += @{ Heading = 'Registering an .exe: the setup program decides the silent switches'; Note = 'An .msi needs none of this: Windows Installer runs it and the tool adds /qn /norestart REBOOT=ReallySuppress. An .exe is a setup program of its own, and each kind has its own switches. The form reads the kind from the file ("Built with" in its preview) and starts a new registration with that kind''s switches; the list above the two argument boxes fills them in for another kind. They are the usual switches of the kind, not a promise: where the vendor documents others, type those. No installer restarts a server: every .exe must hold back the restart (REBOOT=R, REBOOT=ReallySuppress or /norestart) or the form refuses it, and a setup program that has no such switch is refused whatever is typed.'; Html = (New-HelpTable -Headers @('Setup program', 'How the file shows it', 'Silent switches', 'Where it is met') -Rows @(
+        foreach ($sp in @($script:SoftwareSetupPrograms)) { , @((Get-HelpCell $sp.Kind), [string]$sp.Shows, $(if ($sp.Arguments) { [string]$sp.Arguments } else { 'none the tool accepts' }), [string]$sp.Met) }
+        , @((Get-HelpCell 'not recognised'), 'none of the marks above', 'the ones the vendor documents', 'A launcher of the vendor''s own (VMware Tools: its catalogue entry carries the switches), or a self-extracting archive.'))) }
     $sections += @{ Heading = 'What happens on the server'; Lines = @(
         'The run script checks, once: no toolkit task running, nothing servicing (dism, busy TiWorker, Windows Update), Windows Installer idle, enough free disk.',
         'Then per item: the staged file''s SHA256 and signer again, the hardware again, the installed version again - then the command line is built from software-packages.psd1 and queued as a one-shot SYSTEM task in \WinRMToolkit\.',
@@ -2798,13 +3291,13 @@ function New-SoftwareConsole {
         if ($this.SelectedItems.Count -gt 0) { Show-SoftwareDetails -Name $this.SelectedItems[0].Text }
     })
     $lv.Add_ItemChecked({ if ($script:Gui['SoftwareRebuilding']) { return }; $script:Gui['SoftwareCount'].Text = ('{0} server row(s) shown, {1} ticked' -f $this.Items.Count, $this.CheckedItems.Count); Start-SoftwareInventoryRefresh })
-    $head = New-GridHeader -Heading 'SERVERS' -Detail '0 server row(s) shown, 0 ticked' -Tip 'One column per package; tick with the checkbox; double-click a row for its page'
+    $head = New-GridHeader -Heading 'SERVERS' -Detail '0 server row(s) shown, 0 ticked' -Tip 'One column per package; double-click a row for its page'
     $split.Panel1.Controls.Add($lv); $split.Panel1.Controls.Add($head.Panel); $lv.BringToFront()
     $script:Gui['SoftwareServerGrid'] = $lv; $script:Gui['SoftwareCount'] = $head.Info
 
     # ---- inventory list (bottom): heading, a filter strip, the grid ----
     $invPanel = New-Object System.Windows.Forms.Panel; $invPanel.Dock = 'Fill'
-    $invHead = New-GridHeader -Heading 'INSTALLED SOFTWARE  (tick products to remove)' -Detail 'nothing collected yet - press Check on the toolbar' -Tip 'The products of the ticked servers (else all shown). Removal says whether UNINSTALL may remove it and how; Use says whether anything on the server runs from its folder. Grey rows are protected (never removed); orange rows are ageing or dormant.'
+    $invHead = New-GridHeader -Heading 'INSTALLED SOFTWARE  (tick products to remove)' -Detail 'nothing collected yet - press Check on the toolbar' -Tip 'Products of the ticked servers; grey rows are protected'
     $strip = New-Object System.Windows.Forms.Panel; $strip.Dock = 'Top'; $strip.Height = 30
     $fl = New-Object System.Windows.Forms.Label; $fl.Text = 'Filter:'; $fl.Location = New-Object System.Drawing.Point(6, 8); $fl.AutoSize = $true
     $filter = New-Object System.Windows.Forms.TextBox; $filter.Location = New-Object System.Drawing.Point(50, 4); $filter.Width = 220
@@ -2812,7 +3305,7 @@ function New-SoftwareConsole {
     $filter.Add_TextChanged({ Start-SoftwareInventoryRefresh })
     $invAll = New-Object System.Windows.Forms.CheckBox; $invAll.Text = 'Show all products'; $invAll.AutoSize = $true; $invAll.Location = New-Object System.Drawing.Point(285, 6)
     $invAll.Checked = $true   # every product at start (owner's ask 2026-11-06); untick for only the products needing attention
-    $script:Gui['Tips'].SetToolTip($invAll, 'Ticked (at start): every product. Unticked: only products needing attention (Behind, Stale, Ageing, End of life) or dormant.')
+    $script:Gui['Tips'].SetToolTip($invAll, 'Unticked: only products needing attention, or dormant')
     $invAll.Add_CheckedChanged({ Update-SoftwareInventoryGrid })
     $strip.Controls.AddRange(@($fl, $filter, $invAll))   # no colour key on the panel: the heading's tool tip and the Help page carry it
     $invGrid = New-ConsoleGrid -Columns @(@{ Name = 'Server'; Width = 150 }, @{ Name = 'Product'; Width = 280 }, @{ Name = 'Version'; Width = 105 }, @{ Name = 'Publisher'; Width = 150 }, @{ Name = 'Installed'; Width = 80 }, @{ Name = 'Verdict'; Width = 80 }, @{ Name = 'Use'; Width = 150 }, @{ Name = 'Removal'; Width = 85 }, @{ Name = 'Reason'; Width = 380; Fill = $true })
@@ -2833,7 +3326,7 @@ function New-SoftwareConsole {
     $lblP.Text = 'Installers (tick the version to deploy):'; $lblP.Location = New-Object System.Drawing.Point(10, 8); $lblP.AutoSize = $true
     $right.Controls.Add($lblP)
     # a big library: the list shows at most MaxSoftwareColumns packages; the library window picks which, and shows them all
-    $libBtn = New-GuiButton -Text 'Software library...' -X 235 -Y 3 -W 170 -H 24 -ReadOnly -Tip 'Every package with what it would do on the servers shown (yellow = newer than deployed); tick the ones to show here and as grid columns' -OnClick {
+    $libBtn = New-GuiButton -Text 'Software library...' -X 235 -Y 3 -W 170 -H 24 -ReadOnly -Tip 'Every package and what it would do on the servers shown' -OnClick {
         Invoke-GuiAction -Name 'Software library' -ReadOnly -Action { Show-SoftwareLibrary } }
     $libBtn.Anchor = 'Top, Right'   # stays at the right edge when the divider widens the panel
     $right.Controls.Add($libBtn); $script:Gui['SoftwareLibraryButton'] = $libBtn
@@ -2873,7 +3366,7 @@ function New-SoftwareConsole {
 
     $right.Controls.Add((New-GuiButton -Text 'Open software folder' -X 10 -Y 162 -W 135 -ReadOnly -Tip 'Opens the \software folder in Explorer' -OnClick {
         Invoke-GuiAction -Name 'Open software folder' -ReadOnly -Action { Invoke-Item -LiteralPath $script:Config.SoftwareFolder } }))
-    $right.Controls.Add((New-GuiButton -Text 'Change log' -X 150 -Y 162 -W 85 -ReadOnly -Tip 'Every install, removal and reboot with its change record (changes\change-log.csv)' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Change log' -X 150 -Y 162 -W 85 -ReadOnly -Tip 'Every install, removal and reboot with its change record' -OnClick {
         Invoke-GuiAction -Name 'Change log' -ReadOnly -Action { Show-ChangeLogWindow } }))
     $right.Controls.Add((New-GuiButton -Text 'Where do I get software?' -X 240 -Y 162 -W 165 -ReadOnly -Tip 'Download and silent-install notes, VMware Tools first' -OnClick {
         Invoke-GuiAction -Name 'Software how-to' -ReadOnly -Action {
@@ -2885,16 +3378,16 @@ function New-SoftwareConsole {
     # stops them on each server before the install; the two wheat buttons under the Reboot row start or stop them by hand
     $agentBox = New-Object System.Windows.Forms.CheckBox; $agentBox.Text = 'Stop the Trellix Agent services first'; $agentBox.AutoSize = $true; $agentBox.Checked = [bool]$script:Config.StopTrellixAgentForInstall
     $agentBox.Font = $script:Gui['Form'].Font; $agentBox.Location = New-Object System.Drawing.Point(10, 200)
-    $script:Gui['Tips'].SetToolTip($agentBox, 'Ticked (the default): INSTALL / UPDATE sets the Trellix Agent services masvc and macmnsvc to Disabled and stops them on each server before the install, under the install''s change record - the field test saw installs fail and roll back with the agent running. A server where that fails is not installed. The Trellix Agent column then shows STOPPED (Disabled) in orange: after the reboot, press "Start Trellix Agent (ticked)". Unticked: the services are left as they are. STAGE ONLY and UNINSTALL never touch them.')
+    $script:Gui['Tips'].SetToolTip($agentBox, 'Ticked: the Trellix Agent services are stopped before the install')
     $right.Controls.Add($agentBox); $script:Gui['TrellixStopBoxSoftware'] = $agentBox
-    $right.Controls.Add((New-GuiButton -Text 'STAGE ONLY  (ticked installers, ticked servers)' -X 10 -Y 228 -W 395 -H 34 -Colour 'LightSteelBlue' -Tip 'Copies and verifies the installers in C:\PatchStaging\software ahead of the change window' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'STAGE ONLY  (ticked installers, ticked servers)' -X 10 -Y 228 -W 395 -H 34 -Colour 'LightSteelBlue' -Tip 'Copies and verifies the installers ahead of the window' -OnClick {
         Invoke-GuiAction -Name 'Stage software' -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['SoftwareServerGrid']); $files = @(Get-CheckedSoftwareFiles)
             if ($servers.Count -eq 0 -or $files.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server and one installer first.' -Icon 'Warning'; return }
             $r = @(Install-SoftwareOnServers -ComputerName $servers -Files $files -StageOnly | Where-Object { $_ -is [psobject] -and $_.PSObject.Properties['Success'] })
             if ($r.Count -gt 0) { $null = Show-PatcherMessage -Title 'Staging finished' -Text ("Staged: {0}`nFailed: {1}`n`nDetails are in the log." -f @($r | Where-Object { $_.Success }).Count, @($r | Where-Object { -not $_.Success }).Count) }
         } }))
-    $btnInstall = New-GuiButton -Text 'INSTALL / UPDATE  (ticked installers, ticked servers)' -X 10 -Y 268 -W 395 -H 52 -Colour 'Tomato' -Tip 'Fresh check, the plan, the change record, the pre-action confirmations - then the installers run with the reboot suppressed' -OnClick {
+    $btnInstall = New-GuiButton -Text 'INSTALL / UPDATE  (ticked installers, ticked servers)' -X 10 -Y 268 -W 395 -H 52 -Colour 'Tomato' -Tip 'Fresh check, the plan, the change record; no reboot' -OnClick {
         Invoke-GuiAction -Name 'Software install' -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['SoftwareServerGrid']); $files = @(Get-CheckedSoftwareFiles)
             if ($servers.Count -eq 0 -or $files.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server and one installer first.' -Icon 'Warning'; return }
@@ -2903,7 +3396,7 @@ function New-SoftwareConsole {
         } }
     $btnInstall.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
     $right.Controls.Add($btnInstall)
-    $right.Controls.Add((New-GuiButton -Text 'UNINSTALL  (ticked products)' -X 10 -Y 326 -W 395 -H 40 -Colour 'LightCoral' -Tip 'The removal plan, the change record, the pre-action confirmations and a last confirmation naming every product' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'UNINSTALL  (ticked products)' -X 10 -Y 326 -W 395 -H 40 -Colour 'LightCoral' -Tip 'The removal plan, the change record, a last confirmation' -OnClick {
         Invoke-GuiAction -Name 'Software removal' -Action {
             $rows = @($script:Gui['SoftwareInvGrid'].CheckedItems | ForEach-Object { $_.Tag } | Where-Object { $_ })
             if ($rows.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one product in the inventory list first.' -Icon 'Warning'; return }
@@ -2915,19 +3408,19 @@ function New-SoftwareConsole {
                 $null = Show-PatcherMessage -Title 'Removal finished' -Text ("Removed: {0}`nFailed or unknown: {1}`nNeed a reboot: {2}{3}`n`nEvery server shows 'reboot advised' until it restarts. Details are in the log and the change log." -f @($r | Where-Object { $_.Success }).Count, @($r | Where-Object { -not $_.Success }).Count, @($r | Where-Object { $_.RebootRequired }).Count, $leftText)
             }
         } }))
-    $right.Controls.Add((New-GuiButton -Text 'Reboot (ticked)' -X 10 -Y 372 -W 395 -H 34 -Colour 'Khaki' -Tip 'The O/S Patching console''s reboot: fresh status, pending servers by default, a change record, refused while servicing runs' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Reboot (ticked)' -X 10 -Y 372 -W 395 -H 34 -Colour 'Khaki' -Tip 'Fresh status first; only servers pending a reboot by default' -OnClick {
         Invoke-GuiAction -Name 'Reboot' -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['SoftwareServerGrid'])
             if ($servers.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server first.' -Icon 'Warning'; return }
             Restart-PatchedServers -ComputerName $servers
         } }))
-    $right.Controls.Add((New-GuiButton -Text 'Start Trellix Agent (ticked)' -X 10 -Y 412 -W 195 -H 30 -Colour 'Wheat' -Tip 'After the install and the reboot: sets the Trellix Agent services masvc and macmnsvc to Automatic and starts them on the ticked servers - fresh status, a Yes/No naming the servers, the change record. The agent reports to ePO again from then on.' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Start Trellix Agent (ticked)' -X 10 -Y 412 -W 195 -H 30 -Colour 'Wheat' -Tip 'Sets masvc and macmnsvc to Automatic and starts them' -OnClick {
         Invoke-GuiAction -Name 'Trellix Agent start' -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['SoftwareServerGrid'])
             if ($servers.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server first.' -Icon 'Warning'; return }
             $null = Set-TrellixAgentOnServers -ComputerName $servers -Mode start
         } }))
-    $right.Controls.Add((New-GuiButton -Text 'Stop Trellix Agent (ticked)' -X 210 -Y 412 -W 195 -H 30 -Colour 'Wheat' -Tip 'By hand, what the box above STAGE ONLY does before an install: sets the Trellix Agent services masvc and macmnsvc to Disabled and stops them on the ticked servers - fresh status, a Yes/No naming the servers, the change record. ePO hears nothing from them until they are started again.' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Stop Trellix Agent (ticked)' -X 210 -Y 412 -W 195 -H 30 -Colour 'Wheat' -Tip 'Sets masvc and macmnsvc to Disabled and stops them' -OnClick {
         Invoke-GuiAction -Name 'Trellix Agent stop' -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['SoftwareServerGrid'])
             if ($servers.Count -eq 0) { $null = Show-PatcherMessage -Text 'Tick at least one server first.' -Icon 'Warning'; return }
@@ -2940,7 +3433,7 @@ function New-SoftwareConsole {
         Invoke-GuiAction -Name 'Open log' -ReadOnly -Action {
             if (-not (Test-Path -LiteralPath (Get-PatchLogPath))) { Write-PatchLog 'Log file created' 'INFO' }
             Start-Process notepad.exe -ArgumentList ('"{0}"' -f (Get-PatchLogPath)) } }))
-    $right.Controls.Add((New-GuiButton -Text 'Licensing (shown)' -X 10 -Y 484 -W 195 -H 30 -ReadOnly -Tip 'The licensing models, activation, KMS, RD Licensing CALs and RD Session Hosts of the servers shown, with the totals, as a page (Check software collects it).' -OnClick {
+    $right.Controls.Add((New-GuiButton -Text 'Licensing (shown)' -X 10 -Y 484 -W 195 -H 30 -ReadOnly -Tip 'Licensing models, activation, KMS and RD licensing as a page' -OnClick {
         Invoke-GuiAction -Name 'Licensing' -ReadOnly -Action {
             if (-not (Test-GuiDialogAllowed -What 'Licensing')) { return }
             Show-DetailsWindow -Title 'Licensing' -Html (Get-LicensingReportHtml -Servers @(Get-GridAllKeys -Grid $script:Gui['SoftwareServerGrid']))
@@ -2960,9 +3453,9 @@ function New-SoftwareConsole {
     $toolbar = New-ConsoleToolbar -Tab $tab
     $combo = New-GroupPicker -Toolbar $toolbar -OnChange { Update-SoftwareServerGrid; Update-SoftwareInventoryGrid }
     $script:Gui['SoftwareGroupCombo'] = $combo
-    $toolbar.Controls.Add((New-GuiButton -Text 'Reload lists + packages' -X 235 -Y 8 -W 150 -Tip 'Re-reads the group files, the patches and the software folders and the catalogue' -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'Reload lists + packages' -X 235 -Y 8 -W 150 -Tip 'Re-reads the group files, the folders and the catalogue' -OnClick {
         Invoke-GuiAction -Name 'Reload' -Action { Initialize-ToolkitData } }))
-    $toolbar.Controls.Add((New-GuiButton -Text 'Check software (ticked)' -X 390 -Y 8 -W 150 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Status, inventory and software state of the ticked servers. Works during an install.' -OnClick {
+    $toolbar.Controls.Add((New-GuiButton -Text 'Check software (ticked)' -X 390 -Y 8 -W 150 -Colour 'LightSkyBlue' -ReadOnly -Tip 'Status, inventory and software state of the ticked servers' -OnClick {
         Invoke-GuiAction -Name 'Software check' -ReadOnly -Action {
             $servers = @(Get-GridChecked -Grid $script:Gui['SoftwareServerGrid'])
             if ($servers.Count -eq 0) { Show-GuiNotice 'Tick at least one server first (or use "Check software (all shown)").'; return }

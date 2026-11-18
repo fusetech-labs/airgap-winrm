@@ -91,6 +91,10 @@ THE FILES (root folder)
   lib\46-Security-Compliance.ps1  its compliance dashboard and the executive summary
   lib\47-Licensing.ps1            licensing: the models (cores, VMs, CALs), activation, KMS, RD Licensing - the Software report's
                                   licensing sections, the Licensing page and the SEC-LIC checks
+  lib\48-Directory.ps1            domain controllers and the domain: the Directory collector (ADSI, dcdiag - no module) and
+                                  its checks H-AD, SEC-ADC and SEC-AD (topic E10)
+  lib\49-ServerRoles.ps1          SQL Server and Certificate Services: the Roles collector (read from the server, no connection
+                                  to an instance) and its checks H-SQL, SEC-SQL, H-CA and SEC-CA (topic E11)
   lib\50-Console-Software.ps1   the Software tab (data\software-packages.psd1, installers in software\)
   lib\60-Console-Settings.ps1   the Settings tab
   lib\70-Console-About.ps1      the About tab
@@ -132,11 +136,18 @@ call goes with -UseSSL (Test-WinRMUseSsl); the listener's certificate must chain
 operator PC trusts and carry the server's FQDN - no check is skipped.  The domain controller
 is already in the picture for DNS and Kerberos; nothing new is opened.  The red box lists what
 the tool deliberately never uses, which is also the answer to "what do I need to allow through
-the firewall?": the one WinRM port and nothing else.
+the firewall?": the one WinRM port and nothing else.  One more port is yours to choose, and it
+runs the other way: a server marked "winrm: no" is never called, and its own copy of the toolkit
+may read patches\ and software\ from, and write its results file to, a share of this PC - SMB,
+TCP 445, from that server to this PC.  Carry the copy and the results file by hand ("Import
+results") and that port is not used either (topic F9).
 '@ }
 
     [pscustomobject]@{ Title = 'A3. PICTURE: ports and protocols'; Source = ''; Image = 'images\2-ports-and-protocols.png'; Explain = @'
-The table is the firewall conversation in one page.  Below it, the layers inside 5985
+The table is the firewall conversation in one page.  Its TCP 445 row is the one optional port,
+and the only one towards this PC: a server marked "winrm: no", whose own copy uses a share of
+this PC for patches\, software\ and its results file (topic F9).  The tool itself never opens
+SMB to a server - no \\server\C$.  Below the table, the layers inside 5985
 from the outside in - HTTP, then the WS-Management SOAP envelope (whose size limit,
 MaxEnvelopeSizekb, is why files are copied in slices), then PSRP carrying our commands,
 then wsmprovhost.exe on the server actually running them.  Every collector of every
@@ -641,6 +652,16 @@ Never automatic, and no longer "reboot whatever is ticked":
      60 s countdown (shutdown /a cancels it), and the log and the change log are written first.
      The open run is on record (settings\patch-runs.json); the next status check after the
      toolkit is started again finishes it.  Every status check logs a WHY line for it.
+     The local job has this window's rights.  A window not started with "Run as
+     administrator" is refused the Security log, RSoP, the audit policy and the user rights
+     on this PC, so Invoke-Collector marks every answer read here with Elevated (True or
+     False).  Get-UnelevatedNote turns a False into the reason the rows and the checks show
+     ("NOT ALL READ ..."), and the status check writes a WARN line.  A server read over
+     WinRM carries no such mark: there an administrator gets all of them.
+     The window says it too: New-ConsoleBanner puts NOT ELEVATED in the top right corner of
+     every console while the window has no administrator rights; a click opens
+     Get-UnelevatedHelpHtml, the page of what is not read and not done here
+     (Show-UnelevatedHelp).
 The shutdown comment, Application event 920 and C:\PatchStaging\change-log.txt carry the reference.  Every REBOOT line in the log names the operator.  The stored status for that server is
 thrown away because it is now stale.
 '@ }
@@ -663,9 +684,12 @@ the Software, Health and Security consoles) reads, read-only:
   Processes    running image names   (dormant-software evidence, agent detection)
   Tasks        Path|Name|State|Result|LastRun|Action
 Get-RoleSummary turns Features into "IIS, SQL, .NET 4.8.1" for the grid; Get-SoftwareRows
-compares Products with data\known-apps.psd1 and with the rest of the fleet:
-  Current      at or above the Latest version in the catalogue (or the newest in the fleet)
-  Behind       a newer version is known, or another server runs a newer one
+compares Products with data\known-apps.psd1, with the software library (a registered package
+covers its product: Get-SoftwareLibraryReference) and with the rest of the fleet:
+  Current      at or above the Latest version in the catalogue or the library's installer
+               (or the newest in the fleet)
+  Behind       a newer version is known, the library holds a newer installer, or another
+               server runs a newer one
   Stale        installed long ago and nothing newer anywhere - verify with the owner; also an
                unknown product installed over UnknownStaleMonths (6) ago: updates likely waiting
   Ageing       an unknown product installed over UnknownAgeingMonths (12) ago: updates probably
@@ -787,7 +811,8 @@ WHAT DECIDES WHAT
   software\<package Id>\        the installer files; each one is vetted (version, signer,
                                 SHA256, reboot suppression) before it can be ticked
   Get-SoftwareVerdict           per server x installer: INSTALL / UPDATE / Installed /
-                                N/A (hardware) / Blocked / Task running - grid, plan, report
+                                N/A (hardware) / Blocked / Remove x first / Task running -
+                                grid, plan, report
   Get-UninstallVerdict          per product: MSI / quiet string / by hand / Protected / SOE
 
 THE RUN (Install-SoftwareOnServers, below)
@@ -828,9 +853,14 @@ not read in full at every start, and the log names only new or blocked files:
   Signature   Get-AuthenticodeSignature: Valid, and the signer's O= one of Signers
               (VMware or Broadcom for VMware Tools); AllowUnsigned only for an internal MSI
   SHA256      checked again on the server before the installer runs
+  Refuses     an .msi only (Get-MsiRefusals): the Uninstall keys its own launch conditions name
+              as a copy it will not install over - Wireshark's .msi names the key its .exe
+              installer writes.  Read from the LaunchCondition, AppSearch and RegLocator tables.
+  Setup       an .exe only (Get-SetupProgram): the setup program the file names, '' = none
 Get-SoftwarePackageBlock gives the reason a file cannot be used: no readable version, a bad
 or foreign signature, a mode list without Install or Update, or - for an .exe - arguments
-that do not suppress the reboot (REBOOT=R, REBOOT=ReallySuppress or /norestart).  A blocked
+that do not suppress the reboot (REBOOT=R, REBOOT=ReallySuppress or /norestart), or a setup
+program that has no switch to hold a restart back (NSIS: refused whatever is typed).  A blocked
 file stays in the list with its reason and every cell for it reads "Blocked: file".
 On a server each package stages into its own folder, C:\PatchStaging\software\<Id>\ (spaces as _),
 so two installers that are both called setup.exe never share a path.
@@ -849,6 +879,9 @@ details page and the report.  For one server and one installer file, in this ord
   installed, older, no Update      -> Behind
   not installed, Install allowed   -> INSTALL y       (Go)
   not installed, Update only       -> Not installed
+  INSTALL / UPDATE, but the server has a copy from another installer that the .msi itself
+  refuses to run over (Refuses)    -> Remove x first  (no Go; that copy goes first: UNINSTALL
+                                      where Get-UninstallVerdict allows it, else by hand)
   a toolkit task running there     -> Task running    (no Go)
   "(staged)" is added when the same file (name and size) is already in C:\PatchStaging\software.
 The installed version comes from the Inventory collector's Uninstall keys (Match against the
@@ -874,6 +907,7 @@ PER ITEM
   removal: the Uninstall key still exists under the same name and DisplayName; MSI -> msiexec
   /x {code} /qn /norestart REBOOT=ReallySuppress; else its QuietUninstallString with that
   uninstaller's no-restart switches added ($noRestart: msiexec, Inno Setup, WiX bundles).
+  An uninstaller $noRestart does not know is refused here as well, whatever the plan said.
   The command line is built HERE from the catalogue's fields - {log} becomes
   C:\PatchStaging\software\sw-<run>-<n>.log - registered as a task (not started), a task-*.txt
   file beside it, and a START line in the server's change record.  Then the first task starts.
@@ -909,10 +943,10 @@ UNINSTALL removes products ticked in the inventory list, and only what this func
               the same block in RemoteInventoryScript and RemoteSoftwareRunScript):
               msiexec /norestart REBOOT=ReallySuppress, Inno Setup (unins000.exe) /NORESTART
               /SUPPRESSMSGBOXES, WiX bundles /norestart
-  quiet (may restart)  any other QuietUninstallString: no known no-restart switch, so it may
-              restart the server by itself - the plan and the last confirmation say so
-  by hand     neither: the tool will not guess a command line
-A removal never reboots on purpose; afterwards the server reads "advised: removed X" until it
+  by hand     any other QuietUninstallString: no known no-restart switch, so it could restart
+              the server by itself - never run; and a product with neither a product code nor
+              a QuietUninstallString: the tool will not guess a command line
+A removal never restarts a server; afterwards the server reads "advised: removed X" until it
 restarts (topic B3), so the reboot that finishes the uninstaller's clean-up is planned.
 WHAT THE UNINSTALLER LEFT BEHIND (Get-RemovalLeftovers)  Some uninstallers do not remove their
 own service or task - an Inno Setup uninstaller has no service handling of its own, so the
@@ -967,13 +1001,23 @@ HOW A NEW PRODUCT GETS IN
      ProductName / ProductVersion / Manufacturer from inside an .msi, the version resource of an
      .exe) and New-SoftwarePackageDraft, below, fills the form:
        Id, Name     the product name, made plain ASCII (a trademark sign becomes a space)
-       Match        the same name with * for such signs; the list offers the names the fleet's
-                    inventory has seen, because Programs and Features may say it differently
+       Match        the same name with * for such signs and for a version number in it, widened
+                    to the names the fleet's inventory lists the same product under
+                    (Get-SoftwareMatchSuggestion: Wireshark* covers the .msi's "Wireshark" and
+                    the .exe install's "Wireshark 4.4.2 x64"), never onto another product; the
+                    list offers the names seen, and the preview warns when Match leaves one out
        FilePattern  the file name with its version-like parts as *  (Get-SoftwareNamePattern):
                     VMware-tools-12.5.4-24964629-x64.exe -> VMware-tools-*-*-x64.exe, so later
                     versions are picked up without registering again
        VersionFrom  msi for an .msi; name (with the matching VersionRegex) when the name holds a
                     version; else file (the .exe's ProductVersion)
+       Arguments    an .msi needs none.  An .exe is a setup program of its own, and each kind has
+                    its own silent switches: Get-SetupProgram reads the kind from the file (a
+                    .wixburn section = WiX bundle, a manifest that names JR.Inno.Setup or
+                    Nullsoft.NSIS.exehead, resources that say InstallShield) and the draft starts
+                    with that kind's usual switches ($SoftwareSetupPrograms).  NSIS has no switch
+                    that holds back a restart: it gets none, and Get-SoftwarePackageBlock refuses
+                    such a file whatever is typed (a /norestart it ignores would promise nothing).
        Signers      the O= of the file's signer; unsigned only by ticking it explicitly
        Modes        Install, Update and Uninstall.  A package without Uninstall protects its
                     product (Get-ProductProtection): right for VMware Tools, but an ordinary
@@ -1018,7 +1062,13 @@ WHAT THE CONSOLE SHOWS
   library window Show-SoftwareLibrary: every package with its counts over the servers shown
                  (Get-SoftwareLibraryRows) - update, install, current, not checked, newest
                  deployed - yellow where the library is newer than what is deployed; most to do
-                 first; tick up to the limit (a NEW tick past it is refused), Most needed
+                 first; tick up to the limit (a NEW tick past it is refused), or press Tick most
+                 to do; OK shows the ticked packages in the console.
+                 Remove package... (Remove-SoftwarePackageFromLibrary) takes the selected package
+                 out: Remove-SoftwarePackage cuts its @{ ... } out of the catalogue's text - found
+                 with the parser, every other byte kept, the entry logged first - and, when the
+                 operator says so in a second question, deletes the installer files the package
+                 claimed (never on a spoke, never outside software\).  No server is touched.
   report         every package, always
 WHY IT STAYS QUICK
   Get-SoftwareVerdictCached keeps each verdict under a key of the server, the times its
@@ -1166,6 +1216,10 @@ One collector, one flat list of Key=Value lines, used by three things: the SOE "
 items (any key can become an SOE rule), the Health checks (time, uptime) and most of the
 Security checks (hardening).  It reads registry values, Windows features, Defender,
 AppLocker, LAPS, event-log sizes, TLS, SMB, RDP, WinRM, UAC, LSA, PowerShell logging ...
+and the server's own users and groups (LocalUsers, LocalGroups) through ADSI - the WinNT
+provider, plain .NET, no PowerShell module loaded; not on a domain controller, which has no
+local accounts.  Get-LocalAccounts (30-Console-Health.ps1) turns the two lines into objects
+for the checks H-ACC-01, H-ACC-02 and SEC-ACC-01..08.
 A value it cannot read is reported as ERROR:<reason> or Unknown - the checks turn that into
 a Warn with the reason, never into a Pass.  Values that are simply not set come back as
 NotConfigured, which the Security table treats as "the OS default applies" (Warn unless the
@@ -1182,7 +1236,8 @@ Use these names in data\security-settings.psd1 (Key = ...) and in SOE "setting" 
 '@ }
 
     [pscustomobject]@{ Title = 'D4. Health checks - the catalogue'; Source = 'Checks:Health'; Explain = @'
-The Health checks (17 at the time of writing), rendered from $script:Checks so the list below IS the code.
+The Health checks, rendered from $script:Checks so the list below IS the code (H-AD-01..10 are for
+domain controllers and come from lib\48-Directory.ps1, topic E10).
 Lights in the Health tab are fixed: Fail = Red, Warn = Amber, Pass = Green, otherwise Grey.
 The thresholds are in lib\01-Config.ps1 (A5); the lists of benign services, task codes and
 ignored products in data\benign-services.psd1.  Double-click a server on the Health page
@@ -1282,16 +1337,23 @@ AUDIT both run it.  What it reads, and from where:
                    filtering, WQLFilterPass = 0 = a WMI filter said no, GPO-Disabled.  Readable
                    without an administrator.  A version is two halves: computer edits (low 16 bits)
                    and user edits (high 16 bits).
-  Extensions       ...\State\Machine\Extension-List: each client-side extension (Registry =
-                   administrative templates, Security, Audit Policy Configuration, Preferences ...)
-                   with its last result code (0 = OK; Format-GpoStatus turns 1355 into "the
-                   specified domain either does not exist or could not be contacted") and end time.
+  Extensions       each client-side extension (Registry = administrative templates, Security,
+                   Audit Policy Configuration, Preferences ...) with its last result code (0 = OK;
+                   Format-GpoStatus turns 1355 into "the specified domain either does not exist or
+                   could not be contacted") and its last run.  Read from two places:
+                   ...\State\Machine\Extension-List, which on Windows Server today holds the core
+                   entry only, and ...\Group Policy\Status\GPExtensions\{guid} (Status, and
+                   LastPolicyTime in minutes since 1980-01-01 UTC - the last time the extension
+                   had policy to apply).
                    The core extension {00000000-...} ends every refresh: its time is LastRefresh.
                    Registry DWORDs can arrive as negative Int32s or larger numbers - $u32 folds both
                    into the unsigned value (a FILETIME is two of them).
   Events           Group Policy errors and warnings (levels 1-3) in the System log and the
                    Group Policy log within EventWindowHours.
-  SecureChannel    Test-ComputerSecureChannel - a broken trust stops every policy refresh.
+  SecureChannel    Test-ComputerSecureChannel - a broken trust stops every policy refresh.  Not
+                   run on the PDC emulator of a domain (DomainRole 5): it is the domain's end of
+                   every secure channel and has none of its own, so the answer there is "not
+                   tested (PDC emulator)" and H-GPO-03 is not applicable.
   Rsop             root\rsop\computer (an administrator is needed; RsopError says why not):
                    which GPO sets which value, winning settings only (precedence 1) -
                    R administrative templates, S account policy, V security options, U user rights,
@@ -1334,8 +1396,8 @@ Only the Level cell is coloured - the word says it, the colour repeats it once.
     # =================================================================  PART E - SECURITY CONSOLE
     [pscustomobject]@{ Title = 'D11. RemoteScriptsScript - scripts and scheduled tasks on a server'; Source = 'RemoteScriptsScript'; Explain = @'
 WHAT IT ANSWERS
-  "What runs on this server by itself, from where, and what does it do?" - Scripts and tasks (ticked)
-  on the Health console.  The Scripts collector (lib\31-Health-Scripts.ps1) runs on each ticked server,
+  "What runs on this server by itself, from where, and what does it do?" - Scripts and tasks audit
+  (ticked), the one plum button, on the Health console.  The Scripts collector (lib\31-Health-Scripts.ps1) runs on each ticked server,
   read-only, and brings back:
   1. Every scheduled task outside \Microsoft\ and not the OS's own: state, author, the account and run
      level, each trigger in words (daily at 03:00, weekly Mon,Fri, at startup, repeat every 1h), the
@@ -1372,7 +1434,7 @@ THE RESULT
   scripts); a rescan that fails keeps the earlier scan, and the summary's Scan column says so.
 '@ }
     [pscustomobject]@{ Title = 'E1. PICTURE: the Security console pipeline'; Source = ''; Image = 'images\10-security-pipeline.png'; Explain = @'
-Top: the ISM annex spreadsheet becomes data\ism-catalogue.psd1, generated offline.  Middle: the 89 expected values, the 29 code checks and the collectors that feed
+Top: the ISM annex spreadsheet becomes data\ism-catalogue.psd1, generated offline.  Middle: the 89 expected values, the code checks and the collectors that feed
 them.  Then the profile (what applies, what is red) and the tailoring file (recorded risk
 decisions), and the one table that decides every light.  Bottom: the controls that cannot
 be assessed from a server, and the pages the tab offers (Servers, Controls, Server config - one column per ticked server - Tailoring, Security profile; the GPO recommendations page came later, topic E7).
@@ -1423,10 +1485,17 @@ A tailoring rule with action "threshold" replaces Expected for one check and sco
     [pscustomobject]@{ Title = 'E4. Security checks - the catalogue'; Source = 'Checks:Security'; Explain = @'
 All Security checks rendered from $script:Checks: the 89 expected-value checks (their "why"
 line shows the key, operator and expected value), the code checks (application control,
-antivirus and EDR, firewall, LAPS, local administrators, built-in Administrator, service
+antivirus and EDR, firewall, LAPS, local administrators, the built-in Administrator
+(SEC-CRD-03: enabled is a failure whatever the account is called - it is found by its
+identifier; on a domain controller renamed is enough), the local
+users and groups (SEC-ACC-01..08: default accounts enabled, a password not required, accounts
+not used for 45 days, an old administrator password, privileged groups, members that no
+longer exist - each with its ISM control), service
 accounts, event forwarding, time service, OS support and release, Internet Explorer 11,
 patch timeframes, and at SECRET and above the cryptography and wireless checks SEC-CRY-01..05
-and SEC-WLS-01) and the seven "not assessable from the server" controls.
+and SEC-WLS-01), the seven "not assessable from the server" controls, and the 35 checks of a
+domain controller and its domain (SEC-ADC-01..04, SEC-AD-01..33: topic E10), SQL Server and a
+certification authority (SEC-SQL-01..07, SEC-CA-01..06: topic E11).
 ML is the Essential Eight maturity level a control belongs to (0 = not an Essential Eight
 control); Severity High makes a failure Red regardless of the maturity target.
 '@ }
@@ -1576,6 +1645,92 @@ Get-ReportCss keep the colours, never split a chart, card or table row, repeat t
 each heading off the foot of a page: an empty block after every h2 (cancelled by a negative margin)
 must fit on the page with it, or the heading moves on.  Charts are drawn at twice the size they are
 shown (New-ChartTag), so they print sharp.
+'@ }
+
+    [pscustomobject]@{ Title = 'E10. Domain controllers and the domain - the Directory collector'; Source = 'RemoteDirectoryScript'; Explain = @'
+A domain controller is read with what it has itself - no ActiveDirectory module, no module at
+all (lib\48-Directory.ps1).  RemoteDirectoryScript runs ON the domain controller and reads:
+  ADSI (LDAP)   the directory of the server it runs on, bound by the server's own name: the
+                rootDSE, the operations master roles (fSMORoleOwner on five objects), paged
+                searches with bit filters on userAccountControl, group members in chain
+                (the matching rule 1.2.840.113556.1.4.1941), permissions as a searcher returns
+                them (SecurityMasks = Dacl), and two computed attributes the directory keeps
+                for itself: msDS-NCReplInboundNeighbors (replication, partner by partner) and
+                msDS-ReplAttributeMetaData (the stamp a backup leaves on dSASignature)
+  the registry  LDAP signing and channel binding, certificate mapping, SysvolReady
+  WMI           the directory's services and the Print Spooler, the two shares, the state of
+                SYSVOL under DFS Replication ([wmisearcher], no cmdlet)
+  dcdiag.exe    /skip:SystemLog, stopped after 150 s; "passed test" / "failed test" lines
+  SYSVOL        the Group Policy Preferences files, for cpassword
+WHO IS ASKED - Get-ServerDirectory
+  Only servers the Settings (or Inventory) collector has shown to be domain controllers are
+  called; a server known not to be one gets its answer (AD.Read=NotDomainController) without a
+  call; a server marked "winrm: no" keeps what its own local copy wrote.  The self-check runs
+  the collector too (Get-SelfCheckSteps), so a domain controller that refuses WinRM is read
+  by its local copy and reaches the hub in its results file.
+THREE SCOPES - New-Check -Applies (Invoke-Checks decides)
+  dc       every domain controller, on its own
+  domain   once per domain: on the domain controller whose rootDSE names it as PDC emulator
+           (AD.IsPdc); the others answer "judged once for the domain, on ..."
+  forest   once per forest: on the PDC emulator of the root domain (AD.IsRootDomain)
+  The collector does the domain's sweeps only where they will be judged.
+WHAT TRAVELS
+  "AD.Key=Value" lines, merged into the same table as the Settings lines ($c.S).  A list is
+  AD.<Key> (the first 40 names) with AD.<Key>.Count; a read that failed is AD.<Key>=ERROR: ...
+  Each read is a step of its own (Invoke-Step): one that throws, or that the 240 s budget no
+  longer allows, costs only itself.  Get-DirectoryFact turns a key into Unread / Value /
+  Names / Count for a check; unread is Amber with the reason, never a pass.
+THE CHECKS
+  H-AD-01..10 (Health), SEC-ADC-01..04 and SEC-AD-01..33 (Security).  Most are "this list
+  must be empty": one test block ($script:DirectoryListTest) reads its key and its words
+  from the check's -Data.  The privileged accounts (SEC-AD-13..18) share one read:
+  Get-DirectoryPrivileged.
+ON THE HEALTH TAB - all from the saved answer (Get-DirectoryTable), no server asked again
+  The grid has no column for the directory: its checks count in Red / Amber / Green.
+  Get-DirectorySummaryText        the Directory fact at the head of the details page:
+                                  "dcdiag 29/29", then by a word each what else of H-AD-02..10
+                                  is red or amber, two named and the rest counted
+  Get-DirectoryDetailsSections    the server's details page: its place in the domain, dcdiag
+                                  test by test (Get-DirectoryDcdiagRows), every inbound link
+                                  (Get-DirectoryReplicationRows), role holders, services
+  Get-DirectoryReportSections     the same as three tables of the Health report
+  SEC-CRD-03 reads AD.Admin500 on a domain controller: it has no local Administrator.
+Run the collector on a domain controller:  & $RemoteDirectoryScript
+'@ }
+
+    [pscustomobject]@{ Title = 'E11. SQL Server and Certificate Services - the Roles collector'; Source = 'RemoteRolesScript'; Explain = @'
+Two roles are read from the server that holds them, with every Health check, every Security
+audit and the self-check (lib\49-ServerRoles.ps1).  RemoteRolesScript runs ON every server
+and answers at once where it finds neither (SQL.Read=None, CA.Read=None).
+SQL SERVER - no connection is made to an instance
+  the registry    ...\Microsoft SQL Server\Instance Names\SQL names the instances; under each
+                  instance id: Setup (version, edition), MSSQLServer (LoginMode, AuditLevel,
+                  the data, log and backup folders) and SuperSocketNetLib (TCP, Named Pipes,
+                  ForceEncryption, the certificate's thumbprint)
+  services        the engine, the Agent and the Browser with their accounts (Win32_Service)
+  folders         Get-Acl: who of nearly everybody (Everyone, Authenticated Users, Users,
+                  Domain Users) may reach the data, log and backup folders
+  the Application log, by the instance's own source: its errors of the last hours (823, 824
+                  and 825 are damaged pages), and events 18264 / 18265 / 3041 - a database
+                  backup, a log backup, a backup that failed
+CERTIFICATE SERVICES - ...\Services\CertSvc\Configuration\<name of the CA>
+  EditFlags of the policy module in use, AuditFilter, InterfaceFlags, the CSP's Provider,
+  CRLNextPublish (eight bytes, a time), CACertHash (its certificates, the newest last),
+  Security (its access list: 1 = manage the CA, 2 = issue and manage certificates), and the
+  CertSrv application in the web server's applicationHost.config.
+  A binary value handed back by a function arrives as its bytes one by one: the collector
+  counts them and puts them together again ([byte[]]) before it reads a time or an access list.
+WHAT TRAVELS
+  "SQL.Key=Value" and "CA.Key=Value" lines in the same table as the Settings lines ($c.S).  A
+  list is rows with ; between them and | between the fields: Get-RoleRows splits them,
+  Get-SqlInstances and Get-RoleCertificate turn a row into an object.
+THE CHECKS - H-SQL-01..03, SEC-SQL-01..07, H-CA-01..03, SEC-CA-01..06
+  Each begins with Get-RoleGate: the role is not on the server = not applicable; it was not
+  read = Amber with the reason; else the check goes on.  The certificate templates are the
+  directory's: SEC-AD-30..33 (topic E10).
+ON THE HEALTH TAB - Get-RolesDetailsSections (the server's page) and Get-RolesReportSections
+  (the report's tables); the grid has no column for a role.
+Run the collector on a server:  (& $RemoteRolesScript 24 7).Lines
 '@ }
 
     # =================================================================  PART F - GUI AND FAULT FINDING
@@ -2043,7 +2198,8 @@ WINRM: NO
   ready-to-carry copy of the toolkit - scripts, catalogues, standards, pictures, settings; never the
   patches, installers, group files or results (Get-ServerCopyItems) - with settings\spoke.json filled
   in with the hub folder and the results folder as the server sees them (Get-ToolkitUncPath: this
-  PC's folders through its administrative share, \\<fqdn>\<drive>$\...), INSTRUCTIONS.txt and, when
+  PC's folders through its administrative share, \\<fqdn>\<drive>$\... - SMB, TCP 445, from the
+  server to this PC, the one port besides WinRM and only when a share is used), INSTRUCTIONS.txt and, when
   asked, Run-SelfCheck.ps1 from New-SelfCheckPackage - a short launcher of the self-check with the
   results folder baked in; the collectors stay the toolkit's own, never copied out, so a self-check
   always matches the hub's version.  Import-ResultsFile

@@ -52,6 +52,20 @@ $script:Quips = @(
 # {0} = the operator's name, filled in when the quip is shown (the Settings tab may have changed it since this file loaded)
 function Get-RandomQuip { return (($script:Quips | Get-Random) -f $script:Config.OperatorName) }
 
+function Set-ButtonFace {
+    # The face every button of the toolkit wears, on the consoles and in the pop-up windows alike: flat, in a colour of its
+    # own (grey when none is asked for), with a one-pixel edge in a darker shade of that colour.  A button left to the
+    # Windows theme can draw as bare text and read as a label (operator screenshots 2026-10-23 for the consoles; the
+    # Software library window 2026-11-19 for the pop-ups, which had been left out).
+    param($Button, [string]$Colour = '')
+    if (-not $Colour) { $Colour = 'Gainsboro' }
+    $Button.BackColor = $Colour; $Button.UseVisualStyleBackColor = $false
+    $Button.FlatStyle = 'Flat'; $Button.FlatAppearance.BorderSize = 1
+    $Button.FlatAppearance.BorderColor = Get-EdgeColour -Colour $Button.BackColor
+    $Button.FlatAppearance.MouseOverBackColor = Get-EdgeColour -Colour $Button.BackColor -Factor 0.93
+    $Button.FlatAppearance.MouseDownBackColor = Get-EdgeColour -Colour $Button.BackColor -Factor 0.84
+}
+
 function New-GuiButton {
     # -ReadOnly buttons stay enabled while an install runs (they only look, never change anything).
     param([string]$Text, [int]$X, [int]$Y, [int]$W = 150, [int]$H = 40, [string]$Colour = '', [scriptblock]$OnClick, [string]$Tip = '', [switch]$ReadOnly)
@@ -61,14 +75,9 @@ function New-GuiButton {
     # can draw as bare text and read as a link (operator screenshots 2026-10-23); a coloured one draws its edges everywhere.
     # The colour is the meaning, the same on every console: blue asks the servers (read-only), red changes them, coral
     # removes, khaki reboots, wheat is the Trellix Agent services, steel blue stages files without installing, green saves
-    # on this PC, grey works on this PC.  The face is flat with a one-pixel edge in a darker shade of its own colour (the
+    # on this PC, grey works on this PC; plum is one button only, the Health console's scripts and tasks audit.  The face is flat with a one-pixel edge in a darker shade of its own colour (the
     # capability brief's look, field review 2026-11) - the colour stays functional, the raised bevel goes.
-    if (-not $Colour) { $Colour = 'Gainsboro' }
-    $b.BackColor = $Colour; $b.UseVisualStyleBackColor = $false
-    $b.FlatStyle = 'Flat'; $b.FlatAppearance.BorderSize = 1
-    $b.FlatAppearance.BorderColor = Get-EdgeColour -Colour $b.BackColor
-    $b.FlatAppearance.MouseOverBackColor = Get-EdgeColour -Colour $b.BackColor -Factor 0.93
-    $b.FlatAppearance.MouseDownBackColor = Get-EdgeColour -Colour $b.BackColor -Factor 0.84
+    Set-ButtonFace -Button $b -Colour $Colour
     if ($Tip) { $script:Gui['Tips'].SetToolTip($b, $Tip) }
     if ($ReadOnly) { $b.Tag = 'readonly' }
     $b.Add_Click($OnClick)
@@ -501,8 +510,68 @@ function New-ConsoleBanner {
     $s.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Italic)
     $s.Location = New-Object System.Drawing.Point(520, 24)
     $banner.Controls.Add($s)
+    # A window that was not started with "Run as administrator": said in the top right corner of every console, for as
+    # long as the window is open.  A click opens the page that lists what does not run then (Show-UnelevatedHelp).
+    $warn = $null
+    if (-not (Test-ToolkitAdmin)) {
+        $warn = New-Object System.Windows.Forms.Label
+        $warn.Text = 'NOT ELEVATED'; $warn.AutoSize = $false; $warn.Size = New-Object System.Drawing.Size(124, 20); $warn.TextAlign = 'MiddleCenter'
+        $warn.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+        $warn.BackColor = 'Khaki'; $warn.ForeColor = 'Black'; $warn.Cursor = [System.Windows.Forms.Cursors]::Hand
+        # kept at the same distance from the right edge when the window is resized, and above the subtitle's line: in a
+        # narrow window a long subtitle runs on underneath it, not behind it
+        $warn.Location = New-Object System.Drawing.Point(($banner.Width - 136), 4)
+        $warn.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+        $warn.Add_Click({ Show-UnelevatedHelp })
+        if ($script:Gui['Tips']) { $script:Gui['Tips'].SetToolTip($warn, 'Not run as administrator: click for what does not run') }
+        $banner.Controls.Add($warn); $warn.BringToFront()
+    }
     $Tab.Controls.Add($banner)
-    return [pscustomobject]@{ Panel = $banner; Title = $t; Subtitle = $s }
+    return [pscustomobject]@{ Panel = $banner; Title = $t; Subtitle = $s; Warning = $warn }
+}
+
+function Get-UnelevatedHelpHtml {
+    # The page behind the NOT ELEVATED mark of a console: what a window without administrator rights cannot read or do -
+    # on the computer it runs on only - whether that concerns this computer today, and how to get the rights.
+    $me = [string]$env:COMPUTERNAME
+    $mine = @(foreach ($g in @($script:Groups)) { if (@($g.Servers | Where-Object { Test-ThisComputer -Name $_ }).Count -gt 0) { [string]$g.Name } })
+    $state = ('{0} is in no group file: nothing below applies until it is added to one.' -f $me)
+    if ($script:SpokeMode) { $state = ('This window is the copy of the toolkit on {0}: everything it reads and does is on this computer, so all of the below applies.' -f $me) }
+    elseif ($mine.Count -gt 0) { $state = ('{0} is in {1}: the below applies to its row in every console.' -f $me, ($mine -join ', ')) }
+    $unread = @(
+        [pscustomobject]@{ 'Not read' = 'The Security log: failed logons (event 4625) and lockouts (4740)'; 'Shows as' = 'not read'; Where = 'Health: Failed logons, Lockouts' },
+        [pscustomobject]@{ 'Not read' = 'Group Policy results (RSoP): which GPO sets which value'; 'Shows as' = 'RSoP not readable'; Where = 'Health: Group Policy; Security: GPO recommendations' },
+        [pscustomobject]@{ 'Not read' = 'Audit policy, user rights and security options (auditpol, secedit)'; 'Shows as' = 'not collected'; Where = 'Security: the audit, rights and policy checks' },
+        [pscustomobject]@{ 'Not read' = 'WinRM service and client settings; the size and retention of the Security log'; 'Shows as' = 'not collected'; Where = 'Security: remote access and logging checks' },
+        [pscustomobject]@{ 'Not read' = 'Windows features: SMB 1, .NET Framework 3.5, Telnet client, Internet Explorer'; 'Shows as' = 'could not read'; Where = 'Security: operating system checks' },
+        [pscustomobject]@{ 'Not read' = 'Secure Boot, the time source'; 'Shows as' = 'could not read'; Where = 'Security: platform checks; SOE standards: the time source' },
+        [pscustomobject]@{ 'Not read' = 'On a domain controller: dcdiag, which needs an administrator'; 'Shows as' = 'failed tests, or not read'; Where = 'Health: Domain controller' })
+    $undone = @(
+        'Installing a patch, and installing, updating or removing software: each run is a task Windows lets only an administrator register, so the run fails when it starts.',
+        'Stopping and starting the Trellix Agent services.',
+        'A command on the Commands tab runs here without administrator rights.',
+        'About tab, Self-sign on this PC: the certificate is trusted for this user only, not for every user of the PC.')
+    $how = @(
+        'Close the toolkit.',
+        'Open Windows PowerShell with "Run as administrator" (right-click it in the Start menu).',
+        'Start the toolkit from that window: powershell.exe -ExecutionPolicy Bypass -File .\Start-WinRMToolkit.ps1',
+        'The NOT ELEVATED mark is gone, and the next check reads this computer in full.')
+    $facts = @(@('Computer', $me), @('Account', (Get-OperatorIdentity)), @('Administrator rights', 'no - this window was not started with "Run as administrator"'))
+    return (New-DetailsHtml -Title 'Not run as administrator' -Subtitle 'what this window cannot read or do on the computer it runs on' -Console 'About' -Facts $facts -Sections @(
+        @{ Heading = 'What it concerns'; Lines = @(
+            'Windows gives a window that was not started with "Run as administrator" a session without administrator rights, whatever groups the account is in.',
+            'Every other server is read and worked on in full: over WinRM an administrator gets every right there. Nothing below concerns them.',
+            $state,
+            'A row read this way says so: its Worst or Top red text begins with NOT ALL READ (not run as administrator).') },
+        @{ Heading = 'Not read on this computer'; Rows = $unread; Columns = @('Not read', 'Shows as', 'Where') },
+        @{ Heading = 'Not done on this computer'; Lines = $undone },
+        @{ Heading = 'To get the rights'; Lines = $how }))
+}
+
+function Show-UnelevatedHelp {
+    # The click on a console's NOT ELEVATED mark
+    if ($script:Gui['Busy']) { Write-PatchLog 'Busy - the page is available again when the current action finishes' 'WARN'; return }
+    Show-DetailsWindow -Title 'Not run as administrator' -Html (Get-UnelevatedHelpHtml)
 }
 
 function New-GridHeader {
@@ -536,7 +605,7 @@ function New-TickList {
     $titleLabel = New-Object System.Windows.Forms.Label; $titleLabel.Dock = 'Top'; $titleLabel.Height = 24; $titleLabel.Text = $Title; $titleLabel.Padding = New-Object System.Windows.Forms.Padding(4, 6, 0, 0)
     $filterBar = New-Object System.Windows.Forms.Panel; $filterBar.Dock = 'Top'; $filterBar.Height = 28
     $filter = New-Object System.Windows.Forms.TextBox; $filter.Location = New-Object System.Drawing.Point(4, 4); $filter.Width = $Width - 8; $filter.Tag = $state
-    $script:Gui['Tips'].SetToolTip($filter, 'Type part of a name to shorten the list; ticks are kept while you filter.')
+    $script:Gui['Tips'].SetToolTip($filter, 'Type part of a name to filter; ticks are kept')
     $filter.Add_TextChanged({ Update-TickListItems -State $this.Tag })
     $filterBar.Controls.Add($filter)
     $list = New-Object System.Windows.Forms.CheckedListBox; $list.Dock = 'Fill'; $list.CheckOnClick = $true; $list.IntegralHeight = $false; $list.Tag = $state
@@ -548,9 +617,9 @@ function New-TickList {
         if ($st.OnChange) { & $st.OnChange }
     })
     $btns = New-Object System.Windows.Forms.Panel; $btns.Dock = 'Bottom'; $btns.Height = 38
-    $all = New-Object System.Windows.Forms.Button; $all.Text = 'Tick shown'; $all.Location = New-Object System.Drawing.Point(4, 5); $all.Size = New-Object System.Drawing.Size(100, 28); $all.Tag = $state
+    $all = New-Object System.Windows.Forms.Button; $all.Text = 'Tick shown'; $all.Location = New-Object System.Drawing.Point(4, 5); $all.Size = New-Object System.Drawing.Size(100, 28); $all.Tag = $state; Set-ButtonFace -Button $all
     $all.Add_Click({ Set-TickListShown -State $this.Tag -Checked $true })
-    $none = New-Object System.Windows.Forms.Button; $none.Text = 'Untick shown'; $none.Location = New-Object System.Drawing.Point(110, 5); $none.Size = New-Object System.Drawing.Size(100, 28); $none.Tag = $state
+    $none = New-Object System.Windows.Forms.Button; $none.Text = 'Untick shown'; $none.Location = New-Object System.Drawing.Point(110, 5); $none.Size = New-Object System.Drawing.Size(100, 28); $none.Tag = $state; Set-ButtonFace -Button $none
     $none.Add_Click({ Set-TickListShown -State $this.Tag -Checked $false })
     $btns.Controls.AddRange(@($all, $none))
     $panel.Controls.AddRange(@($list, $filterBar, $titleLabel, $btns)); $list.BringToFront()
@@ -656,7 +725,8 @@ function New-DialogButtonBar {
     # A control anchored Right keeps the distance to its parent's edge AS IT WAS when the anchor was set, so the
     # bar must already have the dialog's width before the buttons are placed - a Panel is 200 px wide until it
     # is docked, and a button placed at X 880 in it ends up far outside the dialog (field finding, 2026-10-19).
-    # $Buttons: @{ Text; Result ('OK', 'Cancel', 'Yes', 'No' - optional); Width (optional) }, left to right.
+    # $Buttons: @{ Text; Result ('OK', 'Cancel', 'Yes', 'No' - optional); Width, Colour, Tip (optional) }, left to right.
+    # Every button wears the toolkit's flat face (Set-ButtonFace), grey unless a colour is asked for.
     # Returns @{ Panel; Buttons } with the Button objects in the same order.
     param($Dialog, [object[]]$Buttons, [int]$Height = 44, [string]$Hint = '')
     $bar = New-Object System.Windows.Forms.Panel
@@ -674,6 +744,8 @@ function New-DialogButtonBar {
         $x -= $w
         $b = New-Object System.Windows.Forms.Button
         $b.Text = [string]$spec.Text; $b.Size = New-Object System.Drawing.Size($w, 30); $b.Location = New-Object System.Drawing.Point($x, 7); $b.Anchor = 'Top,Right'
+        Set-ButtonFace -Button $b -Colour ([string]$spec.Colour)
+        if ($spec.Tip -and $script:Gui -and $script:Gui['Tips']) { $script:Gui['Tips'].SetToolTip($b, [string]$spec.Tip) }
         if ($spec.Result) { $b.DialogResult = [string]$spec.Result }
         $bar.Controls.Add($b)
         $made = @($b) + $made
@@ -925,7 +997,7 @@ function Show-ToolkitGui {
     # Stop: shown only while a read-only collector runs - the servers that have not answered are given up (nothing is
     # changed on them); an install is never stoppable from here (06-Install waits its own way and never stops a job)
     $stop = New-Object System.Windows.Forms.ToolStripButton
-    $stop.Text = 'Stop waiting'; $stop.Visible = $false; $stop.ToolTipText = 'Give up on the servers that have not answered yet (read-only checks only; nothing is changed on them)'
+    $stop.Text = 'Stop waiting'; $stop.Visible = $false; $stop.ToolTipText = 'Stop waiting for the servers that have not answered (read-only)'
     $stop.Add_Click({ $script:Gui['StopRequested'] = $true; $this.Enabled = $false; $this.Text = 'stopping...' })
     [void]$strip.Items.Add($statusLabel); [void]$strip.Items.Add($stop); [void]$strip.Items.Add($progress)
     $script:Gui['StatusLabel'] = $statusLabel; $script:Gui['Progress'] = $progress; $script:Gui['StopButton'] = $stop
@@ -1172,14 +1244,14 @@ function New-CodeTourTab {
             if ($e -and $e.Image) { $p = Join-Path $script:RootFolder $e.Image; if (Test-Path -LiteralPath $p) { Start-Process $p } }
         } }
     $bar.Controls.Add($picButton)
-    $bar.Controls.Add((New-GuiButton -Text 'Save page as HTML...' -X 333 -Y 6 -W 150 -H 28 -ReadOnly -Tip 'This topic as one HTML file (picture included) - to read in a browser or print' -OnClick {
+    $bar.Controls.Add((New-GuiButton -Text 'Save page as HTML...' -X 333 -Y 6 -W 150 -H 28 -ReadOnly -Tip 'This topic as one HTML file, picture included' -OnClick {
         Invoke-GuiAction -Name 'Save tour page' -ReadOnly -Action {
             if (-not (Test-GuiDialogAllowed 'The save dialog')) { return }
             $title = [string]$script:CodeTour[[int]$script:Gui['TourIndex']].Title
             $p = Save-HtmlAs -Html $script:Gui['TourHtml'] -BaseName ('CodeTour-' + ($title -split '\.')[0]) -Owner $script:Gui['Form'] -What 'topic'
             if ($p) { $script:Gui['TourPosition'].Text = 'Saved: ' + $p }
         } }))
-    $bar.Controls.Add((New-GuiButton -Text 'Save whole tour as HTML...' -X 488 -Y 6 -W 185 -H 28 -ReadOnly -Tip 'Every topic in one HTML file with a contents list - for training or printing' -OnClick {
+    $bar.Controls.Add((New-GuiButton -Text 'Save whole tour as HTML...' -X 488 -Y 6 -W 185 -H 28 -ReadOnly -Tip 'Every topic in one HTML file, with a contents list' -OnClick {
         Invoke-GuiAction -Name 'Save whole tour' -ReadOnly -Action {
             if (-not (Test-GuiDialogAllowed 'The save dialog')) { return }
             $p = Save-HtmlAs -Html (Export-CodeTourHtml) -BaseName 'CodeTour-all' -Owner $script:Gui['Form'] -What 'tour'

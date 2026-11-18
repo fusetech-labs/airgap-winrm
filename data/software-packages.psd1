@@ -13,7 +13,8 @@
     #  (it shows as * NEW under the installers) - a form filled from the file writes
     #  the entry at the end of the Packages list.  To change an entry later,
     #  press Edit... next to one of its installers: the same form rewrites that
-    #  entry only, comments kept.  Hand edits work too.
+    #  entry only, comments kept.  To take one out: Software library... >
+    #  Remove package... (its text goes to the log).  Hand edits work too.
     #
     #  Fields
     #    Id            the package's name in the tool, unique, any text:
